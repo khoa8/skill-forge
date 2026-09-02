@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SkillForge — documentation → validated AI Agent Skills</title>
+  <meta name="description" content="Turn documentation, text, or repositories into validated, portable AI Agent Skills. Generate, inspect, deterministically validate, export." />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚒️</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">⚒</span>
+      <div>
+        <h1>SkillForge</h1>
+        <p class="tagline">Documentation → validated, portable AI Agent Skills</p>
+      </div>
+    </div>
+    <div class="health" id="health" title="Provider status">
+      <span class="pill" id="provider-pill">checking…</span>
+    </div>
+  </header>
+
+  <nav class="stepper" id="stepper" aria-label="Pipeline stages">
+    <div class="step" data-stage="source"><span class="dot"></span>Source</div>
+    <div class="step" data-stage="ingest"><span class="dot"></span>Analyze</div>
+    <div class="step" data-stage="generate"><span class="dot"></span>Generate</div>
+    <div class="step" data-stage="validate"><span class="dot"></span>Validate</div>
+    <div class="step" data-stage="preview"><span class="dot"></span>Preview</div>
+    <div class="step" data-stage="export"><span class="dot"></span>Export</div>
+  </nav>
+
+  <main class="layout">
+    <!-- LEFT: source input -->
+    <section class="panel" id="source-panel" aria-label="Source">
+      <div class="panel-head">
+        <h2>1 · Source</h2>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="sample" role="tab">Bundled samples</button>
+          <button class="tab" data-tab="text" role="tab">Paste Markdown / text</button>
+        </div>
+      </div>
+
+      <div class="tab-body" id="tab-sample">
+        <p class="hint">Deterministic demo material — the full workflow runs offline, no API key required.</p>
+        <div id="sample-list" class="sample-list"></div>
+      </div>
+
+      <div class="tab-body hidden" id="tab-text">
+        <p class="hint">Paste documentation or instructional Markdown. Headings, fenced commands, ordered procedures, and warnings are detected automatically.</p>
+        <label class="field-label" for="source-name">Source name (optional)</label>
+        <input id="source-name" type="text" maxlength="200" placeholder="e.g. My API docs" />
+        <label class="field-label" for="source-text">Source content</label>
+        <textarea id="source-text" rows="14" placeholder="# My Project&#10;&#10;## Setup&#10;1. Install the CLI…&#10;"></textarea>
+        <p class="hint" id="text-stats">0 characters</p>
+      </div>
+
+      <div class="advanced">
+        <label class="field-label" for="requested-name">Skill name override (optional)</label>
+        <input id="requested-name" type="text" maxlength="80" placeholder="auto-generated from title" />
+      </div>
+
+      <button id="generate-btn" class="btn primary big" disabled>Loading…</button>
+      <div id="generate-error" class="error-box hidden" role="alert"></div>
+
+      <div class="progress-box hidden" id="progress-box">
+        <h3>Pipeline</h3>
+        <ul id="progress-log" class="progress-log"></ul>
+      </div>
+    </section>
+
+    <!-- RIGHT: results -->
+    <section class="panel" id="result-panel" aria-label="Results">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">⚒</div>
+        <h2>Give SkillForge a source and receive a validated portable Agent Skill</h2>
+        <ol class="howto">
+          <li>Pick a bundled sample (or paste your own Markdown).</li>
+          <li>Click <strong>Generate skill</strong> — watch Source → Analyze → Generate → Validate run.</li>
+          <li>Inspect every generated file, then export a real ZIP.</li>
+        </ol>
+        <p class="hint">Generated instructions are grounded in your source: every claim carries line-range provenance, and gaps are marked instead of invented.</p>
+      </div>
+
+      <div class="results hidden" id="results">
+        <!-- validation summary -->
+        <div class="result-head">
+          <div>
+            <h2 id="skill-title">—</h2>
+            <p class="muted" id="skill-subtitle"></p>
+          </div>
+          <div class="badges" id="skill-badges"></div>
+        </div>
+
+        <div id="validation-banner" class="validation-banner"></div>
+        <div id="validation-checks" class="checks"></div>
+
+        <!-- files -->
+        <div class="result-head">
+          <h2>Generated files</h2>
+          <span class="muted" id="file-count"></span>
+        </div>
+        <div class="files-grid">
+          <ul id="file-list" class="file-list" aria-label="Generated files"></ul>
+          <div class="file-view">
+            <div class="file-view-head">
+              <span id="file-view-path" class="mono"></span>
+              <span id="file-view-meta" class="muted"></span>
+            </div>
+            <p id="file-view-purpose" class="hint"></p>
+            <p id="file-view-provenance" class="hint provenance"></p>
+            <pre id="file-view-content" class="mono"></pre>
+          </div>
+        </div>
+
+        <!-- export -->
+        <div class="result-head">
+          <h2>Export</h2>
+        </div>
+        <div id="export-cards" class="export-cards"></div>
+        <div id="export-note" class="hint"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>SkillForge MVP — runs fully offline with the bundled demo provider.</span>
+    <span class="muted">Generated content is grounded in your source; always review before use. Validation is deterministic and never skipped silently.</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

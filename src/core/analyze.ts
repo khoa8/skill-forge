@@ -204,7 +204,19 @@ export function analyzeSource(normalized: NormalizedSource): SourceAnalysis {
     }
 
     if (CALLOUT_RE.test(raw) || INLINE_WARNING_RE.test(raw)) {
-      warningLines.push(raw.replace(/^\s{0,3}>\s*/, "").trim());
+      // Merge wrapped continuation lines so warnings are not truncated
+      // mid-sentence; stop at a blank line or sentence-ending punctuation.
+      let text = raw.replace(/^\s{0,3}>\s*/, "").trim();
+      let j = i + 1;
+      while (j < lines.length && j - i < 4) {
+        const next = lines[j]!.trim();
+        if (next.length === 0) break;
+        if (/[.!?:]$/.test(text)) break;
+        if (next.match(HEADING_RE) || next.match(ORDERED_ITEM_RE) || isFence(next)) break;
+        text += " " + next.replace(/^\s{0,3}>\s*/, "");
+        j++;
+      }
+      warningLines.push(text);
     }
   }
   flushOrdered();

@@ -210,14 +210,30 @@ function constraintSentences(analysis: SourceAnalysis, max: number): string[] {
   const pitfallRe = /\b(troubleshoot\w*|faq|pitfall|gotcha|common (?:issue|problem|error))\b/i;
   for (const section of analysis.sections) {
     if (pitfallRe.test(section.heading)) continue;
-    const flat = section.text
-      .split("\n")
-      .filter((l) => !HEADINGISH.test(l))
-      .join(" ");
+    // Drop fenced code blocks so flattened sentences never contain code fences.
+    const proseLines: string[] = [];
+    let inFence = false;
+    for (const line of section.text.split("\n")) {
+      if (/^\s*(`{3,}|~{3,})/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (!inFence && !HEADINGISH.test(line)) proseLines.push(line);
+    }
+    const flat = proseLines.join(" ");
     for (const sentence of flat.split(/(?<=[.!?])\s+(?=[A-Z`*_-])/)) {
       const s = sentence.replace(/\s+/g, " ").trim();
       if (s.length < 12 || s.length > 300) continue;
-      if (CONSTRAINT_SENTENCE_RE.test(s)) {
+      if (s.includes(": ")) {
+        // Prose often joins unrelated statements with colons ("Do X: do Y.").
+        // Evaluate each clause so constraints stay crisp and grounded.
+        for (const clause of s.split(/:\s+/)) {
+          const c = clause.trim();
+          if (c.length >= 12 && c.length <= 300 && CONSTRAINT_SENTENCE_RE.test(c)) {
+            out.push(c);
+          }
+        }
+      } else if (CONSTRAINT_SENTENCE_RE.test(s)) {
         out.push(s);
       }
     }
