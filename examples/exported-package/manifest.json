@@ -1,0 +1,100 @@
+{
+  "schema": "skillforge.manifest/1",
+  "name": "meridian-payments-api",
+  "displayName": "Meridian Payments API",
+  "description": "A REST API for processing payments, refunds, and payouts.",
+  "version": "0.1.0",
+  "generator": "mock",
+  "source": {
+    "name": "Meridian Payments API",
+    "sha256": "d3fda521f7966a7ce90f6f9ebdcec9f6479bd6a83908a3002543765dd1ac7156",
+    "lineCount": 125,
+    "notes": []
+  },
+  "gaps": [],
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "bytes": 1343,
+      "sha256": "d05dc7d1756b393bbc77df5efa102cabbee4e174be692accee5eddd3c4840988"
+    },
+    {
+      "path": "evals/evals.json",
+      "bytes": 1892,
+      "sha256": "7a44c12f8c3f815912b5e377ea1130e5908bcb99b4dbecfd3f5ca714bd3118e2"
+    },
+    {
+      "path": "evals/README.md",
+      "bytes": 357,
+      "sha256": "cd08a0b02003f51baf181ec0d6c9055c23cf4fcbb08de65c2325238dacf1210a"
+    },
+    {
+      "path": "examples/creating-a-payment-bash.sh",
+      "bytes": 329,
+      "sha256": "dffc37009e3a42ede8fb2c09fe916c191ffe60b10e689c65e11d44fe1595f29d"
+    },
+    {
+      "path": "examples/creating-a-payment-json.json",
+      "bytes": 110,
+      "sha256": "a23a644cf19d588fe940ec14b42e2b2a9b5d293ee6d41761aa9e0dc62d862f25"
+    },
+    {
+      "path": "examples/refunding-a-payment-bash.sh",
+      "bytes": 264,
+      "sha256": "13c745e0d547b9b013b29ee2df25306cc8b5c89580665e3f02a369e14453a2ab"
+    },
+    {
+      "path": "references/authentication.md",
+      "bytes": 657,
+      "sha256": "d0552a408fe46afc38da55d8c29ba1978198a26432d19669f8d919ad8c52319e"
+    },
+    {
+      "path": "references/creating-a-payment.md",
+      "bytes": 924,
+      "sha256": "19417f90cd710e7daab7be7df52a15ecf205e32aef43c8701e4b4b972901ee50"
+    },
+    {
+      "path": "references/error-handling.md",
+      "bytes": 1063,
+      "sha256": "a96437e63e235145fdf719eb2946369665973eb7419cf5a1b20b3a5b5b925046"
+    },
+    {
+      "path": "references/rate-limits.md",
+      "bytes": 386,
+      "sha256": "0c7a9d4ce8701aee21f856d446e70fb34130339ebbb3c6a7f62591cc716fb5d5"
+    },
+    {
+      "path": "references/refunding-a-payment.md",
+      "bytes": 763,
+      "sha256": "061f56c445e71e41b0289aec885b17daf15398272b50804ac9c428758d2e776c"
+    },
+    {
+      "path": "references/test-cards.md",
+      "bytes": 377,
+      "sha256": "4340e17b2ab6a4694340d90da8c7d1da47fc28e5ff0449cccb0a22fcd3bb64c8"
+    },
+    {
+      "path": "references/troubleshooting.md",
+      "bytes": 767,
+      "sha256": "ad22a3a715c76dcb159c5134117afc4200bc83cd90eca13046629ba825f2d2f4"
+    },
+    {
+      "path": "references/webhooks.md",
+      "bytes": 500,
+      "sha256": "2ddda2825812dd5d62b6db98fbc986140588f11769552c1c98f320b510eb78da"
+    },
+    {
+      "path": "SKILL.md",
+      "bytes": 2810,
+      "sha256": "f4b768852fe6a7b16f1d4da08e9be31986185e3ed77cb127f15f812f7e96e28c"
+    },
+    {
+      "path": "workflows/refunding-a-payment.md",
+      "bytes": 487,
+      "sha256": "b536b8545838665db7bd775e9f6e964ec26ef0026edd2b2b3b2428510fa0f2f5"
+    }
+  ],
+  "exportNotes": [
+    "Added AGENTS.md wrapper for generic agent ecosystems."
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "schema": "skillforge.evals/1",
+  "items": [
+    {
+      "id": "eval-1",
+      "kind": "grounding",
+      "prompt": "Does the skill describe \"Authentication\"?",
+      "expect": "SKILL.md or references/authentication.md must cover this topic (source lines 8–21)."
+    },
+    {
+      "id": "eval-2",
+      "kind": "grounding",
+      "prompt": "Does the skill describe \"Creating a payment\"?",
+      "expect": "SKILL.md or references/creating-a-payment.md must cover this topic (source lines 23–48)."
+    },
+    {
+      "id": "eval-3",
+      "kind": "grounding",
+      "prompt": "Does the skill describe \"Refunding a payment\"?",
+      "expect": "SKILL.md or references/refunding-a-payment.md must cover this topic (source lines 57–71)."
+    },
+    {
+      "id": "eval-4",
+      "kind": "grounding",
+      "prompt": "Does the skill describe \"Error handling\"?",
+      "expect": "SKILL.md or references/error-handling.md must cover this topic (source lines 73–90)."
+    },
+    {
+      "id": "eval-5",
+      "kind": "grounding",
+      "prompt": "Does the skill describe \"Rate limits\"?",
+      "expect": "SKILL.md or references/rate-limits.md must cover this topic (source lines 92–96)."
+    },
+    {
+      "id": "eval-6",
+      "kind": "grounding",
+      "prompt": "Does the skill describe \"Webhooks\"?",
+      "expect": "SKILL.md or references/webhooks.md must cover this topic (source lines 98–104)."
+    },
+    {
+      "id": "eval-7",
+      "kind": "procedure",
+      "prompt": "Can the agent execute the \"Refunding a payment\" procedure end to end?",
+      "expect": "workflows/refunding-a-payment.md lists 4 steps matching the source."
+    },
+    {
+      "id": "eval-8",
+      "kind": "grounding",
+      "prompt": "Do any commands in the skill appear in the source?",
+      "expect": "Commands must be traceable to the source (detected 7 command lines)."
+    }
+  ]
+}

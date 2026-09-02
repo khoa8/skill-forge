@@ -1,0 +1,26 @@
+# Exporters
+
+Exporters are the only place vendor-specific format differences live (AGENTS.md §5). The generation pipeline never branches per vendor.
+
+## Supported targets
+
+| Target | Label | Layout | Format basis (what we verified against) |
+| --- | --- | --- | --- |
+| `claude-code` | Claude Code | `<skill-id>/SKILL.md` with `name` + `description` YAML front matter, plus canonical supporting files (`references/`, `workflows/`, `examples/`, `evals/`, `manifest.json`) | Anthropic Agent Skills format: `name` ≤64 chars lowercase-hyphen, `description` ≤1024 chars. The exporter enforces these constraints and rewrites front matter if the id drifted. Structure verified by this repo's tests. |
+| `generic` | Generic (AGENTS.md) | Same as canonical plus a root `AGENTS.md` orientation wrapper | The AGENTS.md convention: a root markdown instruction file any agent can read. The wrapper is synthesized from the canonical plan (grounded). Verified by this repo's tests. |
+
+**Honesty rule:** we claim only what is tested. Both exporters are covered by unit + end-to-end tests (structure, front-matter constraints, manifest resync, ZIP round-trip). Live behavior inside Claude Code / other agents has not been evaluated in this repository.
+
+## Behavior details
+
+- **Manifest resync:** when an exporter adds files (e.g. `AGENTS.md`), it regenerates `manifest.json` so the inventory stays consistent — exported packages still pass deterministic validation.
+- **ZIP safety:** every entry passes `safePackagePath`; traversal/absolute/duplicate entries abort the export with `ExportError`. Root folder is the slugified skill id.
+- **Unsupported targets:** `exportPackage(skill, "bogus")` throws `export_target_unsupported` with the supported list; the HTTP API returns 400 with `supported: [...]`.
+- **Validation gate:** the export endpoint re-runs deterministic validation (with the chosen target applied) and refuses packages with errors via HTTP 422 before any bytes are produced.
+
+## Adding an exporter
+
+1. Add the target id to `ExportTarget` (types.ts) and a function in `src/core/export/exporters.ts`.
+2. Register it in `EXPORTERS` and document it in `EXPORT_TARGET_INFO` with a real `formatBasis`.
+3. Add tests: structure, front matter constraints, manifest resync, ZIP round-trip.
+4. Only then list it in the UI (the UI reads `EXPORT_TARGET_INFO`, so this is automatic).

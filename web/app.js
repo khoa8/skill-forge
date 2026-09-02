@@ -23,7 +23,7 @@ async function init() {
   await loadHealth();
   await Promise.all([loadSamples(), loadExporters()]);
   bindEvents();
-  $("#generate-btn").disabled = !(state.activeTab === "sample" && state.selectedSampleId);
+  updateGenerateButton();
 }
 
 async function loadHealth() {
@@ -223,22 +223,25 @@ async function consumeNdjson(res, onEvent) {
   }
 }
 
-const STAGE_LABEL = { ingest: "analyze", analyze: "analyze", generate: "generate", validate: "validate" };
+// Pipeline stage → stepper element (the "Analyze" step covers ingest+analyze).
+const STEP_FOR_STAGE = { ingest: "ingest", analyze: "ingest", generate: "generate", validate: "validate" };
+// Raw pipeline stage names for the progress log.
+const LOG_LABEL = { ingest: "ingest", analyze: "analyze", generate: "generate", validate: "validate" };
 
 function handlePipelineEvent(ev) {
   if (ev.type === "stage") {
-    const label = STAGE_LABEL[ev.stage] ?? ev.stage;
+    const step = STEP_FOR_STAGE[ev.stage] ?? ev.stage;
     if (ev.status === "start") {
-      setStep(label, "active");
-      logProgress(label, "running…", null, false);
+      setStep(step, "active");
+      logProgress(LOG_LABEL[ev.stage] ?? ev.stage, "running…", null, false);
     } else if (ev.status === "done") {
-      setStep(label, "done");
-      logProgress(label, ev.detail ?? "done", ev.ms, false);
+      setStep(step, "done");
+      logProgress(LOG_LABEL[ev.stage] ?? ev.stage, ev.detail ?? "done", ev.ms, false);
     }
   } else if (ev.type === "error") {
-    const label = STAGE_LABEL[ev.stage] ?? ev.stage ?? "pipeline";
-    setStep(label, "error");
-    logProgress(label, `${ev.message} [${ev.code}]`, null, true);
+    const step = STEP_FOR_STAGE[ev.stage] ?? ev.stage ?? "ingest";
+    setStep(step, "error");
+    logProgress(LOG_LABEL[ev.stage] ?? ev.stage ?? "pipeline", `${ev.message} [${ev.code}]`, null, true);
     showFatal(`${ev.message} (stage: ${ev.stage}, code: ${ev.code})`);
   } else if (ev.type === "result") {
     setStep("preview", "done");
