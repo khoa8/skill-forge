@@ -6,6 +6,7 @@
  * generation pipeline never branches per vendor. Each exporter documents what
  * it verified the output against, and unsupported targets are refused.
  */
+import JSZip from "jszip";
 import type { CanonicalSkill, ExportTarget, SkillFile } from "../types.js";
 import { joinPackagePath, safePackagePath, sha256, slugify } from "../util.js";
 
@@ -236,14 +237,7 @@ interface ZipInstance {
 }
 
 export async function buildZip(exported: ExportedPackage): Promise<ZipResult> {
-  const mod = await import("jszip");
-  const candidate: unknown = (mod as { default?: unknown }).default ?? mod;
-  const JSZipCtor =
-    typeof candidate === "function" ? candidate : (candidate as { JSZip?: unknown }).JSZip;
-  if (typeof JSZipCtor !== "function") {
-    throw new ExportError("Failed to load the ZIP library.", "export_zip_lib_missing");
-  }
-  const zip = new (JSZipCtor as new () => ZipInstance)();
+  const zip = new JSZip() as unknown as ZipInstance;
   const root = slugify(exported.skillName, 48);
   const entries: string[] = [];
   const seen = new Set<string>();

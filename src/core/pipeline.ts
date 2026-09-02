@@ -21,20 +21,16 @@ import { validatePackage } from "./validate.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
 import type { PipelineStage } from "./plan.js";
 
-export interface PipelineEvent {
-  type: "stage" | "result" | "error";
-  stage?: PipelineStage;
-  status?: "start" | "done" | "error";
-  ms?: number;
-  detail?: string;
-  /** Present on `result`. */
-  skill?: CanonicalSkill;
-  analysis?: SourceAnalysis;
-  validation?: ValidationReport;
-  /** Present on `error`. */
-  code?: string;
-  message?: string;
-}
+export type PipelineEvent =
+  | {
+      type: "stage";
+      stage: PipelineStage;
+      status: "start" | "done" | "error";
+      ms?: number;
+      detail?: string;
+    }
+  | { type: "result"; skill: CanonicalSkill; analysis: SourceAnalysis; validation: ValidationReport }
+  | { type: "error"; stage?: PipelineStage; code: string; message: string };
 
 export interface PipelineOptions {
   provider: ProviderId;

@@ -29,7 +29,7 @@ const SHELL_LANGS = new Set([
   "bash", "sh", "shell", "zsh", "console", "terminal", "powershell", "pwsh", "cmd",
 ]);
 const CONSTRAINING_HEADING_RE =
-  /\b(constraint|limitation|caveat|warning|caution|important|note|requirement|prerequisite|pre-?requisite|gotcha|pitfall|troubleshoot\w*|faq|error|security|best practice|don'?t|do not)\b/i;
+  /\b(constraint\w*|limitation\w*|caveat\w*|warning\w*|caution\w*|important|note|requirement\w*|prerequisite\w*|gotcha\w*|pitfall\w*|troubleshoot\w*|faq|error\w*|security|best practice|don'?t|do not)\b/i;
 const CALLOUT_RE = /^\s{0,3}>\s*\[!(WARNING|CAUTION|NOTE|IMPORTANT|TIP)\]/i;
 const INLINE_WARNING_RE =
   /^\s{0,3}(?:\*\*)?(?:warning|caution|important|note)(?:\*\*)?\s*[:!]\s+/i;
@@ -124,7 +124,8 @@ export function analyzeSource(normalized: NormalizedSource): SourceAnalysis {
   let orderedBuffer: { text: string; line: number }[] = [];
 
   const flushOrdered = () => {
-    if (orderedBuffer.length >= 2) {
+    // Procedures need at least 3 steps to be executable knowledge.
+    if (orderedBuffer.length >= 3) {
       procedures.push({
         title: currentHeading.length > 0 ? currentHeading : "Procedure",
         steps: orderedBuffer.map((s) => ({ text: s.text, line: s.line })),

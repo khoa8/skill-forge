@@ -81,11 +81,14 @@ export function normalizeSource(input: SourceInput): NormalizedSource {
   if (lines.length === 0 || text.trim().length === 0) {
     throw new IngestError("Source is empty after normalization.", "source_empty");
   }
+  // Drop the phantom trailing element so lineCount matches real 1-based lines.
+  const contentLines = lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+  const finalText = contentLines.join("\n");
 
   return {
-    text,
-    lineCount: lines.length,
-    sha256: sha256(text),
+    text: finalText,
+    lineCount: contentLines.length,
+    sha256: sha256(finalText),
     originalName: input.name,
     notes,
   };

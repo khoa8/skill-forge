@@ -126,12 +126,12 @@ export function createApp(config: AppConfig): Express {
             requestedName: body.requestedName,
           },
         )) {
-          if (event.type === "result" && event.skill) {
+          if (event.type === "result") {
             const stored: StoredSkill = {
               id: event.skill.id,
               skill: event.skill,
-              analysis: event.analysis!,
-              validation: event.validation!,
+              analysis: event.analysis,
+              validation: event.validation,
               sourceInput: { type: body.sourceType === "sample" ? "sample" : "text", name, content },
               sourceText: content,
               createdAt: new Date().toISOString(),
