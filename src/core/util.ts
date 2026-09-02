@@ -1,0 +1,52 @@
+import { createHash } from "node:crypto";
+
+/** Lowercase ASCII slug suitable for skill ids, file names, and headings anchors. */
+export function slugify(input: string, maxLength = 48): string {
+  const slug = input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength)
+    .replace(/-+$/g, "");
+  return slug.length > 0 ? slug : "untitled";
+}
+
+export function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Refuse package paths that could escape the package directory (zip-slip),
+ * be absolute, collide, or contain characters that break downstream tooling.
+ * Returns null when the path is unsafe; the caller decides how to report it.
+ */
+export function safePackagePath(rawPath: string): string | null {
+  if (rawPath.length === 0 || rawPath.length > 256) return null;
+  if (rawPath.includes("\\")) return null;
+  if (rawPath.startsWith("/") || /^[a-zA-Z]:/.test(rawPath)) return null;
+  const segments = rawPath.split("/");
+  const clean: string[] = [];
+  for (const seg of segments) {
+    if (seg === "" || seg === ".") continue; // duplicate/empty segments normalized
+    if (seg === "..") return null; // traversal
+    if (/[\u0000-\u001f\u007f]/.test(seg)) return null;
+    clean.push(seg);
+  }
+  if (clean.length === 0) return null;
+  const normalized = clean.join("/");
+  // Reserved names that would be confusing or dangerous at package root.
+  if (clean.length === 1 && (normalized === "." || normalized === "..")) return null;
+  return normalized;
+}
+
+/** Join two already-validated package paths (used by exporters). */
+export function joinPackagePath(...parts: string[]): string {
+  const joined = parts.filter((p) => p.length > 0).join("/");
+  const safe = safePackagePath(joined);
+  if (safe === null) {
+    throw new Error(`Unsafe package path produced by exporter: ${joined}`);
+  }
+  return safe;
+}

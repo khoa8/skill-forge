@@ -1,0 +1,278 @@
+/**
+ * Stage 5/6 — Exporters (vendor adapters) and ZIP packaging.
+ *
+ * Exporters translate the canonical skill package into a specific agent
+ * ecosystem's layout. They are the ONLY place vendor differences live; the
+ * generation pipeline never branches per vendor. Each exporter documents what
+ * it verified the output against, and unsupported targets are refused.
+ */
+import type { CanonicalSkill, ExportTarget, SkillFile } from "../types.js";
+import { joinPackagePath, safePackagePath, sha256, slugify } from "../util.js";
+
+export interface ExporterInfo {
+  target: ExportTarget;
+  label: string;
+  description: string;
+  /** What the output format was checked against — honesty requirement. */
+  formatBasis: string;
+}
+
+export interface ExportedPackage {
+  target: ExportTarget;
+  skillName: string;
+  files: SkillFile[];
+  /** Deterministic notes surfaced in the UI (what the exporter changed). */
+  notes: string[];
+}
+
+export class ExportError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "ExportError";
+  }
+}
+
+/** Regenerate manifest.json so it lists exporter-added files too. */
+function rebuildManifest(
+  baseManifest: string | undefined,
+  files: SkillFile[],
+  extraNotes: string[],
+): SkillFile | null {
+  if (!baseManifest) return null;
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = JSON.parse(baseManifest) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const entries = files
+    .filter((f) => f.path !== "manifest.json")
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((f) => ({
+      path: f.path,
+      bytes: Buffer.byteLength(f.content, "utf8"),
+      sha256: sha256(f.content),
+    }));
+  const updated = {
+    ...manifest,
+    exportNotes: extraNotes,
+    files: entries,
+  };
+  return {
+    path: "manifest.json",
+    content: JSON.stringify(updated, null, 2) + "\n",
+    purpose: "Machine-readable package manifest: source identity, gap list, file inventory with hashes.",
+  };
+}
+
+function withFiles(base: CanonicalSkill, added: SkillFile[], notes: string[]): SkillFile[] {
+  const baseManifest = base.files.find((f) => f.path === "manifest.json")?.content;
+  const files = base.files.filter((f) => f.path !== "manifest.json").concat(added);
+  const manifest = rebuildManifest(baseManifest, files, notes);
+  if (manifest) files.push(manifest);
+  return files;
+}
+
+// ---------------------------------------------------------------------------
+// claude-code exporter — Anthropic Agent Skills layout (skill folder with
+// SKILL.md carrying `name`/`description` YAML front matter, plus supporting
+// files). Format basis: the Agent Skills documented format (name ≤64 chars,
+// lowercase-hyphen slug; description ≤1024 chars).
+// ---------------------------------------------------------------------------
+
+function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
+  const notes: string[] = [];
+  const skillMd = skill.files.find((f) => f.path === "SKILL.md");
+  if (!skillMd) throw new ExportError("Cannot export without SKILL.md.", "export_missing_skill_md");
+
+  // Enforce claude-code front matter constraints (name/description live in SKILL.md).
+  const fm = skillMd.content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!fm) {
+    throw new ExportError("SKILL.md is missing YAML front matter; cannot export to claude-code.", "export_bad_frontmatter");
+  }
+  const nameOk = new RegExp(`^name:\\s*${skill.meta.name}\\s*$`, "m").test(fm[1]!);
+  let files = skill.files;
+  if (!nameOk) {
+    notes.push("Front matter `name` did not match the package id; exporter rewrote it.");
+    files = skill.files.map((f) => {
+      if (f.path !== "SKILL.md") return f;
+      const content = f.content.replace(
+        /^---\n[\s\S]*?\n---/,
+        `---\nname: ${skill.meta.name}\ndescription: ${JSON.stringify(skill.meta.description)}\n---`,
+      );
+      return { ...f, content };
+    });
+  }
+  if (skill.meta.name.length > 64) {
+    throw new ExportError(
+      `Skill name "${skill.meta.name}" exceeds the claude-code 64-character limit.`,
+      "export_name_too_long",
+    );
+  }
+  return {
+    target: "claude-code",
+    skillName: skill.meta.name,
+    files,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// generic exporter — ecosystem-neutral package following the AGENTS.md
+// convention: an AGENTS.md wrapper that tells any agent how to use the skill,
+// next to the canonical SKILL.md and supporting files.
+// ---------------------------------------------------------------------------
+
+function exportGeneric(skill: CanonicalSkill): ExportedPackage {
+  const p = skill.plan;
+  const bullets = (items: string[], fallback: string) =>
+    items.length > 0 ? items.map((i) => `- ${i}`).join("\n") : `- ${fallback}`;
+
+  const agentsMd = ([
+    `# AGENTS.md — ${skill.meta.displayName}`,
+    "",
+    "> Generated by SkillForge. This file orients agents; `SKILL.md` is the authoritative skill definition.",
+    "",
+    "## Purpose",
+    "",
+    skill.meta.description,
+    "",
+    "## How to use this skill",
+    "",
+    bullets(
+      p.steps.slice(0, 8),
+      "Read SKILL.md and follow the workflow documented there.",
+    ),
+    "",
+    "## Constraints",
+    "",
+    bullets(
+      p.constraints.slice(0, 8),
+      "No explicit constraints were stated in the source material.",
+    ),
+    "",
+    "## Where to look",
+    "",
+    "- `SKILL.md` — when to use, inputs, workflow, verification, pitfalls.",
+    skill.files.some((f) => f.path.startsWith("references/"))
+      ? "- `references/` — verbatim source excerpts with line-range provenance."
+      : null,
+    skill.files.some((f) => f.path.startsWith("workflows/"))
+      ? "- `workflows/` — documented multi-step procedures from the source."
+      : null,
+    skill.files.some((f) => f.path.startsWith("examples/"))
+      ? "- `examples/` — verbatim code examples from the source."
+      : null,
+    "- `manifest.json` — source identity, gap list, file inventory with hashes.",
+    "",
+  ] as (string | null)[]).filter((l) => l !== null).join("\n");
+
+  const agentsFile: SkillFile = {
+    path: "AGENTS.md",
+    content: agentsMd,
+    purpose: "Agent-orientation wrapper for ecosystems that read AGENTS.md.",
+  };
+
+  return {
+    target: "generic",
+    skillName: skill.meta.name,
+    files: withFiles(skill, [agentsFile], ["Added AGENTS.md wrapper for generic agent ecosystems."]),
+    notes: ["Added AGENTS.md wrapper for generic agent ecosystems."],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Registry + ZIP
+// ---------------------------------------------------------------------------
+
+export const EXPORTERS: Record<ExportTarget, (skill: CanonicalSkill) => ExportedPackage> = {
+  "claude-code": exportClaudeCode,
+  generic: exportGeneric,
+};
+
+export const EXPORT_TARGET_INFO: ExporterInfo[] = [
+  {
+    target: "claude-code",
+    label: "Claude Code",
+    description: "Skill folder with SKILL.md (name/description front matter) plus supporting files. Drop into .claude/skills/.",
+    formatBasis: "Anthropic Agent Skills format: SKILL.md with `name` (≤64 chars, lowercase-hyphen) and `description` (≤1024 chars) YAML front matter. Structure verified by this repository's exporter tests.",
+  },
+  {
+    target: "generic",
+    label: "Generic (AGENTS.md)",
+    description: "Ecosystem-neutral package: AGENTS.md orientation wrapper plus canonical SKILL.md and files.",
+    formatBasis: "The AGENTS.md convention (agents.md): a root markdown instruction file any agent can read. Structure verified by this repository's exporter tests.",
+  },
+];
+
+export function exportPackage(skill: CanonicalSkill, target: ExportTarget): ExportedPackage {
+  const exporter = EXPORTERS[target];
+  if (!exporter) {
+    throw new ExportError(
+      `Unsupported export target "${String(target)}". Supported targets: ${Object.keys(EXPORTERS).join(", ")}.`,
+      "export_target_unsupported",
+    );
+  }
+  return exporter(skill);
+}
+
+export interface ZipResult {
+  buffer: Buffer;
+  entries: string[];
+  fileName: string;
+}
+
+/**
+ * Build a real ZIP from an exported package. Every entry path is sanitized
+ * through safePackagePath (zip-slip/traversal/absolute path protection), and
+ * the package name itself is slugified.
+ */
+interface ZipInstance {
+  file(path: string, content: string): unknown;
+  generateAsync(options: Record<string, unknown>): Promise<Buffer>;
+}
+
+export async function buildZip(exported: ExportedPackage): Promise<ZipResult> {
+  const mod = await import("jszip");
+  const candidate: unknown = (mod as { default?: unknown }).default ?? mod;
+  const JSZipCtor =
+    typeof candidate === "function" ? candidate : (candidate as { JSZip?: unknown }).JSZip;
+  if (typeof JSZipCtor !== "function") {
+    throw new ExportError("Failed to load the ZIP library.", "export_zip_lib_missing");
+  }
+  const zip = new (JSZipCtor as new () => ZipInstance)();
+  const root = slugify(exported.skillName, 48);
+  const entries: string[] = [];
+  const seen = new Set<string>();
+
+  for (const file of exported.files) {
+    const safe = safePackagePath(file.path);
+    if (safe === null) {
+      throw new ExportError(
+        `Refusing to write unsafe path into ZIP: "${file.path}".`,
+        "export_unsafe_path",
+      );
+    }
+    const entry = joinPackagePath(root, safe);
+    if (seen.has(entry)) {
+      throw new ExportError(`Duplicate ZIP entry "${entry}".`, "export_duplicate_entry");
+    }
+    seen.add(entry);
+    zip.file(entry, file.content);
+    entries.push(entry);
+  }
+
+  const buffer = await zip.generateAsync({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+    compressionOptions: { level: 6 },
+  });
+  return {
+    buffer,
+    entries,
+    fileName: `${root}-${exported.target}.zip`,
+  };
+}
