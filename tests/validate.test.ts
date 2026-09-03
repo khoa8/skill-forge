@@ -148,6 +148,39 @@ describe("validatePackage (deterministic validator)", () => {
     expect(grounding.length).toBeLessThanOrEqual(1);
   });
 
+  it("eval-integrity warns on incomplete or malformed eval items", () => {
+    const broken = structuredClone(healthy.skill);
+    const evals = broken.files.find((f) => f.path === "evals/evals.json");
+    if (!evals) return; // sample without evals; nothing to check here
+    evals.content = JSON.stringify({
+      schema: "skillforge.evals/1",
+      items: [
+        { id: "eval-1", kind: "grounding", prompt: "Valid prompt with enough length?", expect: "Valid expectation." },
+        { id: "eval-1", kind: "bogus-kind", prompt: "", expect: "x" },
+        { kind: "grounding", prompt: "Missing id here?", expect: "Expectation present." },
+      ],
+    }, null, 2);
+    const report = validatePackage({ skill: resyncManifest(broken) });
+    const warns = report.checks.filter((c) => c.id === "eval-integrity" && c.status === "warn");
+    expect(warns.some((c) => c.message?.includes("Duplicate eval id"))).toBe(true);
+    expect(warns.some((c) => c.message?.includes("bogus-kind"))).toBe(true);
+    expect(warns.some((c) => c.message?.includes("missing an id"))).toBe(true);
+  });
+
+  it("provenance-integrity fails on invalid line ranges and warns on missing records", () => {
+    const broken = structuredClone(healthy.skill);
+    broken.provenance = broken.provenance.map((p) =>
+      p.filePath === "SKILL.md" ? { ...p, sourceLines: [5, 2] as [number, number] } : p,
+    );
+    const report = validatePackage({ skill: broken });
+    expect(report.checks.some((c) => c.id === "provenance-integrity" && c.status === "fail")).toBe(true);
+
+    const missing = structuredClone(healthy.skill);
+    missing.provenance = missing.provenance.slice(0, 1);
+    const report2 = validatePackage({ skill: missing });
+    expect(report2.checks.some((c) => c.id === "provenance-integrity" && c.status === "warn" && c.message?.includes("no provenance record"))).toBe(true);
+  });
+
   it("skippedValidationReport is explicitly not-success", () => {
     const report = skippedValidationReport("validation was skipped for testing");
     expect(report.executed).toBe(false);

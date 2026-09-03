@@ -364,6 +364,76 @@ const skillMdSize = check("skill-md-size", "SKILL.md stays within recommended si
   return pass();
 });
 
+// Strengthened eval validation: eval ids must exist, be unique AND well-formed;
+// every eval must carry a prompt and an expectation.
+const evalIntegrity = check("eval-integrity", "Eval entries are complete and well-formed", ({ skill }) => {
+  const evalsFile = skill.files.find((f) => f.path === "evals/evals.json");
+  if (!evalsFile) return pass();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(evalsFile.content);
+  } catch {
+    return pass(); // json-parse covers malformed JSON.
+  }
+  const items = (parsed as { items?: unknown }).items;
+  if (!Array.isArray(items)) {
+    return warn("evals/evals.json has no `items` array; evals are not machine-usable.", "evals/evals.json");
+  }
+  const outcomes: CheckOutcome[] = [];
+  const seen = new Set<string>();
+  items.forEach((item, index) => {
+    const rec = item as { id?: unknown; prompt?: unknown; expect?: unknown; kind?: unknown };
+    const id = typeof rec.id === "string" ? rec.id : `(item ${index + 1})`;
+    if (typeof rec.id === "string") {
+      if (!/^eval-[a-z0-9-]+$/.test(rec.id)) {
+        outcomes.push(warn(`Eval id "${rec.id}" does not follow the "eval-<slug>" convention.`, "evals/evals.json"));
+      }
+      if (seen.has(rec.id)) {
+        outcomes.push(warn(`Duplicate eval id "${rec.id}" in evals/evals.json.`, "evals/evals.json"));
+      }
+      seen.add(rec.id);
+    } else {
+      outcomes.push(warn(`Eval item ${index + 1} is missing an id.`, "evals/evals.json"));
+    }
+    if (typeof rec.prompt !== "string" || rec.prompt.trim().length < 5) {
+      outcomes.push(warn(`Eval "${id}" has no usable prompt.`, "evals/evals.json"));
+    }
+    if (typeof rec.expect !== "string" || rec.expect.trim().length < 5) {
+      outcomes.push(warn(`Eval "${id}" has no usable expectation.`, "evals/evals.json"));
+    }
+    if (rec.kind !== undefined && !["grounding", "procedure"].includes(String(rec.kind))) {
+      outcomes.push(warn(`Eval "${id}" has unknown kind "${String(rec.kind)}" (expected grounding or procedure).`, "evals/evals.json"));
+    }
+  });
+  return outcomes.length === 0 ? pass() : outcomes;
+});
+
+// Provenance integrity: every file has a provenance record and the recorded
+// line ranges are plausible.
+const provenanceIntegrity = check("provenance-integrity", "Every file has valid provenance", ({ skill }) => {
+  const outcomes: CheckOutcome[] = [];
+  const byFile = new Map<string, number>();
+  for (const p of skill.provenance) {
+    byFile.set(p.filePath, (byFile.get(p.filePath) ?? 0) + 1);
+    if (p.sourceLines[0] < 1 || p.sourceLines[1] < p.sourceLines[0]) {
+      outcomes.push(
+        fail(
+          `Provenance for "${p.filePath}" has an invalid source line range ${JSON.stringify(p.sourceLines)}.`,
+          p.filePath,
+        ),
+      );
+    }
+  }
+  for (const file of skill.files) {
+    if (!byFile.has(file.path)) {
+      outcomes.push(
+        warn(`File "${file.path}" has no provenance record; its origin in the source is not traceable.`, file.path),
+      );
+    }
+  }
+  return outcomes.length === 0 ? pass() : outcomes;
+});
+
 const groundingCheck: Check = {
   id: "grounding-commands",
   title: "Shell commands in generated files appear in the source",
@@ -442,6 +512,8 @@ export const CHECKS: Check[] = [
   manifestConsistency,
   placeholders,
   duplicateEvalIds,
+  evalIntegrity,
+  provenanceIntegrity,
   skillMdSize,
   groundingCheck,
 ];
