@@ -1,6 +1,10 @@
 # SkillForge — Project Status
 
-**Sprint date:** 2026-09-03 (Asia/Ho_Chi_Minh). **State: P0 complete, verified.**
+**Original sprint date:** 2026-09-03 (Asia/Ho_Chi_Minh)
+**Current mode:** Continuation / recovery
+**State:** P0 complete and verified; continue from the existing repository toward the highest-value unfinished P1 work.
+
+> Important: The original sprint's wall-clock deadline is historical and no longer applies. There is currently no active 08:40/09:00 cutoff. Do not restart P0 or prematurely enter finalization because the original sprint date has passed.
 
 ## What works right now (verified)
 

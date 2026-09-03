@@ -7,7 +7,8 @@
  */
 import express, { type Express, type Request, type Response } from "express";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 import { z } from "zod";
 import { runPipeline } from "../core/pipeline.js";
 import { validatePackage } from "../core/validate.js";
@@ -18,7 +19,20 @@ import type { ExportTarget } from "../core/types.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 
 const VERSION = "0.1.0";
-const WEB_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "web");
+
+/** Locate web/ whether running from src (tsx) or dist (tsc output). */
+function findWebDir(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, "web");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return join(process.cwd(), "web");
+}
+const WEB_DIR = findWebDir();
 
 const GenerateBody = z.object({
   sourceType: z.enum(["text", "sample"]),

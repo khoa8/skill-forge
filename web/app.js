@@ -469,6 +469,8 @@ function renderExportCards() {
   note.textContent = blocked
     ? ""
     : "Export re-runs deterministic validation server-side before packaging; packages with errors are refused (HTTP 422).";
+  // Replace (not stack) the blocked explanation across re-renders.
+  document.querySelectorAll(".export-blocked").forEach((el) => el.remove());
   if (blocked) {
     const blockedBox = document.createElement("div");
     blockedBox.className = "export-blocked";
