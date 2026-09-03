@@ -2,43 +2,48 @@
 
 Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
 
-## P0 — MVP pipeline (complete)
+## P0 — MVP pipeline (complete, regression baseline)
 
-- [x] Project scaffold: TypeScript ESM, Express, zod, yaml, marked, jszip, vitest
+- [x] Project scaffold: TypeScript ESM, Express, zod, yaml, jszip, vitest
 - [x] Canonical skill model (zod-validated) + provenance records
 - [x] Ingestion/normalization (line endings, HTML strip, entities, size bounds)
 - [x] Deterministic line-based analyzer (sections, code, commands, procedures, warnings)
 - [x] Mock provider (offline, deterministic) + shared canonical builder
-- [x] Deterministic validator (14 checks, honest skipped state)
-- [x] Exporters: claude-code + generic; real ZIP with sanitized paths
+- [x] Deterministic validator; real ZIP with sanitized paths; claude-code + generic exporters
 - [x] HTTP API with NDJSON pipeline streaming; validation-gated export (422)
-- [x] Web UI: stepper, sample/text sources, file inspector w/ provenance, validation panel, real download
-- [x] Bundled samples (Meridian Payments API, FastForge CLI) + `npm run demo` CLI with ZIP inspection
-- [x] Tests: 81 passing (unit + API + e2e demo + zip round-trip + path safety + provider failures)
+- [x] Web UI: stepper, sources, file inspector w/ provenance, validation panel, real download
+- [x] Bundled samples + `npm run demo` CLI with ZIP inspection
 - [x] Verified in a real browser: full no-key Source→Validate→Export workflow + download
 
-## P1 — next highest value
+## P1 — continuation (this session)
 
-- [ ] File upload source (local .md/.txt) beyond paste
-- [ ] URL source with safe limits (protocol allowlist, SSRF guard, size/time caps, no-crawl-by-default)
-- [ ] GitHub repository source (docs/ + README ingestion; no code execution)
+- [x] **URL source** with safe limits: protocol allowlist, SSRF guard (name + DNS, per-redirect), redirect cap, size/time caps, content-type allowlist, HTML→text conversion without JS execution, honest empty-content failure
+- [x] **Local file/directory source**: `SKILLFORGE_DOCS_ROOT` allowlist root, realpath containment (symlink escape refused), extension allowlist, size/count/depth bounds, multi-file combining
+- [x] **File-backed persistence**: `.data/skills/<id>/skill.json`, atomic writes, zod-validated reads, newest-50 eviction; verified across server restart
+- [x] **Stronger validators** (14 → 16): eval-integrity, provenance-integrity
+- [x] **UI for new sources**: Samples/Paste/URL/Local files tabs with per-type button states; browser-verified generation + download from a directory source
+- [x] **Link neutralization** in verbatim excerpts (multi-line labels); found via live koa README, regression-tested
+- [x] dist-mode static serving (`findWebDir`), MIT license, export-blocked UI dedup
+
+## P1 — remaining backlog
+
+- [ ] GitHub repository source as a first-class type (repo URL → docs tree via API, no code execution)
 - [ ] Editing generated text in preview (P1 per AGENTS.md §14)
-- [ ] Persistence for generated skills (file-backed store) instead of in-memory
-- [ ] Additional exporter: Codex/Cursor adapter after verifying their documented formats
-- [ ] Evals: machine-readable format compatible with a runner (keep manual execution)
 - [ ] Provenance UX: click a provenance record to view the exact source lines
-- [ ] Progress streaming via SSE for slow (remote-provider) generations with cancellation
+- [ ] SSE progress for slow (remote-provider) generations with cancellation
+- [ ] Additional exporter (Codex or Cursor) after verifying its documented format
+- [ ] Evals compatible with an external runner (keep manual execution in-scope)
 
 ## P2 — later
 
 - [ ] PDF ingestion
-- [ ] Multi-page documentation source
+- [ ] Multi-page documentation crawl (bounded, opt-in)
 - [ ] Authenticated documentation sources
 - [ ] LLM-assisted (non-deterministic) quality review supplementing the deterministic validator
 - [ ] Skill diffing across regenerations
 
 ## Known defects / gaps (tracked, not hidden)
 
-- Grounding check is token-overlap heuristic; can miss paraphrased hallucinations and can warn on benign rephrases.
-- `glm`/`openai` providers are implemented + unit-tested with injected fetch but not exercised against live APIs in this repo.
-- No pagination/refresh safety: page reload clears UI state (skills remain fetchable by id until eviction/restart).
+- Grounding check is token-overlap heuristic; can miss paraphrased hallucinations and warn on benign rephrases.
+- `glm`/`openai` providers are implemented + unit-tested with injected fetch but not exercised against live APIs (no key available in this environment).
+- URL source cannot render JavaScript-heavy pages; it reports `url_no_content` instead of guessing.

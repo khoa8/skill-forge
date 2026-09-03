@@ -23,8 +23,10 @@ Source ──▶ ingest ──▶ analyze ──▶ provider.generate ──▶ 
 | Validator | `src/core/validate.ts` | Pure check registry (14 checks) over the package (+ optional source text for grounding). Deterministic; catches its own internal errors and reports them as failures. |
 | Exporters | `src/core/export/exporters.ts` | Vendor adapters only place vendor differences live: `claude-code`, `generic`; `EXPORT_TARGET_INFO` (with format basis); `buildZip` (sanitized entries, JSZip). |
 | Samples | `src/core/samples.ts` + `src/core/samples/*.md` | Bundled demo docs (Meridian Payments API, FastForge CLI). |
-| HTTP API | `src/server/app.ts` | Express app: NDJSON-streaming `/api/generate`, skill store, on-demand `/validate`, validation-gated `/export` (422 on errors), static UI. |
-| Store | `src/server/store.ts` | In-memory bounded store (50 most recent). Documented limitation. |
+| URL source | `src/core/sources/url.ts` | P1: SSRF-guarded single-page fetch (protocol allowlist, DNS-based private-host refusal re-checked per redirect, size/time caps), HTML→markdown-ish conversion. Fetch/DNS injectable for tests. |
+| File source | `src/core/sources/files.ts` | P1: local file/directory ingestion bounded by an allowlist root (`SKILLFORGE_DOCS_ROOT`), realpath containment (symlink escapes refused), extension/size/count/depth limits, multi-file combining. |
+| HTTP API | `src/server/app.ts` | Express app: NDJSON-streaming `/api/generate` (source types: text/sample/url/file), skill store, on-demand `/validate`, validation-gated `/export` (422 on errors), static UI. |
+| Store | `src/server/store.ts` | P1: file-backed persistence under `.data/skills/<id>/skill.json` — atomic writes, zod-validated reads, newest-50 eviction; survives restarts. |
 | UI | `web/` | Vanilla JS/HTML/CSS. Stepper mirrors real pipeline events; file inspector with purpose + provenance; validation panel with re-run; real download via blob. |
 
 ## Key design decisions
@@ -38,4 +40,4 @@ Source ──▶ ingest ──▶ analyze ──▶ provider.generate ──▶ 
 
 ## Testing
 
-`tests/` covers: ingestion normalization, analysis extraction, canonical build (schema-validity, determinism, verbatim references, gap marking, env-var context heuristic), every validator check (pass + trigger), exporters (format constraints, manifest resync), ZIP round-trips (read back via JSZip, byte comparison, zip-slip refusal, duplicate entries), providers (mock determinism; adapter: schema mismatch, no-JSON, HTTP error, network failure, unexpected shape), the HTTP API (streaming generate, validation, gated export), and a bundled end-to-end demo test for both samples and both targets.
+`tests/` covers: ingestion normalization, analysis extraction, canonical build (schema-validity, determinism, verbatim references, gap marking, env-var context heuristic, link neutralization), every validator check (pass + trigger), exporters (format constraints, manifest resync), ZIP round-trips (read back via JSZip, byte comparison, zip-slip refusal, duplicate entries), providers (mock determinism; adapter: schema mismatch, no-JSON, HTTP error, network failure, unexpected shape), the URL source (SSRF guards incl. redirect re-validation, caps, HTML conversion), the file source (containment, symlink escape, bounds, combining), persistence, the HTTP API (streaming generate, validation, gated export, P1 source types), and bundled end-to-end demo tests for both samples and both targets.

@@ -13,24 +13,37 @@ npm install
 npm run dev          # open http://127.0.0.1:8787
 ```
 
-Then: **pick a bundled sample → Generate skill → inspect files → Download ZIP.** The bundled demo provider runs fully offline; no paid key is ever needed for the demo workflow.
+Then: **pick a source (bundled sample, pasted Markdown, a URL, or local files) → Generate skill → inspect files → Download ZIP.** The bundled demo provider runs fully offline; no paid key is ever needed for the demo workflow.
 
 Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 81 tests incl. end-to-end Source → Export
+npm test             # 117 tests incl. end-to-end Source → Export
 ```
+
+## Sources
+
+| Type | How | Notes |
+| --- | --- | --- |
+| Bundled samples | Pick a card | Offline, deterministic; two docs covering API and CLI material. |
+| Pasted Markdown/text | Paste tab | Any instructional Markdown; HTML stripped, entities decoded. |
+| URL | URL tab | Single-page http(s) fetch with safety limits (below). |
+| Local files | Local files tab | File or directory under the allowed root (`SKILLFORGE_DOCS_ROOT`, default: the workspace). |
+
+**URL safety limits:** http/https only; hosts that are private/loopback/link-local by name *or* DNS resolution are refused (SSRF guard, re-checked on every redirect); max 3 redirects; 1 MB / 15 s caps; only text-like content types; page JavaScript is never executed (JS-rendered pages are reported as empty rather than guessed at).
+
+**Local file safety:** paths must resolve inside the allowed root (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6; no code execution.
 
 ## What it does
 
 | Stage | Behavior |
 | --- | --- |
-| **Source** | Paste Markdown/text, or pick a bundled sample. Size-bounded, HTML stripped, entities decoded. |
+| **Source** | One of the four input types above. |
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
-| **Validate** | 14 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
-| **Preview** | Inspect every generated file with its purpose and provenance before exporting. |
+| **Validate** | 16 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
+| **Preview** | Inspect every generated file with its purpose and provenance before exporting. Generated skills persist on disk (`.data/skills/`) and survive server restarts. |
 | **Export** | Real ZIP downloads for **Claude Code** and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
 
 ## Generated package
@@ -48,11 +61,11 @@ meridian-payments-api/
 └── manifest.json         # source identity (sha256), gap list, file inventory with hashes
 ```
 
-Every file has a recorded purpose; ceremonial empty files are a validation error.
+Every file has a recorded purpose; ceremonial empty files are a validation error. Relative links inside verbatim excerpts are shown as paths (`` `docs/x.md` ``) instead of dangling links.
 
 ## Validation behavior
 
-Validation is deterministic — same package in, same report out, no model calls. Checks include: required files; safe & unique paths (zip-slip/traversal); well-formed YAML front matter; valid `name` slug and `description`; no empty sections; resolving internal links; parseable JSON; manifest↔package consistency; no placeholder text (`TODO`, `FIXME`, …); no empty files; duplicate IDs; SKILL.md size; unsupported export targets; and command grounding (shell commands in generated files must trace back to the source — unverifiable grounding is reported as *not verified*, never as passed).
+Validation is deterministic — same package in, same report out, no model calls. The 16 checks: required files; safe & unique paths (zip-slip/traversal); well-formed YAML front matter; valid `name` slug and `description`; no empty sections; resolving internal links; parseable JSON; manifest↔package consistency; no placeholder text (`TODO`, `FIXME`, …); no empty files; duplicate IDs; eval integrity (unique ids, usable prompt/expectation, known kinds); provenance integrity (every file traceable, valid line ranges); SKILL.md size; unsupported export targets; and command grounding (shell commands in generated files must trace back to the source — unverifiable grounding is reported as *not verified*, never as passed).
 
 The report states `passed`, `executed`, per-check status, file locations, and actionable messages. Warnings (e.g. placeholders, untraceable commands) do not block export; errors do — the export endpoint re-runs validation and refuses failing packages.
 
@@ -61,17 +74,17 @@ The report states `passed`, `executed`, per-check status, file locations, and ac
 - `mock` (default): deterministic, offline, no key. Same source ⇒ byte-identical package.
 - `glm` / `openai`: OpenAI-compatible chat-completions adapters. Model output must parse against the skill-plan schema; malformed output fails with an actionable error instead of entering the package. Configure via `.env` (see `.env.example`). These adapters are implemented and unit-tested with injected fetch, but not exercised against a paid API in this repo — no compatibility claims beyond that.
 
-## Supported inputs / outputs
+## Verified with live sources
 
-**Inputs (P0):** pasted text/Markdown, bundled samples. **Not yet:** URL fetching, GitHub repos, PDF (planned; see TASKS.md).
-**Outputs:** ZIP for `claude-code` (Agent Skills layout: SKILL.md + supporting files) and `generic` (AGENTS.md wrapper + canonical files). Structure is verified by exporter tests; see [docs/EXPORTERS.md](docs/EXPORTERS.md) for exactly what each format claims.
+The URL source has been exercised against real pages during development: a raw GitHub README (markdown, passed all checks) and a GitHub docs HTML page (converted, passed all checks). JS-rendered single-page apps are honestly rejected (`url_no_content`) instead of producing empty skills.
 
 ## Limitations
 
-- Skills are stored in memory (last 50) — a server restart loses them; regenerate in seconds.
+- URL ingestion is single-page: no crawling, no JS rendering (documented honest failure instead).
 - The grounding check is heuristic (token overlap), not proof of correctness; review generated skills.
-- URL/GitHub/PDF ingestion is not implemented in this version.
+- GitHub repository ingestion as a first-class source type is not implemented (paste/URL/local cover the same need manually).
 - The `glm`/`openai` providers require you to supply a key and have not been run against live endpoints here.
 - Evals are generated as manual grounding checks; SkillForge does not execute them.
+- PDF ingestion is not implemented.
 
 See [PRODUCT.md](PRODUCT.md) for scope and [ARCHITECTURE.md](ARCHITECTURE.md) for the module map.
