@@ -200,6 +200,12 @@ input:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent
   white-space: pre; color: #cdd3e0;
 }
 
+.checkline {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px; font-size: 13px; color: var(--text-muted); cursor: pointer;
+}
+.checkline input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+
 /* Export */
 .export-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 10px; }
 .export-card {

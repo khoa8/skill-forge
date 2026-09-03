@@ -92,6 +92,9 @@ function bindEvents() {
     updateGenerateButton();
   });
 
+  $("#source-url").addEventListener("input", updateGenerateButton);
+  $("#source-path").addEventListener("input", updateGenerateButton);
+
   $("#generate-btn").addEventListener("click", runGenerate);
 }
 
@@ -104,10 +107,19 @@ function updateGenerateButton() {
   if (state.activeTab === "sample") {
     btn.disabled = !state.selectedSampleId;
     btn.textContent = state.selectedSampleId ? "Generate skill" : "Select a sample first";
-  } else {
+  } else if (state.activeTab === "text") {
     const len = $("#source-text").value.trim().length;
     btn.disabled = len < 40;
     btn.textContent = len < 40 ? `Paste at least 40 characters (${len} so far)` : "Generate skill";
+  } else if (state.activeTab === "url") {
+    const url = $("#source-url").value.trim();
+    const ok = /^https?:\/\/.+\..+/.test(url);
+    btn.disabled = !ok;
+    btn.textContent = ok ? "Generate skill" : "Enter an http(s) URL";
+  } else if (state.activeTab === "file") {
+    const p = $("#source-path").value.trim();
+    btn.disabled = p.length === 0;
+    btn.textContent = p.length > 0 ? "Generate skill" : "Enter a workspace-relative path";
   }
 }
 
@@ -174,11 +186,19 @@ async function runGenerate() {
   const body =
     state.activeTab === "sample"
       ? { sourceType: "sample", sampleId: state.selectedSampleId }
-      : {
-          sourceType: "text",
-          content: $("#source-text").value,
-          name: $("#source-name").value.trim() || undefined,
-        };
+      : state.activeTab === "url"
+        ? { sourceType: "url", url: $("#source-url").value.trim() }
+        : state.activeTab === "file"
+          ? {
+              sourceType: "file",
+              path: $("#source-path").value.trim(),
+              recursive: $("#source-recursive").checked,
+            }
+          : {
+              sourceType: "text",
+              content: $("#source-text").value,
+              name: $("#source-name").value.trim() || undefined,
+            };
   const requestedName = $("#requested-name").value.trim();
   if (requestedName) body.requestedName = requestedName;
 

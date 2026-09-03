@@ -37,8 +37,10 @@
       <div class="panel-head">
         <h2>1 · Source</h2>
         <div class="tabs" role="tablist">
-          <button class="tab active" data-tab="sample" role="tab">Bundled samples</button>
-          <button class="tab" data-tab="text" role="tab">Paste Markdown / text</button>
+          <button class="tab active" data-tab="sample" role="tab">Samples</button>
+          <button class="tab" data-tab="text" role="tab">Paste</button>
+          <button class="tab" data-tab="url" role="tab">URL</button>
+          <button class="tab" data-tab="file" role="tab">Local files</button>
         </div>
       </div>
 
@@ -54,6 +56,19 @@
         <label class="field-label" for="source-text">Source content</label>
         <textarea id="source-text" rows="14" placeholder="# My Project&#10;&#10;## Setup&#10;1. Install the CLI…&#10;"></textarea>
         <p class="hint" id="text-stats">0 characters</p>
+      </div>
+
+      <div class="tab-body hidden" id="tab-url">
+        <p class="hint">Fetch a single documentation page over http(s). SkillForge enforces safe limits: no private/loopback hosts, max 3 redirects, 1 MB / 15 s cap, and it never executes page scripts. JavaScript-rendered pages may yield no text.</p>
+        <label class="field-label" for="source-url">Documentation URL</label>
+        <input id="source-url" type="url" placeholder="https://docs.example.com/guide" />
+      </div>
+
+      <div class="tab-body hidden" id="tab-file">
+        <p class="hint">Read Markdown/text files from the server's allowed root (default: this workspace). Directories are non-recursive unless "include subdirectories" is checked.</p>
+        <label class="field-label" for="source-path">File or directory path</label>
+        <input id="source-path" type="text" placeholder="docs/ or README.md" />
+        <label class="checkline"><input type="checkbox" id="source-recursive" /> Include subdirectories (bounded: depth 6, 40 files)</label>
       </div>
 
       <div class="advanced">

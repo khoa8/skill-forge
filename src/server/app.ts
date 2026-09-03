@@ -14,7 +14,15 @@ import { runPipeline } from "../core/pipeline.js";
 import { validatePackage } from "../core/validate.js";
 import { exportPackage, buildZip, EXPORT_TARGET_INFO, ExportError } from "../core/export/exporters.js";
 import { listSamples, getSample } from "../core/samples.js";
-import { getSkill, saveSkill, listSkills, updateValidation, type StoredSkill } from "./store.js";
+import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
+import { collectFiles, combineFiles, FileSourceError } from "../core/sources/files.js";
+import {
+  saveSkill,
+  getSkill as loadSkill,
+  listSkills,
+  updateValidation,
+  toResponse,
+} from "./store.js";
 import type { ExportTarget } from "../core/types.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 
@@ -35,11 +43,16 @@ function findWebDir(): string {
 const WEB_DIR = findWebDir();
 
 const GenerateBody = z.object({
-  sourceType: z.enum(["text", "sample"]),
+  sourceType: z.enum(["text", "sample", "url", "file"]),
   /** For `text`: the pasted content. Required when sourceType is "text". */
   content: z.string().min(1).max(2_000_000).optional(),
   /** For `sample`: bundled sample id. */
   sampleId: z.string().optional(),
+  /** For `url`: the page to fetch. */
+  url: z.string().max(2048).optional(),
+  /** For `file`: workspace-relative file or directory path. */
+  path: z.string().max(1024).optional(),
+  recursive: z.boolean().optional(),
   name: z.string().max(200).optional(),
   requestedName: z.string().max(80).optional(),
   provider: z.enum(PROVIDER_IDS).optional(),
@@ -87,7 +100,7 @@ export function createApp(config: AppConfig): Express {
     }
   });
 
-  app.post("/api/generate", (req: Request, res: Response) => {
+  app.post("/api/generate", async (req: Request, res: Response) => {
     const parsed = GenerateBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -100,6 +113,7 @@ export function createApp(config: AppConfig): Express {
 
     let content: string;
     let name: string;
+    let sourceNotes: string[] = [];
     if (body.sourceType === "sample") {
       if (!body.sampleId) {
         res.status(400).json({ error: "sourceType 'sample' requires `sampleId`." });
@@ -111,6 +125,46 @@ export function createApp(config: AppConfig): Express {
         name = sample.meta.title;
       } catch (err) {
         res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+    } else if (body.sourceType === "url") {
+      if (!body.url) {
+        res.status(400).json({ error: "sourceType 'url' requires `url`." });
+        return;
+      }
+      try {
+        const fetched = await fetchUrlSource(body.url);
+        content = fetched.input.content;
+        name = body.name?.trim() || fetched.input.name;
+        sourceNotes = fetched.notes;
+      } catch (err) {
+        const status = err instanceof UrlSourceError && err.code === "url_invalid" ? 400 : 502;
+        res.status(status).json({
+          error: err instanceof Error ? err.message : String(err),
+          code: err instanceof UrlSourceError ? err.code : "url_fetch_failed",
+        });
+        return;
+      }
+    } else if (body.sourceType === "file") {
+      if (!body.path) {
+        res.status(400).json({ error: "sourceType 'file' requires `path` (workspace-relative file or directory)." });
+        return;
+      }
+      try {
+        const collected = await collectFiles(body.path, { recursive: body.recursive });
+        const combined = combineFiles(collected.files, body.name?.trim());
+        content = combined.content;
+        name = combined.name;
+        sourceNotes = [
+          `Read ${collected.files.length} file(s) from the allowed root.`,
+          ...(collected.skipped.length > 0 ? [`Skipped: ${collected.skipped.slice(0, 5).join("; ")}${collected.skipped.length > 5 ? "; …" : ""}`] : []),
+        ];
+      } catch (err) {
+        const status = err instanceof FileSourceError && err.code === "file_outside_root" ? 403 : 400;
+        res.status(status).json({
+          error: err instanceof Error ? err.message : String(err),
+          code: err instanceof FileSourceError ? err.code : "file_source_failed",
+        });
         return;
       }
     } else {
@@ -131,7 +185,7 @@ export function createApp(config: AppConfig): Express {
     void (async () => {
       try {
         for await (const event of runPipeline(
-          { type: body.sourceType === "sample" ? "sample" : "text", name, content },
+          { type: body.sourceType === "sample" ? "sample" : body.sourceType === "file" ? "file" : "text", name, content },
           {
             provider: body.provider ?? (config.provider as (typeof PROVIDER_IDS)[number]) ?? "mock",
             apiKey: config.hasApiKey ? process.env.SKILLFORGE_API_KEY : undefined,
@@ -141,16 +195,21 @@ export function createApp(config: AppConfig): Express {
           },
         )) {
           if (event.type === "result") {
-            const stored: StoredSkill = {
+            await saveSkill({
               id: event.skill.id,
               skill: event.skill,
-              analysis: event.analysis,
+              analysis: {
+                title: event.analysis.title,
+                sectionCount: event.analysis.sections.length,
+                procedureCount: event.analysis.procedures.length,
+                commandCount: event.analysis.commands.length,
+                codeBlockCount: event.analysis.codeBlocks.length,
+                lineCount: event.analysis.lineCount,
+              },
+              source: { name, type: body.sourceType === "sample" ? "sample" : body.sourceType === "file" ? "file" : "text", text: content },
               validation: event.validation,
-              sourceInput: { type: body.sourceType === "sample" ? "sample" : "text", name, content },
-              sourceText: content,
               createdAt: new Date().toISOString(),
-            };
-            saveSkill(stored);
+            });
           }
           res.write(JSON.stringify(event) + "\n");
         }
@@ -168,56 +227,38 @@ export function createApp(config: AppConfig): Express {
     })();
   });
 
-  app.get("/api/skills", (_req, res) => {
-    res.json({ skills: listSkills() });
+  app.get("/api/skills", async (_req, res) => {
+    res.json({ skills: await listSkills() });
   });
 
-  app.get("/api/skills/:id", (req, res) => {
-    const stored = getSkill(req.params.id!);
+  app.get("/api/skills/:id", async (req, res) => {
+    const stored = await loadSkill(req.params.id!);
     if (!stored) {
-      res.status(404).json({ error: `No skill with id "${req.params.id}". It may have been evicted or the server restarted.` });
+      res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
     }
-    res.json({
-      id: stored.id,
-      skill: stored.skill,
-      analysis: {
-        title: stored.analysis.title,
-        sectionCount: stored.analysis.sections.length,
-        procedureCount: stored.analysis.procedures.length,
-        commandCount: stored.analysis.commands.length,
-        codeBlockCount: stored.analysis.codeBlocks.length,
-        lineCount: stored.analysis.lineCount,
-      },
-      source: {
-        name: stored.sourceInput.name,
-        type: stored.sourceInput.type,
-        text: stored.sourceText,
-      },
-      validation: stored.validation,
-      createdAt: stored.createdAt,
-    });
+    res.json(toResponse(stored));
   });
 
   // Re-run deterministic validation on demand.
-  app.post("/api/skills/:id/validate", (req, res) => {
-    const stored = getSkill(req.params.id!);
+  app.post("/api/skills/:id/validate", async (req, res) => {
+    const stored = await loadSkill(req.params.id!);
     if (!stored) {
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
     }
     const report = validatePackage({
       skill: stored.skill,
-      sourceText: stored.sourceText,
+      sourceText: stored.source.text,
       target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
     });
-    updateValidation(stored.id, report);
+    await updateValidation(stored.id, report);
     res.json({ validation: report });
   });
 
   // Export: re-validates, refuses packages with errors, streams a real ZIP.
-  app.post("/api/skills/:id/export", (req, res) => {
-    const stored = getSkill(req.params.id!);
+  app.post("/api/skills/:id/export", async (req, res) => {
+    const stored = await loadSkill(req.params.id!);
     if (!stored) {
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
@@ -234,7 +275,7 @@ export function createApp(config: AppConfig): Express {
     const target = parsed.data.target;
 
     // Validation gate: never export a package that fails deterministic checks.
-    const report = validatePackage({ skill: stored.skill, sourceText: stored.sourceText, target });
+    const report = validatePackage({ skill: stored.skill, sourceText: stored.source.text, target });
     if (!report.passed) {
       res.status(422).json({
         error: `Export blocked: deterministic validation found ${report.errorCount} error(s). Inspect the validation panel, repair the source or plan, and try again.`,
