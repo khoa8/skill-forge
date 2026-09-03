@@ -243,6 +243,21 @@ function constraintSentences(analysis: SourceAnalysis, max: number): string[] {
 
 const HEADINGISH = /^#{1,6}\s/;
 
+/**
+ * Relative markdown links inside *verbatim source excerpts* point at files in
+ * the original repository — which do not exist inside a generated skill
+ * package. Rewriting them to plain code spans keeps the text honest without
+ * shipping dangling references (the internal-links check enforces this).
+ * Absolute URLs and in-page anchors are left untouched.
+ */
+export function neutralizeRelativeLinks(markdown: string): string {
+  return markdown.replace(/\[([^\]]*)\]\(([^)\n]+)\)/g, (match, label: string, target: string) => {
+    const t = target.trim();
+    if (/^[a-z]+:/i.test(t) || t.startsWith("#") || t.startsWith("/")) return match;
+    return `${label.replace(/\s+/g, " ")} \`${t}\``.trim();
+  });
+}
+
 export function dedupe(items: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -312,9 +327,9 @@ export function buildCanonicalSkill(
     const content = [
       `# ${section.heading}`,
       "",
-      `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header.`,
+      `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
       "",
-      body,
+      neutralizeRelativeLinks(body),
       "",
       `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
       "",
@@ -339,9 +354,9 @@ export function buildCanonicalSkill(
     const content = [
       `# ${proc.title}`,
       "",
-      `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source.`,
+      `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
       "",
-      ...proc.steps.map((s, i) => `${i + 1}. ${s.text} _(source line ${s.line})_`),
+      ...proc.steps.map((s, i) => `${i + 1}. ${neutralizeRelativeLinks(s.text)} _(source line ${s.line})_`),
       "",
     ].join("\n");
     addFile(
