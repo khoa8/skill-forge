@@ -1,6 +1,6 @@
 # Refunding a payment
 
-> Excerpt from source "Meridian Payments API" (lines 57–71). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 57–71). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 Refunds return funds to the payer. Refunds can be full or partial; issue a
 partial refund by sending an `amount` smaller than the original.

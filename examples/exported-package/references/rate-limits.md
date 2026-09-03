@@ -1,6 +1,6 @@
 # Rate limits
 
-> Excerpt from source "Meridian Payments API" (lines 92–96). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 92–96). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 The API allows 100 requests per second per key. When you exceed the limit the
 API returns `429 rate_limited`. Honor the `Retry-After` header, which is

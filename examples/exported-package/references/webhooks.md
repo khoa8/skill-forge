@@ -1,6 +1,6 @@
 # Webhooks
 
-> Excerpt from source "Meridian Payments API" (lines 98–104). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 98–104). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 Webhooks notify your server when payment or refund statuses change. Register
 an HTTPS endpoint in the dashboard, then verify each delivery by checking the

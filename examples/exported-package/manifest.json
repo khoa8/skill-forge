@@ -7,8 +7,8 @@
   "generator": "mock",
   "source": {
     "name": "Meridian Payments API",
-    "sha256": "d3fda521f7966a7ce90f6f9ebdcec9f6479bd6a83908a3002543765dd1ac7156",
-    "lineCount": 125,
+    "sha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+    "lineCount": 124,
     "notes": []
   },
   "gaps": [],
@@ -45,43 +45,43 @@
     },
     {
       "path": "references/authentication.md",
-      "bytes": 657,
-      "sha256": "d0552a408fe46afc38da55d8c29ba1978198a26432d19669f8d919ad8c52319e"
+      "bytes": 736,
+      "sha256": "1302d988a1315fc10a500672fe9178c44fd9f8b642b0b621ba6ed353087acedb"
     },
     {
       "path": "references/creating-a-payment.md",
-      "bytes": 924,
-      "sha256": "19417f90cd710e7daab7be7df52a15ecf205e32aef43c8701e4b4b972901ee50"
+      "bytes": 1003,
+      "sha256": "d1c5596cbbf59c516eb1d91404ed91f4b94feb5829f8dd5305c5aa710427ff95"
     },
     {
       "path": "references/error-handling.md",
-      "bytes": 1063,
-      "sha256": "a96437e63e235145fdf719eb2946369665973eb7419cf5a1b20b3a5b5b925046"
+      "bytes": 1142,
+      "sha256": "c4bcf0baa51d65b8b6c0021e0831f700530565a46ce91364fdde611d5b4a90ca"
     },
     {
       "path": "references/rate-limits.md",
-      "bytes": 386,
-      "sha256": "0c7a9d4ce8701aee21f856d446e70fb34130339ebbb3c6a7f62591cc716fb5d5"
+      "bytes": 465,
+      "sha256": "d3fbe335e95a2e1857f1d4322268ba9982e1ab4feaa4e3ebe145cabc62044a90"
     },
     {
       "path": "references/refunding-a-payment.md",
-      "bytes": 763,
-      "sha256": "061f56c445e71e41b0289aec885b17daf15398272b50804ac9c428758d2e776c"
+      "bytes": 842,
+      "sha256": "97b1df364bacb73c1662fab84f0ab6e61d4d330ee12ab144513c3f5431a3ca18"
     },
     {
       "path": "references/test-cards.md",
-      "bytes": 377,
-      "sha256": "4340e17b2ab6a4694340d90da8c7d1da47fc28e5ff0449cccb0a22fcd3bb64c8"
+      "bytes": 456,
+      "sha256": "98f41158422499d9712df240e175f9c79673139fcd029036234b3073e448d693"
     },
     {
       "path": "references/troubleshooting.md",
-      "bytes": 767,
-      "sha256": "ad22a3a715c76dcb159c5134117afc4200bc83cd90eca13046629ba825f2d2f4"
+      "bytes": 846,
+      "sha256": "df18dd9edad3983b71eaf1d3f2752fb3bace6057c9f8e25f4bced29632b83a91"
     },
     {
       "path": "references/webhooks.md",
-      "bytes": 500,
-      "sha256": "2ddda2825812dd5d62b6db98fbc986140588f11769552c1c98f320b510eb78da"
+      "bytes": 579,
+      "sha256": "875583e5c9852d944916d76933009383bd97afc7b1ba087ca81eb8e59885d63b"
     },
     {
       "path": "SKILL.md",
@@ -90,8 +90,8 @@
     },
     {
       "path": "workflows/refunding-a-payment.md",
-      "bytes": 487,
-      "sha256": "b536b8545838665db7bd775e9f6e964ec26ef0026edd2b2b3b2428510fa0f2f5"
+      "bytes": 522,
+      "sha256": "a7b137d898ad25e35eb66c3538624bc66ae421a95e03838f375284b254147c54"
     }
   ],
   "exportNotes": [

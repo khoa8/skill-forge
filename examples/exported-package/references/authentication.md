@@ -1,6 +1,6 @@
 # Authentication
 
-> Excerpt from source "Meridian Payments API" (lines 8–21). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 8–21). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 Every request must include your secret key as a bearer token. Keys are
 environment-specific: sandbox keys start with `sk_sandbox_` and production

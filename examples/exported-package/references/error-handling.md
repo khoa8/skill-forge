@@ -1,6 +1,6 @@
 # Error handling
 
-> Excerpt from source "Meridian Payments API" (lines 73–90). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 73–90). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 The API uses conventional HTTP status codes. The JSON body always includes a
 machine-readable `error.code` and a human-readable `error.message`.

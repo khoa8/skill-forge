@@ -1,6 +1,6 @@
 # Troubleshooting
 
-> Excerpt from source "Meridian Payments API" (lines 114–124). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 114–124). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 - `401 unauthorized` usually means the environment variable is unset in the
   shell running the request; verify with `echo $MERIDIAN_API_KEY`.

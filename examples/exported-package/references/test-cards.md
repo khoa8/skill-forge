@@ -1,6 +1,6 @@
 # Test cards
 
-> Excerpt from source "Meridian Payments API" (lines 106–112). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 106–112). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 The sandbox supports deterministic test payment methods:
 

@@ -42,6 +42,12 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
 - [ ] LLM-assisted (non-deterministic) quality review supplementing the deterministic validator
 - [ ] Skill diffing across regenerations
 
+## Security notes (reviewed)
+
+- File source reads files inside the allowlist root by design — including dotfiles with allowed extensions (e.g. `.secret-notes.md`). Documented: the root is the trust boundary; set `SKILLFORGE_DOCS_ROOT` to a docs-only directory for stricter isolation.
+- `.env` itself is never readable (no extension match). Traversal, absolute-outside, and symlink escapes are refused (`file_outside_root`); store ids are slug-validated before touching `.data/`.
+- ZIP entries are sanitized (zip-slip refused); export body fields are schema-validated (unknown fields dropped); oversized JSON bodies rejected by the 3 MB parser limit.
+
 ## Known defects / gaps (tracked, not hidden)
 
 - Grounding check is token-overlap heuristic; can miss paraphrased hallucinations and warn on benign rephrases.

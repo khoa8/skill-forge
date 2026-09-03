@@ -1,6 +1,6 @@
 # Creating a payment
 
-> Excerpt from source "Meridian Payments API" (lines 23–48). Verbatim except for this header.
+> Excerpt from source "Meridian Payments API" (lines 23–48). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.
 
 Create a payment by POSTing to `/v1/payments`. The minimum payload requires
 `amount`, `currency`, and a `payment_method_id` obtained from the payment

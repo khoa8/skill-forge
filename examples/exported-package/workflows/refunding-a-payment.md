@@ -1,6 +1,6 @@
 # Refunding a payment
 
-> Documented procedure from source "Meridian Payments API" (lines 62–65). Steps are verbatim from the source.
+> Documented procedure from source "Meridian Payments API" (lines 62–65). Steps are verbatim from the source; relative links are shown as paths.
 
 1. Look up the original payment id (the `pay_` prefixed identifier). _(source line 62)_
 2. Confirm the payment status is `succeeded` before attempting a refund. _(source line 63)_
