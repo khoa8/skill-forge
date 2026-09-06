@@ -609,7 +609,11 @@ async function openProvenance(record) {
     }
     const returned = data.returned ?? {};
     let meta = `source: ${data.source?.name ?? "?"} (${data.source?.type ?? "?"}) — lines ${returned.start}–${returned.end} of ${data.totalLines}`;
-    if (returned.end !== end) meta += ` (requested up to ${end})`;
+    if (data.partial) {
+      meta += ` · PARTIAL excerpt (requested through line ${data.requestedEnd}; limit ${data.excerptLimit} lines)`;
+    } else if (returned.end !== end) {
+      meta += ` (requested up to ${end})`;
+    }
     $("#prov-meta").textContent = meta;
     const bodyLines = String(data.text ?? "").split("\n");
     const width = String(returned.end).length;

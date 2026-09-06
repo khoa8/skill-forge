@@ -84,6 +84,22 @@ describe("provenance excerpt endpoint", () => {
     expect(res.body.text).toBe(expected);
   });
 
+  it("returns a clearly-labeled partial excerpt for ranges beyond the limit", async () => {
+    const normalized = normalizeSource({ type: "text", name: "x", content: SOURCE });
+    const res = await request(app)
+      .get(`/api/skills/${skillId}/provenance/excerpt`)
+      .query({ start: 1, end: 100000 })
+      .expect(200);
+    // Not a fabricated or "too large" refusal: exact lines are returned with
+    // explicit truncation metadata. The source itself ends before the excerpt
+    // limit here, so the source-end clamp applies (still flagged partial).
+    expect(res.body.partial).toBe(true);
+    expect(res.body.requested).toEqual({ start: 1, end: 100000 });
+    expect(res.body.returned.start).toBe(1);
+    expect(res.body.returned.end).toBe(Math.min(200, normalized.lineCount));
+    expect(String(res.body.text).split("\n").length).toBe(Math.min(200, normalized.lineCount));
+  });
+
   it("rejects a start line beyond the source instead of fabricating text", async () => {
     const normalized = normalizeSource({ type: "text", name: "x", content: SOURCE });
     const res = await request(app)
@@ -101,10 +117,6 @@ describe("provenance excerpt endpoint", () => {
       .query({ start: "abc", end: 4 })
       .expect(400);
     await request(app).get(`/api/skills/${skillId}/provenance/excerpt`).query({ start: 9, end: 3 }).expect(400);
-    await request(app)
-      .get(`/api/skills/${skillId}/provenance/excerpt`)
-      .query({ start: 1, end: 500 })
-      .expect(400);
   });
 
   it("404s for unknown skill ids", async () => {

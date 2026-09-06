@@ -31,9 +31,9 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
 - [x] **GitHub repository source**: `src/core/sources/github.ts` — repo/tree URL parsing, default-branch resolution, single recursive-tree request, docs-first priority ordering, extension allowlist, 40-file/800 KB/1.4 MB/depth-6/15 s bounds, raw.githubusercontent.com content fetch with final-host validation, typed errors (invalid URL, unsupported host, not found, ref not found, no docs, rate limited, fetch failed), optional `SKILLFORGE_GITHUB_TOKEN` (api.github.com only), submodules never followed, no cloning/execution; 31 new tests (unit + API)
 - [x] UI fix: source tab bodies now toggle generically (URL/Local files panels had stayed hidden)
 - [x] **Provenance click-through**: `GET /api/skills/:id/provenance/excerpt` returns the exact
-  normalized-source lines a record references (deterministic re-normalization, bounded ranges,
-  honest 422 on out-of-range); UI provenance records open a dialog with the verbatim,
-  line-numbered excerpt labeled "verbatim, not generated"
+  normalized-source lines a record references (deterministic re-normalization, bounded ranges with
+  clearly-labeled partial excerpts, honest 422 on out-of-range); UI provenance records open a dialog
+  with the verbatim, line-numbered excerpt labeled "verbatim, not generated"
 - [x] **Edit before export**: `POST /api/skills/:id/update-file` — content-only edits to existing
   text files (manifest.json excluded), 1 MB per-file bound, atomic store write, file marked
   `userEdited` with its provenance records dropped (honest: no longer claimed as source-derived),

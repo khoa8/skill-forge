@@ -326,13 +326,6 @@ export function createApp(config: AppConfig): Express {
       res.status(400).json({ error: `end (${end}) must be ≥ start (${start}).`, code: "provenance_bad_range" });
       return;
     }
-    if (end - start + 1 > MAX_EXCERPT_LINES) {
-      res.status(400).json({
-        error: `Excerpt too large (${end - start + 1} lines); the limit is ${MAX_EXCERPT_LINES}.`,
-        code: "provenance_range_too_large",
-      });
-      return;
-    }
     let normalized;
     try {
       normalized = normalizeSource({ type: stored.source.type, name: stored.source.name, content: stored.source.text });
@@ -352,12 +345,20 @@ export function createApp(config: AppConfig): Express {
       return;
     }
     const clampedEnd = Math.min(end, normalized.lineCount);
+    // Ranges wider than the cap return a clearly-labeled partial excerpt —
+    // exact lines, never fabricated, with the truncation surfaced.
+    const requestedEnd = clampedEnd;
+    const partial = end - start + 1 > MAX_EXCERPT_LINES;
+    const effectiveEnd = Math.min(clampedEnd, start + MAX_EXCERPT_LINES - 1);
     res.json({
       source: { name: stored.source.name, type: stored.source.type },
       requested: { start, end },
-      returned: { start, end: clampedEnd },
+      returned: { start, end: effectiveEnd },
+      partial,
+      requestedEnd: partial ? requestedEnd : undefined,
+      excerptLimit: partial ? MAX_EXCERPT_LINES : undefined,
       totalLines: normalized.lineCount,
-      text: sourceSlice(normalized, start, clampedEnd),
+      text: sourceSlice(normalized, start, effectiveEnd),
     });
   });
 
