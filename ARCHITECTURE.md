@@ -19,6 +19,7 @@ Source ──▶ ingest ──▶ analyze ──▶ provider.generate ──▶ 
 | Plan schema | `src/core/plan.ts` | `PlanSchema` — the structured contract every provider must satisfy. |
 | Builder | `src/core/build.ts` | Shared canonical-package synthesis: SKILL.md, references (verbatim excerpts), workflows, examples (comment-prefix only for formats that allow comments), evals, manifest with hashes; gap rendering; provenance records. |
 | Providers | `src/core/providers/` | `GenerationProvider` interface; `MockProvider` (deterministic, offline); `OpenAICompatibleProvider` (GLM/OpenAI-compatible, schema-validated output, injectable fetch); `resolveProvider`. |
+| Verify harness | `src/core/verify.ts` + `scripts/verify-provider.ts` (`npm run verify:provider`) | One bounded generation through the configured provider → plan schema check → canonical build → deterministic validation; credential-free reporting, nonzero exit on failure; injectable fetch for tests. |
 | Pipeline | `src/core/pipeline.ts` | Orchestrates ingest→analyze→generate→validate as an async generator of discriminated events (stage progress with timings, typed errors, result). |
 | Validator | `src/core/validate.ts` | Pure check registry (14 checks) over the package (+ optional source text for grounding). Deterministic; catches its own internal errors and reports them as failures. |
 | Exporters | `src/core/export/exporters.ts` | Vendor adapters only place vendor differences live: `claude-code`, `generic`; `EXPORT_TARGET_INFO` (with format basis); `buildZip` (sanitized entries, JSZip). |

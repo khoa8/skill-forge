@@ -40,6 +40,11 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
   manifest.json regenerated via shared `manifestFor` so hashes never drift, deterministic
   validation re-run before the new state is served; export gate re-validates, so failing edits
   cannot be downloaded (422); store tmp writes use unique names (concurrent-write hardening)
+- [x] **Provider verification harness**: `npm run verify:provider` (`src/core/verify.ts` +
+  `scripts/verify-provider.ts`) — env-configured provider, one bounded generation, plan schema
+  re-check, canonical build, deterministic validation, credential-free reporting, nonzero exit
+  on failure; offline by default (mock), tested with injected fetch; live glm/openai run not
+  executed (no key in this environment — recorded honestly in docs)
 
 ## P1 — remaining backlog
 

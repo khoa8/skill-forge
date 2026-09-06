@@ -7,16 +7,16 @@ feature/production-readiness
 2026-09-07T04:05:00Z (baseline verified)
 
 ## Current phase
-Phase 4 complete; starting Phase 5 — provider verification harness
+Phase 5 complete; starting Phase 6 — release hardening, docs reconciliation, full verification
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(see git log — Phase 4 commit)
+(see git log — Phase 5 commit)
 
 ## Last pushed commit
-ea2eff3 (Phase 3)
+20ecfdb (Phase 4)
 
 ## Phase 1 verification (CI)
 - .github/workflows/ci.yml added: pull_request + push (main, feature/production-readiness); Node 20; npm ci; typecheck/test/build/demo; permissions contents:read; concurrency cancel-in-progress; no secrets.
@@ -67,7 +67,14 @@ ea2eff3 (Phase 3)
   warning) → export still offered. Found+fixed JS syntax error caught by browser check.
 
 ## In progress
-- Phase 5: provider verification harness
+- Phase 5: provider verification harness — DONE:
+  src/core/verify.ts (verifyProvider: bounded sample → normalize → analyze → provider.generate
+  → PlanSchema re-check → buildCanonicalSkill → validatePackage; credential-free structured
+  result) + scripts/verify-provider.ts CLI (env config, never prints the key, nonzero exit on
+  failure) + `npm run verify:provider`. 6 tests with injected fetch (ok response, 401,
+  schema-invalid plan, network error, offline mock). Offline CLI run verified: VERIFIED, exit 0.
+  LIVE VERIFICATION NOT EXECUTED: no SKILLFORGE_API_KEY in this environment, no .env file;
+  recorded honestly per task §7.
 
 ## Remaining
 - Phase 3: provenance click-through UX
@@ -103,15 +110,16 @@ ea2eff3 (Phase 3)
 - README.md, ARCHITECTURE.md, TASKS.md, PROJECT_STATUS.md, .env.example
 
 ## Tests run in current phase
-- npm test: 159 passed (117 baseline + 24 GitHub unit + 7 API + 6 provenance + 5 edit),
-  0 failed; full suite run 3× to confirm parallel stability
-- npm run typecheck / build / demo: all pass after each checkpoint
+- npm test: 165 passed (159 after Phase 4 + 6 verify-provider harness tests), 0 failed
+- npm run typecheck / build / demo: pass after each checkpoint
+- npm run verify:provider: exit 0 (offline mock, VERIFIED)
 - Live smoke: fetchGithubSource("https://github.com/koajs/koa") → 22 files, 311 KB, OK
-- Browser: provenance click-through verified from sample and paste sources; modal shows
-  exact line-numbered excerpts matching the record ranges
+- Browser: provenance click-through verified from sample and paste sources; edit flow verified
 
 ## Known failures / blockers
-- (none)
+- Live provider verification (glm/openai) NOT executed — no API key available in this
+  environment. Harness fully tested offline with injected fetch. To run live:
+  set SKILLFORGE_PROVIDER/SKILLFORGE_API_KEY (+ optional BASE_URL/MODEL) and `npm run verify:provider`.
 
 ## Exact resume instructions
 1. `git fetch origin && git switch feature/production-readiness && git pull --ff-only`
@@ -119,4 +127,5 @@ ea2eff3 (Phase 3)
 3. Resume at the first incomplete acceptance criterion of the current phase per the task file.
 
 ## Next intended action
-Commit + push bootstrap checkpoint, then implement Phase 1 (.github/workflows/ci.yml).
+Commit + push Phase 5, then run Phase 6 (full diff audit, docs reconciliation, clean
+dependency verification, browser smoke test across all five source types, final status).

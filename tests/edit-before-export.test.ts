@@ -57,8 +57,9 @@ describe("edit generated files before export", () => {
     // Manifest hashes were resynchronized to the new content.
     const manifestFile = skill.files.find((f: { path: string }) => f.path === "manifest.json");
     const entry = findManifestEntry(manifestFile.content, editPath);
-    expect(entry.bytes).toBe(Buffer.byteLength(edited, "utf8"));
-    expect(entry.sha256).toBe(sha256(edited));
+    expect(entry).toBeDefined();
+    expect(entry!.bytes).toBe(Buffer.byteLength(edited, "utf8"));
+    expect(entry!.sha256).toBe(sha256(edited));
     // Validation reflects the edited content and still passes.
     expect(res.body.validation.executed).toBe(true);
     expect(res.body.validation.passed).toBe(true);
@@ -146,8 +147,8 @@ describe("edit generated files before export", () => {
     // Manifest inside the ZIP matches the edited file (hash resync survived packaging).
     const manifest = JSON.parse(await zip.files["edit-safe-demo/manifest.json"]!.async("string"));
     const entry = manifest.files.find((f: { path: string }) => f.path === "SKILL.md");
-    expect(entry.sha256).toBe(sha256(repaired));
+    expect(entry!.sha256).toBe(sha256(repaired));
     const editedEntry = manifest.files.find((f: { path: string }) => f.path === editPath);
-    expect(editedEntry.sha256).toBe(sha256("## Test cards (user-reviewed)\n\nUse 4242-4242-4242-4242 in the sandbox only.\n"));
+    expect(editedEntry!.sha256).toBe(sha256("## Test cards (user-reviewed)\n\nUse 4242-4242-4242-4242 in the sandbox only.\n"));
   });
 });

@@ -79,6 +79,14 @@ The report states `passed`, `executed`, per-check status, file locations, and ac
 - `mock` (default): deterministic, offline, no key. Same source ⇒ byte-identical package.
 - `glm` / `openai`: OpenAI-compatible chat-completions adapters. Model output must parse against the skill-plan schema; malformed output fails with an actionable error instead of entering the package. Configure via `.env` (see `.env.example`). These adapters are implemented and unit-tested with injected fetch, but not exercised against a paid API in this repo — no compatibility claims beyond that.
 
+### Verifying a provider
+
+```bash
+npm run verify:provider
+```
+
+Runs one small bounded generation through the configured provider (`SKILLFORGE_PROVIDER`, `SKILLFORGE_API_KEY`, optional `SKILLFORGE_BASE_URL` / `SKILLFORGE_MODEL`), schema-checks the plan, builds the canonical package, and runs deterministic validation — exiting nonzero on failure with actionable diagnostics. The API key is never printed. Without any configuration it verifies the offline demo provider, so the harness itself needs no key. Live `glm`/`openai` verification has not been executed in this repository (no paid key available); the harness is covered by tests with injected fetch.
+
 ## Verified with live sources
 
 The URL source has been exercised against real pages during development: a raw GitHub README (markdown, passed all checks) and a GitHub docs HTML page (converted, passed all checks). JS-rendered single-page apps are honestly rejected (`url_no_content`) instead of producing empty skills.
