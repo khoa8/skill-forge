@@ -20,10 +20,12 @@
   - **CI quality gate** (`.github/workflows/ci.yml`): typecheck + test + build + demo on every push/PR, Node 20, `npm ci`, minimal permissions, concurrency cancellation.
   - **GitHub repository source** (`src/core/sources/github.ts`, `sourceType: "github"`): repo/tree URL parsing, default-branch resolution, one recursive-tree API call, docs-first ordering (README → docs/ → root → rest), extension allowlist, hard bounds (40 files / 800 KB per file / 1.4 MB total / depth 6 / 15 s per request), raw.githubusercontent.com content fetch with final-host validation, typed errors surfaced per code (invalid URL, unsupported host, not found, ref not found, no docs, rate limited 429, fetch failed 502), optional `SKILLFORGE_GITHUB_TOKEN` sent to api.github.com only. No cloning, no code execution, submodules never followed; truncation is reported in notes, never silent.
   - **UI fix:** source tab bodies toggle generically — the URL and Local files panels previously stayed hidden when their tab was selected. New **GitHub repo** tab with honest limits text.
+  - **Provenance click-through** (`GET /api/skills/:id/provenance/excerpt`): the UI's provenance records open a dialog with the exact, line-numbered source excerpt — re-normalized deterministically from the stored source so line numbers match the record; out-of-range requests are refused honestly (422), never reconstructed.
+  - **Edit before export** (`POST /api/skills/:id/update-file`): content edits to existing generated text files; persisted atomically; file marked `userEdited` and its provenance dropped (no false grounding claims); `manifest.json` regenerated via the shared `manifestFor` builder so hashes match; validation re-runs server-side before the new state is served; failing edits block export (422).
 
 ## Verification evidence (this continuation)
 
-- `npm test` → **148/148 passing** (117 P1 baseline; +31 for the GitHub source unit + API tests).
+- `npm test` → **159/159 passing** (117 P1 baseline; +24 GitHub source, +7 GitHub API, +6 provenance excerpt, +5 edit-before-export).
 - `npm run typecheck` clean; `npm run build` emits working `dist/`.
 - `npm run demo` → 4 ZIPs verified non-empty with SKILL.md present.
 - Live URL fetches: koa README (markdown) and GitHub docs page (HTML) both produced packages passing all 16 checks; `example.org` and `httpbin.org/html` verified; private-host fetch refused with `url_private_host` (502).
@@ -37,7 +39,7 @@
 | --- | --- |
 | `npm run dev` | Dev server (tsx watch) at `127.0.0.1:8787` |
 | `npm start` | Dev server without watch |
-| `npm test` | Vitest suite (148 tests) |
+| `npm test` | Vitest suite (159 tests) |
 | `npm run typecheck` / `npm run lint` | tsc --noEmit |
 | `npm run build` | tsc emit to `dist/` (server runs from dist with `node dist/src/server/index.js`) |
 | `npm run demo` | Headless generate→validate→export with ZIP inspection into `output/` |

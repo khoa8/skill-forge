@@ -23,6 +23,8 @@ import {
   getSkill as loadSkill,
   listSkills,
   updateValidation,
+  updateFileContent,
+  EditError,
   toResponse,
 } from "./store.js";
 import type { ExportTarget, SourceType } from "../core/types.js";
@@ -63,6 +65,15 @@ const GenerateBody = z.object({
 });
 
 const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
+
+const UpdateFileBody = z.object({
+  /** Package-relative path of an existing generated text file. */
+  path: z.string().min(1).max(300),
+  /** Replacement content. The schema is a transport sanity bound (under the
+   * express JSON limit); the authoritative per-file limit lives in the store
+   * and is reported as 413 edit_too_large. */
+  content: z.string().min(1).max(2_000_000),
+});
 
 /** Max lines per provenance excerpt response — keeps replies bounded. */
 const MAX_EXCERPT_LINES = 200;
@@ -364,6 +375,39 @@ export function createApp(config: AppConfig): Express {
     });
     await updateValidation(stored.id, report);
     res.json({ validation: report });
+  });
+
+  // Edit one generated text file before export. The stored skill is updated
+  // atomically, the file is marked user-edited (its provenance records are
+  // dropped), manifest hashes are resynchronized, and deterministic validation
+  // re-runs against the edited content before the new state is served.
+  app.post("/api/skills/:id/update-file", async (req, res) => {
+    const parsed = UpdateFileBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "Invalid edit request.",
+        detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      });
+      return;
+    }
+    try {
+      const stored = await updateFileContent(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText) =>
+        validatePackage({ skill, sourceText, target: undefined }),
+      );
+      res.json(toResponse(stored));
+    } catch (err) {
+      if (err instanceof EditError) {
+        const status =
+          err.code === "skill_not_found" || err.code === "file_not_found"
+            ? 404
+            : err.code === "edit_too_large"
+              ? 413
+              : 400;
+        res.status(status).json({ error: err.message, code: err.code });
+        return;
+      }
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err), code: "edit_failed" });
+    }
   });
 
   // Export: re-validates, refuses packages with errors, streams a real ZIP.

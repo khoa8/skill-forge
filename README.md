@@ -48,7 +48,7 @@ Every push runs the same four quality gates (typecheck, test, build, demo) in Gi
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
 | **Validate** | 16 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
-| **Preview** | Inspect every generated file with its purpose and provenance before exporting. Generated skills persist on disk (`.data/skills/`) and survive server restarts. |
+| **Preview** | Inspect every generated file with its purpose and provenance before exporting. Provenance records are clickable and show the exact source lines (verbatim, never reconstructed). Generated files can be edited in place before export: edits are persisted, marked `user-edited` (their source provenance is dropped honestly), manifest hashes are resynchronized, and deterministic validation re-runs — failing edits block export. Generated skills persist on disk (`.data/skills/`) and survive server restarts. |
 | **Export** | Real ZIP downloads for **Claude Code** and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
 
 ## Generated package

@@ -10,9 +10,11 @@ const state = {
   selectedSampleId: null,
   running: false,
   skillId: null,
+  skill: null,
   validation: null,
   activeTab: "sample",
   exportTargets: [],
+  editingPath: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,6 +101,18 @@ function bindEvents() {
   $("#source-repo").addEventListener("input", updateGenerateButton);
 
   $("#prov-close").addEventListener("click", () => $("#provenance-dialog").close());
+
+  $("#file-edit-btn").addEventListener("click", () => {
+    const file = state.skill?.files.find((f) => f.path === $("#file-view-path").textContent);
+    if (file) startEdit(file);
+  });
+  $("#file-edit-cancel").addEventListener("click", cancelEdit);
+  $("#file-edit-save").addEventListener("click", saveEdit);
+  $("#file-edit-textarea").addEventListener("input", () => {
+    if (state.editingPath !== null) {
+      $("#file-edit-status").textContent = "Editing — unsaved changes are local only.";
+    }
+  });
 
   $("#generate-btn").addEventListener("click", runGenerate);
 }
@@ -299,6 +313,7 @@ function showFatal(message) {
 
 function renderResults(skill, validation) {
   state.skillId = skill.id;
+  state.skill = skill;
   state.validation = validation;
 
   $("#skill-title").textContent = skill.meta.displayName;
@@ -310,6 +325,10 @@ function renderResults(skill, validation) {
   badges.innerHTML = "";
   addBadge(badges, skill.meta.generator === "mock" ? "offline demo provider" : `provider: ${skill.meta.generator}`, "ok");
   addBadge(badges, `${skill.meta.gaps.length} gap(s) marked`, skill.meta.gaps.length > 0 ? "warn" : "ok");
+  const editedCount = (skill.files ?? []).filter((f) => f.userEdited).length;
+  if (editedCount > 0) {
+    addBadge(badges, `${editedCount} file(s) user-edited — provenance not claimed for them`, "warn");
+  }
   if (validation.executed) {
     addBadge(badges, `${validation.checks.length} deterministic checks`, "ok");
     if (validation.warningCount > 0) addBadge(badges, `${validation.warningCount} warning(s)`, "warn");
@@ -428,25 +447,27 @@ const FILE_ORDER = (a, b) => {
   return rank(a.path) - rank(b.path) || a.path.localeCompare(b.path);
 };
 
-function renderFiles(skill) {
+function renderFiles(skill, selectedPath) {
   const list = $("#file-list");
   list.innerHTML = "";
   const files = [...skill.files].sort(FILE_ORDER);
-  $("#file-count").textContent = `${files.length} files · every file carries a documented purpose`;
+  const edited = files.filter((f) => f.userEdited).length;
+  $("#file-count").textContent =
+    `${files.length} files · every file carries a documented purpose` + (edited > 0 ? ` · ${edited} user-edited` : "");
 
   files.forEach((file, i) => {
     const li = document.createElement("li");
     li.dataset.path = file.path;
     const name = document.createElement("span");
-    name.textContent = file.path;
+    name.textContent = file.path + (file.userEdited ? " ✎" : "");
     const bytes = document.createElement("span");
     bytes.className = "bytes";
     bytes.textContent = `${(file.content.length / 1024).toFixed(1)}K`;
     li.append(name, bytes);
     li.addEventListener("click", () => showFile(skill, file.path));
     list.append(li);
-    if (i === 0) showFile(skill, file.path);
   });
+  showFile(skill, selectedPath ?? (files[0] ? files[0].path : ""));
 }
 
 function showFile(skill, path) {
@@ -455,14 +476,19 @@ function showFile(skill, path) {
   document.querySelectorAll("#file-list li").forEach((li) => {
     li.classList.toggle("active", li.dataset.path === path);
   });
+  cancelEdit();
   $("#file-view-path").textContent = file.path;
   const lines = file.content.split("\n").length;
-  $("#file-view-meta").textContent = `${lines} lines · ${new Blob([file.content]).size} bytes`;
+  $("#file-view-meta").textContent =
+    `${lines} lines · ${new Blob([file.content]).size} bytes` + (file.userEdited ? " · user-edited" : "");
   $("#file-view-purpose").textContent = `Purpose: ${file.purpose}`;
   const prov = (skill.provenance ?? []).filter((p) => p.filePath === path);
   const provEl = $("#file-view-provenance");
   provEl.innerHTML = "";
-  if (prov.length > 0) {
+  if (file.userEdited) {
+    provEl.textContent =
+      "Provenance: this file was edited by you after generation, so its content is no longer claimed as source-derived.";
+  } else if (prov.length > 0) {
     const label = document.createElement("span");
     label.textContent = "Provenance: ";
     provEl.append(label);
@@ -484,6 +510,78 @@ function showFile(skill, path) {
     provEl.textContent = "Provenance: synthesized by the generator (no verbatim excerpt).";
   }
   $("#file-view-content").textContent = file.content;
+}
+
+// ---------------------------------------------------------------------------
+// Edit generated files before export
+// ---------------------------------------------------------------------------
+
+function startEdit(file) {
+  state.editingPath = file.path;
+  $("#file-view-content").classList.add("hidden");
+  $("#file-edit-box").classList.remove("hidden");
+  const ta = $("#file-edit-textarea");
+  ta.value = file.content;
+  $("#file-edit-status").textContent = "Editing — unsaved changes are local only.";
+  $("#file-edit-error").classList.add("hidden");
+  $("#file-edit-save").disabled = false;
+  ta.focus();
+}
+
+function cancelEdit() {
+  state.editingPath = null;
+  const box = $("#file-edit-box");
+  if (box) {
+    box.classList.add("hidden");
+    $("#file-view-content").classList.remove("hidden");
+  }
+}
+
+function showEditError(message) {
+  const box = $("#file-edit-error");
+  box.innerHTML = "";
+  const strong = document.createElement("strong");
+  strong.textContent = "Save failed.";
+  const p = document.createElement("div");
+  p.textContent = message;
+  box.append(strong, p);
+  box.classList.remove("hidden");
+}
+
+async function saveEdit() {
+  if (state.editingPath === null || !state.skillId) return;
+  const path = state.editingPath;
+  const content = $("#file-edit-textarea").value;
+  const saveBtn = $("#file-edit-save");
+  saveBtn.disabled = true;
+  $("#file-edit-status").textContent = "Saving…";
+  $("#file-edit-error").classList.add("hidden");
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/update-file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path, content }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showEditError(data.error ?? `Save failed (HTTP ${res.status}).`);
+      saveBtn.disabled = false;
+      $("#file-edit-status").textContent = "Not saved — fix the error or cancel.";
+      return;
+    }
+    // The server persisted the edit, re-ran deterministic validation, and
+    // returned the full updated package + validation.
+    state.skill = data.skill;
+    state.validation = data.validation;
+    cancelEdit();
+    renderValidation(data.validation, false);
+    renderFiles(data.skill, path);
+    renderExportCards();
+  } catch (err) {
+    showEditError(err.message ?? String(err));
+    saveBtn.disabled = false;
+    $("#file-edit-status").textContent = "Not saved — network error.";
+  }
 }
 
 // ---------------------------------------------------------------------------

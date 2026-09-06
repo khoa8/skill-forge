@@ -7,16 +7,16 @@ feature/production-readiness
 2026-09-07T04:05:00Z (baseline verified)
 
 ## Current phase
-Phase 3 complete; starting Phase 4 — edit generated files before export
+Phase 4 complete; starting Phase 5 — provider verification harness
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(see git log — Phase 3 commit)
+(see git log — Phase 4 commit)
 
 ## Last pushed commit
-49143d9 (Phase 2C)
+ea2eff3 (Phase 3)
 
 ## Phase 1 verification (CI)
 - .github/workflows/ci.yml added: pull_request + push (main, feature/production-readiness); Node 20; npm ci; typecheck/test/build/demo; permissions contents:read; concurrency cancel-in-progress; no secrets.
@@ -56,9 +56,18 @@ IN_PROGRESS
   fabricated). tests/provenance-excerpt.test.ts (6 tests). Browser-verified click-through
   from sample and pasted sources (line numbers match: 1–124 of 124; 1–18 of 18).
   Note: a stale dev server from a previous session held port 8787 and was killed.
+- Phase 4: edit-before-export — POST /api/skills/:id/update-file (content-only edits,
+  manifest.json excluded, 1 MB bound → 413, atomic write); file marked userEdited with
+  provenance dropped (honest policy); manifest regenerated via extracted shared
+  build.ts manifestFor() so hashes match; validation re-runs before serving; export gate
+  blocks failing edits (422). UI: Edit/Save/Cancel, dirty state, user-edited markers,
+  validation re-render. Fixed latent store race (unique tmp names). 5 new tests
+  (tests/edit-before-export.test.ts) + full-suite stability confirmed (3 runs).
+  Browser-verified: edit → save → user-edited markers → validation re-rendered (1 honest
+  warning) → export still offered. Found+fixed JS syntax error caught by browser check.
 
 ## In progress
-- Phase 4: edit generated files before export
+- Phase 5: provider verification harness
 
 ## Remaining
 - Phase 3: provenance click-through UX
@@ -82,13 +91,20 @@ IN_PROGRESS
 - src/core/types.ts (SourceType + "github")
 - src/core/sources/files.ts (exported TEXT_EXTENSIONS)
 - src/core/sources/github.ts (new)
-- src/server/app.ts (github sourceType, error mapping, unified type mapping, provenance excerpt endpoint)
-- tests/github-source.test.ts, tests/api-github.test.ts, tests/provenance-excerpt.test.ts (new)
-- web/index.html, web/app.js, web/styles.css (GitHub tab, generic tab toggling, provenance modal)
+- src/server/store.ts (updateFileContent/EditError, unique tmp names)
+- src/server/app.ts (github sourceType, error mapping, unified type mapping, provenance
+  excerpt endpoint, update-file endpoint)
+- src/core/build.ts (extracted shared manifestFor)
+- src/core/types.ts (SourceType + "github"; SkillFile.userEdited)
+- tests/github-source.test.ts, tests/api-github.test.ts, tests/provenance-excerpt.test.ts,
+  tests/edit-before-export.test.ts (new)
+- web/index.html, web/app.js, web/styles.css (GitHub tab, generic tab toggling, provenance
+  modal, edit mode)
 - README.md, ARCHITECTURE.md, TASKS.md, PROJECT_STATUS.md, .env.example
 
 ## Tests run in current phase
-- npm test: 154 passed (148 after Phase 2 + 6 provenance excerpt tests), 0 failed
+- npm test: 159 passed (117 baseline + 24 GitHub unit + 7 API + 6 provenance + 5 edit),
+  0 failed; full suite run 3× to confirm parallel stability
 - npm run typecheck / build / demo: all pass after each checkpoint
 - Live smoke: fetchGithubSource("https://github.com/koajs/koa") → 22 files, 311 KB, OK
 - Browser: provenance click-through verified from sample and paste sources; modal shows

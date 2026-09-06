@@ -129,9 +129,19 @@
             <div class="file-view-head">
               <span id="file-view-path" class="mono"></span>
               <span id="file-view-meta" class="muted"></span>
+              <button id="file-edit-btn" class="btn small hidden" type="button">Edit</button>
             </div>
             <p id="file-view-purpose" class="hint"></p>
             <p id="file-view-provenance" class="hint provenance"></p>
+            <div id="file-edit-box" class="hidden">
+              <textarea id="file-edit-textarea" class="mono" rows="18" spellcheck="false" aria-label="Edit file content"></textarea>
+              <div class="edit-actions">
+                <span id="file-edit-status" class="hint"></span>
+                <button id="file-edit-save" class="btn primary" type="button">Save</button>
+                <button id="file-edit-cancel" class="btn" type="button">Cancel</button>
+              </div>
+              <div id="file-edit-error" class="error-box hidden" role="alert"></div>
+            </div>
             <pre id="file-view-content" class="mono"></pre>
           </div>
         </div>

@@ -31,6 +31,10 @@ export const SkillFile = z.object({
   content: z.string(),
   /** Why this file exists — every generated file must have a purpose. */
   purpose: z.string(),
+  /** Set when the user edited this file's content after generation. Its
+   * provenance records are then dropped: the content is no longer purely
+   * source-derived, and claiming line-range grounding would be false. */
+  userEdited: z.boolean().optional(),
 });
 export type SkillFile = z.infer<typeof SkillFile>;
 

@@ -261,3 +261,16 @@ input:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px;
   font-size: 12.5px; line-height: 1.55; white-space: pre;
 }
+
+/* Edit generated files before export */
+.file-view-head { display: flex; align-items: baseline; gap: 10px; }
+.file-view-head #file-edit-btn { margin-left: auto; flex: none; }
+.btn.small { padding: 4px 12px; font-size: 12.5px; }
+#file-edit-box textarea {
+  width: 100%; background: var(--bg-inset); color: var(--text);
+  border: 1px solid var(--accent, #6c8cff); border-radius: 8px;
+  padding: 10px 12px; font-size: 12.5px; line-height: 1.5; resize: vertical;
+  min-height: 240px;
+}
+.edit-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.edit-actions #file-edit-status { margin: 0; flex: 1; }
