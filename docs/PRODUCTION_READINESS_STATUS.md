@@ -7,16 +7,16 @@ feature/production-readiness
 2026-09-07T04:05:00Z (baseline verified)
 
 ## Current phase
-Phase 2 complete (all checkpoints A/B/C pushed); starting Phase 3 — provenance click-through UX
+Phase 3 complete; starting Phase 4 — edit generated files before export
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(see git log — Phase 2C commit)
+(see git log — Phase 3 commit)
 
 ## Last pushed commit
-90ffd7b (checkpoint B)
+49143d9 (Phase 2C)
 
 ## Phase 1 verification (CI)
 - .github/workflows/ci.yml added: pull_request + push (main, feature/production-readiness); Node 20; npm ci; typecheck/test/build/demo; permissions contents:read; concurrency cancel-in-progress; no secrets.
@@ -48,9 +48,17 @@ IN_PROGRESS
   URL/Local-files panels never became visible); docs updated (README, ARCHITECTURE,
   TASKS, PROJECT_STATUS, .env.example); live smoke test vs koajs/koa passed
   (default branch master, 22 files, 311 KB, 9.2 s)
+- Phase 3: provenance click-through — GET /api/skills/:id/provenance/excerpt returns the
+  exact normalized-source lines a record references (deterministic re-normalization of the
+  stored source, zod-validated query, 200-line cap, honest out-of-range 422); UI renders
+  every provenance record as a clickable button opening a <dialog> with line-numbered
+  verbatim excerpt + "verbatim, not generated" label; failures shown honestly (never
+  fabricated). tests/provenance-excerpt.test.ts (6 tests). Browser-verified click-through
+  from sample and pasted sources (line numbers match: 1–124 of 124; 1–18 of 18).
+  Note: a stale dev server from a previous session held port 8787 and was killed.
 
 ## In progress
-- Phase 3: provenance click-through UX
+- Phase 4: edit generated files before export
 
 ## Remaining
 - Phase 3: provenance click-through UX
@@ -74,15 +82,17 @@ IN_PROGRESS
 - src/core/types.ts (SourceType + "github")
 - src/core/sources/files.ts (exported TEXT_EXTENSIONS)
 - src/core/sources/github.ts (new)
-- src/server/app.ts (github sourceType, error mapping, unified type mapping)
-- tests/github-source.test.ts, tests/api-github.test.ts (new)
-- web/index.html, web/app.js (GitHub tab, generic tab toggling)
+- src/server/app.ts (github sourceType, error mapping, unified type mapping, provenance excerpt endpoint)
+- tests/github-source.test.ts, tests/api-github.test.ts, tests/provenance-excerpt.test.ts (new)
+- web/index.html, web/app.js, web/styles.css (GitHub tab, generic tab toggling, provenance modal)
 - README.md, ARCHITECTURE.md, TASKS.md, PROJECT_STATUS.md, .env.example
 
 ## Tests run in current phase
-- npm test: 148 passed (117 baseline + 24 GitHub unit + 7 API), 0 failed
+- npm test: 154 passed (148 after Phase 2 + 6 provenance excerpt tests), 0 failed
 - npm run typecheck / build / demo: all pass after each checkpoint
 - Live smoke: fetchGithubSource("https://github.com/koajs/koa") → 22 files, 311 KB, OK
+- Browser: provenance click-through verified from sample and paste sources; modal shows
+  exact line-numbered excerpts matching the record ranges
 
 ## Known failures / blockers
 - (none)

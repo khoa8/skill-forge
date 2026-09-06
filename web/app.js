@@ -98,6 +98,8 @@ function bindEvents() {
   $("#source-path").addEventListener("input", updateGenerateButton);
   $("#source-repo").addEventListener("input", updateGenerateButton);
 
+  $("#prov-close").addEventListener("click", () => $("#provenance-dialog").close());
+
   $("#generate-btn").addEventListener("click", runGenerate);
 }
 
@@ -459,15 +461,67 @@ function showFile(skill, path) {
   $("#file-view-purpose").textContent = `Purpose: ${file.purpose}`;
   const prov = (skill.provenance ?? []).filter((p) => p.filePath === path);
   const provEl = $("#file-view-provenance");
+  provEl.innerHTML = "";
   if (prov.length > 0) {
-    const p = prov[0];
-    provEl.textContent = `Provenance: ${p.extraction} — source lines ${p.sourceLines[0]}–${p.sourceLines[1]}` +
-      (p.sourceHeading ? `, under "${p.sourceHeading}"` : "");
+    const label = document.createElement("span");
+    label.textContent = "Provenance: ";
+    provEl.append(label);
+    prov.forEach((p, i) => {
+      if (i > 0) provEl.append(document.createTextNode(" "));
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "prov-record";
+      btn.textContent =
+        `${p.extraction} — lines ${p.sourceLines[0]}–${p.sourceLines[1]}` +
+        (p.sourceHeading ? `, under "${p.sourceHeading}"` : "") +
+        " · view source ↗";
+      btn.title = "Show the exact source lines supporting this content";
+      btn.addEventListener("click", () => openProvenance(p));
+      provEl.append(btn);
+    });
     provEl.classList.remove("hidden");
   } else {
     provEl.textContent = "Provenance: synthesized by the generator (no verbatim excerpt).";
   }
   $("#file-view-content").textContent = file.content;
+}
+
+// ---------------------------------------------------------------------------
+// Provenance click-through
+// ---------------------------------------------------------------------------
+
+async function openProvenance(record) {
+  const dlg = $("#provenance-dialog");
+  const [start, end] = record.sourceLines;
+  $("#prov-extraction").textContent = `Extraction: ${record.extraction}`;
+  $("#prov-meta").textContent = "Loading source excerpt…";
+  $("#prov-lines").textContent = "";
+  dlg.showModal();
+
+  try {
+    const res = await fetch(
+      `/api/skills/${encodeURIComponent(state.skillId)}/provenance/excerpt?start=${start}&end=${end}`,
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Never fabricate an excerpt — surface the failure honestly.
+      $("#prov-meta").textContent = "";
+      $("#prov-lines").textContent = `Source excerpt unavailable (${res.status}): ${data.error ?? res.statusText}`;
+      return;
+    }
+    const returned = data.returned ?? {};
+    let meta = `source: ${data.source?.name ?? "?"} (${data.source?.type ?? "?"}) — lines ${returned.start}–${returned.end} of ${data.totalLines}`;
+    if (returned.end !== end) meta += ` (requested up to ${end})`;
+    $("#prov-meta").textContent = meta;
+    const bodyLines = String(data.text ?? "").split("\n");
+    const width = String(returned.end).length;
+    $("#prov-lines").textContent = bodyLines
+      .map((line, i) => `${String(returned.start + i).padStart(width, " ")} │ ${line}`)
+      .join("\n");
+  } catch (err) {
+    $("#prov-meta").textContent = "";
+    $("#prov-lines").textContent = `Source excerpt unavailable: ${err.message ?? err}`;
+  }
 }
 
 function renderExportCards() {

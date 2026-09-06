@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { z } from "zod";
 import { runPipeline } from "../core/pipeline.js";
 import { validatePackage } from "../core/validate.js";
+import { normalizeSource, sourceSlice } from "../core/ingest.js";
 import { exportPackage, buildZip, EXPORT_TARGET_INFO, ExportError } from "../core/export/exporters.js";
 import { listSamples, getSample } from "../core/samples.js";
 import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
@@ -62,6 +63,14 @@ const GenerateBody = z.object({
 });
 
 const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
+
+/** Max lines per provenance excerpt response — keeps replies bounded. */
+const MAX_EXCERPT_LINES = 200;
+
+const ExcerptQuery = z.object({
+  start: z.coerce.number().int().min(1).max(1_000_000),
+  end: z.coerce.number().int().min(1).max(1_000_000),
+});
 
 /** HTTP status per typed source-adapter error code. */
 const GITHUB_ERROR_STATUS: Record<string, number> = {
@@ -281,6 +290,64 @@ export function createApp(config: AppConfig): Express {
       return;
     }
     res.json(toResponse(stored));
+  });
+
+  // Provenance click-through: exact lines from the *normalized* source that a
+  // provenance record refers to. The stored raw source is re-normalized with
+  // the same deterministic function the pipeline used, so line numbers match
+  // the record exactly.
+  app.get("/api/skills/:id/provenance/excerpt", async (req, res) => {
+    const stored = await loadSkill(req.params.id!);
+    if (!stored) {
+      res.status(404).json({ error: `No skill with id "${req.params.id}".` });
+      return;
+    }
+    const parsed = ExcerptQuery.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "Invalid line range.",
+        detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      });
+      return;
+    }
+    const { start, end } = parsed.data;
+    if (end < start) {
+      res.status(400).json({ error: `end (${end}) must be ≥ start (${start}).`, code: "provenance_bad_range" });
+      return;
+    }
+    if (end - start + 1 > MAX_EXCERPT_LINES) {
+      res.status(400).json({
+        error: `Excerpt too large (${end - start + 1} lines); the limit is ${MAX_EXCERPT_LINES}.`,
+        code: "provenance_range_too_large",
+      });
+      return;
+    }
+    let normalized;
+    try {
+      normalized = normalizeSource({ type: stored.source.type, name: stored.source.name, content: stored.source.text });
+    } catch (err) {
+      res.status(409).json({
+        error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        code: "source_renormalization_failed",
+      });
+      return;
+    }
+    if (start > normalized.lineCount) {
+      res.status(422).json({
+        error: `Requested start line ${start} is beyond the source (${normalized.lineCount} lines). The provenance record does not match the stored source.`,
+        code: "provenance_out_of_range",
+        totalLines: normalized.lineCount,
+      });
+      return;
+    }
+    const clampedEnd = Math.min(end, normalized.lineCount);
+    res.json({
+      source: { name: stored.source.name, type: stored.source.type },
+      requested: { start, end },
+      returned: { start, end: clampedEnd },
+      totalLines: normalized.lineCount,
+      text: sourceSlice(normalized, start, clampedEnd),
+    });
   });
 
   // Re-run deterministic validation on demand.

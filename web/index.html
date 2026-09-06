@@ -151,6 +151,17 @@
     <span class="muted">Generated content is grounded in your source; always review before use. Validation is deterministic and never skipped silently.</span>
   </footer>
 
+  <dialog id="provenance-dialog" class="prov-dialog" aria-labelledby="prov-title">
+    <div class="prov-head">
+      <h3 id="prov-title">Source excerpt</h3>
+      <button id="prov-close" class="btn" type="button">Close</button>
+    </div>
+    <p id="prov-verbatim" class="prov-verbatim">Exact excerpt from your source — verbatim, not generated.</p>
+    <p id="prov-meta" class="hint mono"></p>
+    <p id="prov-extraction" class="hint"></p>
+    <pre id="prov-lines" class="mono prov-lines"></pre>
+  </dialog>
+
   <script src="/app.js"></script>
 </body>
 </html>
