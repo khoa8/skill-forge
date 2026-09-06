@@ -75,7 +75,7 @@ export type CanonicalSkill = z.infer<typeof CanonicalSkill>;
 // Source / analysis types
 // ---------------------------------------------------------------------------
 
-export const SourceType = z.enum(["text", "sample", "file"]);
+export const SourceType = z.enum(["text", "sample", "file", "github"]);
 export type SourceType = z.infer<typeof SourceType>;
 
 export const SourceInput = z.object({

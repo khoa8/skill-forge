@@ -7,16 +7,16 @@ feature/production-readiness
 2026-09-07T04:05:00Z (baseline verified)
 
 ## Current phase
-Phase 1 complete; starting Phase 2 — first-class GitHub repository source
+Phase 2 checkpoint A complete; starting checkpoint B (API integration)
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-<to fill at commit time>
+(see git log — checkpoint A commit)
 
 ## Last pushed commit
-e766dcb (bootstrap checkpoint)
+c4fa069 (CI workflow)
 
 ## Phase 1 verification (CI)
 - .github/workflows/ci.yml added: pull_request + push (main, feature/production-readiness); Node 20; npm ci; typecheck/test/build/demo; permissions contents:read; concurrency cancel-in-progress; no secrets.
@@ -37,9 +37,13 @@ e766dcb (bootstrap checkpoint)
 - Phase 0: status file created
 - Phase 0: baseline verified (all four commands green)
 - Phase 1: CI workflow added and YAML-validated; pushed for Actions run
+- Phase 2A: src/core/sources/github.ts (bounded GitHub docs ingestion: URL parsing,
+  default-branch resolution, tree fetch, extension/priority filtering, file/total/depth
+  bounds, raw-content fetch with host validation, typed errors, optional token env var);
+  SourceType extended with "github"; tests/github-source.test.ts (24 tests, all green)
 
 ## In progress
-- Phase 2: first-class GitHub repository source (checkpoint A: core adapter + tests)
+- Phase 2B: API integration (sourceType=github) + integration tests
 
 ## Remaining
 - Phase 2 remaining: API integration (B), UI + docs (C)
@@ -49,15 +53,26 @@ e766dcb (bootstrap checkpoint)
 - Phase 6: release hardening + docs reconciliation + full verification
 
 ## Important decisions
-- Following task file docs/PRODUCTION_READINESS_STATUS.md protocol: commit+push after every phase and meaningful sub-feature.
-- Only the feature branch is used; main is untouched.
+- GitHub adapter requests api.github.com (repo meta + one recursive tree call) and
+  raw.githubusercontent.com for contents (avoids API rate limits for content; final
+  URL host is validated). Optional SKILLFORGE_GITHUB_TOKEN is sent to api.github.com only.
+- Bounds: 40 files / 800 KB per file / 1.4 MB total / depth 6 / 15 s per request —
+  aligned with the local-file adapter. Truncation is honest (notes surfaced to the UI).
+- WHATWG URL parsing normalizes dot-segments; unsafe paths from the API tree
+  (../, absolute, backslash, submodules) are skipped with notes.
+- Following the task-file checkpoint protocol; only the feature branch is used.
 
 ## Files changed in current phase
-- docs/PRODUCTION_READINESS_STATUS.md (new)
+- docs/PRODUCTION_READINESS_STATUS.md
+- .github/workflows/ci.yml
+- src/core/types.ts (SourceType + "github")
+- src/core/sources/files.ts (exported TEXT_EXTENSIONS)
+- src/core/sources/github.ts (new)
+- tests/github-source.test.ts (new)
 
 ## Tests run in current phase
-- npm test: 117 passed
-- npm run typecheck / build / demo: all pass
+- npm test: 141 passed (117 baseline + 24 new GitHub source tests), 0 failed
+- npm run typecheck: pass after each stage
 
 ## Known failures / blockers
 - (none)
