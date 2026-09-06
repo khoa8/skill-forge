@@ -7,16 +7,22 @@ feature/production-readiness
 2026-09-07T04:05:00Z (baseline verified)
 
 ## Current phase
-Phase 0 complete; starting Phase 1 — GitHub Actions CI quality gate
+Phase 1 complete; starting Phase 2 — first-class GitHub repository source
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(bootstrap commit of this file on feature/production-readiness)
+<to fill at commit time>
 
 ## Last pushed commit
-25c4376 (branch creation push)
+e766dcb (bootstrap checkpoint)
+
+## Phase 1 verification (CI)
+- .github/workflows/ci.yml added: pull_request + push (main, feature/production-readiness); Node 20; npm ci; typecheck/test/build/demo; permissions contents:read; concurrency cancel-in-progress; no secrets.
+- YAML validated locally by parsing with the project `yaml` dependency (triggers/permissions/steps correct).
+- Local equivalents of all four CI commands verified green in Phase 0 baseline.
+- gh CLI is authenticated; Actions run will be inspected after push.
 
 ## Baseline verification
 - npm install: OK (audit warnings only, no vulnerabilities blocking)
@@ -30,10 +36,13 @@ IN_PROGRESS
 - Phase 0: feature/production-readiness created from main (25c4376) and pushed
 - Phase 0: status file created
 - Phase 0: baseline verified (all four commands green)
+- Phase 1: CI workflow added and YAML-validated; pushed for Actions run
+
+## In progress
+- Phase 2: first-class GitHub repository source (checkpoint A: core adapter + tests)
 
 ## Remaining
-- Phase 1: GitHub Actions CI quality gate
-- Phase 2: first-class GitHub repository source (checkpoints A/B/C)
+- Phase 2 remaining: API integration (B), UI + docs (C)
 - Phase 3: provenance click-through UX
 - Phase 4: edit generated files before export
 - Phase 5: provider verification harness
