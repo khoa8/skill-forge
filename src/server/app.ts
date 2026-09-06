@@ -16,6 +16,7 @@ import { exportPackage, buildZip, EXPORT_TARGET_INFO, ExportError } from "../cor
 import { listSamples, getSample } from "../core/samples.js";
 import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
 import { collectFiles, combineFiles, FileSourceError } from "../core/sources/files.js";
+import { fetchGithubSource, GithubSourceError } from "../core/sources/github.js";
 import {
   saveSkill,
   getSkill as loadSkill,
@@ -23,7 +24,7 @@ import {
   updateValidation,
   toResponse,
 } from "./store.js";
-import type { ExportTarget } from "../core/types.js";
+import type { ExportTarget, SourceType } from "../core/types.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 
 const VERSION = "0.1.0";
@@ -43,7 +44,7 @@ function findWebDir(): string {
 const WEB_DIR = findWebDir();
 
 const GenerateBody = z.object({
-  sourceType: z.enum(["text", "sample", "url", "file"]),
+  sourceType: z.enum(["text", "sample", "url", "file", "github"]),
   /** For `text`: the pasted content. Required when sourceType is "text". */
   content: z.string().min(1).max(2_000_000).optional(),
   /** For `sample`: bundled sample id. */
@@ -52,6 +53,8 @@ const GenerateBody = z.object({
   url: z.string().max(2048).optional(),
   /** For `file`: workspace-relative file or directory path. */
   path: z.string().max(1024).optional(),
+  /** For `github`: a github.com repository or tree URL. */
+  repo: z.string().max(2048).optional(),
   recursive: z.boolean().optional(),
   name: z.string().max(200).optional(),
   requestedName: z.string().max(80).optional(),
@@ -59,6 +62,26 @@ const GenerateBody = z.object({
 });
 
 const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
+
+/** HTTP status per typed source-adapter error code. */
+const GITHUB_ERROR_STATUS: Record<string, number> = {
+  github_invalid_url: 400,
+  github_unsupported_host: 400,
+  github_not_found: 404,
+  github_ref_not_found: 404,
+  github_no_docs: 422,
+  github_rate_limited: 429,
+  github_fetch_failed: 502,
+};
+
+/** Map an API sourceType to the canonical SourceInput type kept in the store. */
+const PIPELINE_SOURCE_TYPE: Record<z.infer<typeof GenerateBody>["sourceType"], SourceType> = {
+  text: "text",
+  sample: "sample",
+  url: "text",
+  file: "file",
+  github: "github",
+};
 
 export interface AppConfig {
   provider: string;
@@ -145,6 +168,25 @@ export function createApp(config: AppConfig): Express {
         });
         return;
       }
+    } else if (body.sourceType === "github") {
+      if (!body.repo) {
+        res.status(400).json({ error: "sourceType 'github' requires `repo` (a github.com repository or tree URL)." });
+        return;
+      }
+      try {
+        const fetched = await fetchGithubSource(body.repo);
+        content = fetched.input.content;
+        name = body.name?.trim() || fetched.input.name;
+        sourceNotes = fetched.notes;
+      } catch (err) {
+        const code = err instanceof GithubSourceError ? err.code : "github_fetch_failed";
+        const status = err instanceof GithubSourceError ? (GITHUB_ERROR_STATUS[code] ?? 502) : 502;
+        res.status(status).json({
+          error: err instanceof Error ? err.message : String(err),
+          code,
+        });
+        return;
+      }
     } else if (body.sourceType === "file") {
       if (!body.path) {
         res.status(400).json({ error: "sourceType 'file' requires `path` (workspace-relative file or directory)." });
@@ -182,10 +224,11 @@ export function createApp(config: AppConfig): Express {
     res.flushHeaders();
 
     const started = Date.now();
+    const pipelineSourceType = PIPELINE_SOURCE_TYPE[body.sourceType];
     void (async () => {
       try {
         for await (const event of runPipeline(
-          { type: body.sourceType === "sample" ? "sample" : body.sourceType === "file" ? "file" : "text", name, content },
+          { type: pipelineSourceType, name, content },
           {
             provider: body.provider ?? (config.provider as (typeof PROVIDER_IDS)[number]) ?? "mock",
             apiKey: config.hasApiKey ? process.env.SKILLFORGE_API_KEY : undefined,
@@ -206,7 +249,7 @@ export function createApp(config: AppConfig): Express {
                 codeBlockCount: event.analysis.codeBlocks.length,
                 lineCount: event.analysis.lineCount,
               },
-              source: { name, type: body.sourceType === "sample" ? "sample" : body.sourceType === "file" ? "file" : "text", text: content },
+              source: { name, type: pipelineSourceType, text: content },
               validation: event.validation,
               createdAt: new Date().toISOString(),
             });
