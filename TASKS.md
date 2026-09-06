@@ -25,9 +25,15 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
 - [x] **Link neutralization** in verbatim excerpts (multi-line labels); found via live koa README, regression-tested
 - [x] dist-mode static serving (`findWebDir`), MIT license, export-blocked UI dedup
 
+## P1.5 — production readiness run (feature/production-readiness)
+
+- [x] GitHub Actions CI quality gate (`npm run typecheck` / `test` / `build` / `demo` on every push/PR)
+- [x] **GitHub repository source**: `src/core/sources/github.ts` — repo/tree URL parsing, default-branch resolution, single recursive-tree request, docs-first priority ordering, extension allowlist, 40-file/800 KB/1.4 MB/depth-6/15 s bounds, raw.githubusercontent.com content fetch with final-host validation, typed errors (invalid URL, unsupported host, not found, ref not found, no docs, rate limited, fetch failed), optional `SKILLFORGE_GITHUB_TOKEN` (api.github.com only), submodules never followed, no cloning/execution; 31 new tests (unit + API)
+- [x] UI fix: source tab bodies now toggle generically (URL/Local files panels had stayed hidden)
+
 ## P1 — remaining backlog
 
-- [ ] GitHub repository source as a first-class type (repo URL → docs tree via API, no code execution)
+- [x] GitHub repository source as a first-class type (repo URL → docs tree via API, no code execution)
 - [ ] Editing generated text in preview (P1 per AGENTS.md §14)
 - [ ] Provenance UX: click a provenance record to view the exact source lines
 - [ ] SSE progress for slow (remote-provider) generations with cancellation

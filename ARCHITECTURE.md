@@ -25,7 +25,8 @@ Source ──▶ ingest ──▶ analyze ──▶ provider.generate ──▶ 
 | Samples | `src/core/samples.ts` + `src/core/samples/*.md` | Bundled demo docs (Meridian Payments API, FastForge CLI). |
 | URL source | `src/core/sources/url.ts` | P1: SSRF-guarded single-page fetch (protocol allowlist, DNS-based private-host refusal re-checked per redirect, size/time caps), HTML→markdown-ish conversion. Fetch/DNS injectable for tests. |
 | File source | `src/core/sources/files.ts` | P1: local file/directory ingestion bounded by an allowlist root (`SKILLFORGE_DOCS_ROOT`), realpath containment (symlink escapes refused), extension/size/count/depth limits, multi-file combining. |
-| HTTP API | `src/server/app.ts` | Express app: NDJSON-streaming `/api/generate` (source types: text/sample/url/file), skill store, on-demand `/validate`, validation-gated `/export` (422 on errors), static UI. |
+| GitHub source | `src/core/sources/github.ts` | P1.5: bounded documentation-tree ingestion from github.com repo/tree URLs — URL parsing/normalization, default-branch resolution, one recursive-tree API request, docs-first priority (README → docs/ → root → rest), extension allowlist, 40-file/800 KB/1.4 MB/depth-6/15 s bounds, raw-content fetch with final-host validation, typed errors, optional `SKILLFORGE_GITHUB_TOKEN` (api.github.com only). No cloning; submodules never followed; fetch injectable for tests. |
+| HTTP API | `src/server/app.ts` | Express app: NDJSON-streaming `/api/generate` (source types: text/sample/url/file/github), skill store, on-demand `/validate`, validation-gated `/export` (422 on errors), static UI. |
 | Store | `src/server/store.ts` | P1: file-backed persistence under `.data/skills/<id>/skill.json` — atomic writes, zod-validated reads, newest-50 eviction; survives restarts. |
 | UI | `web/` | Vanilla JS/HTML/CSS. Stepper mirrors real pipeline events; file inspector with purpose + provenance; validation panel with re-run; real download via blob. |
 

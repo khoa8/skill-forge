@@ -41,6 +41,7 @@
           <button class="tab" data-tab="text" role="tab">Paste</button>
           <button class="tab" data-tab="url" role="tab">URL</button>
           <button class="tab" data-tab="file" role="tab">Local files</button>
+          <button class="tab" data-tab="github" role="tab">GitHub repo</button>
         </div>
       </div>
 
@@ -69,6 +70,12 @@
         <label class="field-label" for="source-path">File or directory path</label>
         <input id="source-path" type="text" placeholder="docs/ or README.md" />
         <label class="checkline"><input type="checkbox" id="source-recursive" /> Include subdirectories (bounded: depth 6, 40 files)</label>
+      </div>
+
+      <div class="tab-body hidden" id="tab-github">
+        <p class="hint">Read documentation files from a public GitHub repository through the GitHub API. SkillForge fetches bounded docs (Markdown/RST/text, max 40 files, 1.4 MB total) and never clones, executes, or installs repository code. Unauthenticated GitHub API rate limits apply (60 requests/hour); private repositories are not supported without a configured token.</p>
+        <label class="field-label" for="source-repo">Repository URL</label>
+        <input id="source-repo" type="url" placeholder="https://github.com/owner/repo  ·  …/tree/main/docs" />
       </div>
 
       <div class="advanced">

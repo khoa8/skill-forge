@@ -80,8 +80,10 @@ function bindEvents() {
       document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
       tab.classList.add("active");
       state.activeTab = tab.dataset.tab;
-      $("#tab-sample").classList.toggle("hidden", state.activeTab !== "sample");
-      $("#tab-text").classList.toggle("hidden", state.activeTab !== "text");
+      // Show exactly the body belonging to the active tab.
+      document.querySelectorAll(".tab-body").forEach((body) => {
+        body.classList.toggle("hidden", body.id !== `tab-${state.activeTab}`);
+      });
       updateGenerateButton();
     });
   });
@@ -94,6 +96,7 @@ function bindEvents() {
 
   $("#source-url").addEventListener("input", updateGenerateButton);
   $("#source-path").addEventListener("input", updateGenerateButton);
+  $("#source-repo").addEventListener("input", updateGenerateButton);
 
   $("#generate-btn").addEventListener("click", runGenerate);
 }
@@ -116,6 +119,11 @@ function updateGenerateButton() {
     const ok = /^https?:\/\/.+\..+/.test(url);
     btn.disabled = !ok;
     btn.textContent = ok ? "Generate skill" : "Enter an http(s) URL";
+  } else if (state.activeTab === "github") {
+    const repo = $("#source-repo").value.trim();
+    const ok = /^https:\/\/(www\.)?github\.com\/[^/\s]+\/[^/\s]+/.test(repo);
+    btn.disabled = !ok;
+    btn.textContent = ok ? "Generate skill" : "Enter a github.com repository URL";
   } else if (state.activeTab === "file") {
     const p = $("#source-path").value.trim();
     btn.disabled = p.length === 0;
@@ -188,17 +196,19 @@ async function runGenerate() {
       ? { sourceType: "sample", sampleId: state.selectedSampleId }
       : state.activeTab === "url"
         ? { sourceType: "url", url: $("#source-url").value.trim() }
-        : state.activeTab === "file"
-          ? {
-              sourceType: "file",
-              path: $("#source-path").value.trim(),
-              recursive: $("#source-recursive").checked,
-            }
-          : {
-              sourceType: "text",
-              content: $("#source-text").value,
-              name: $("#source-name").value.trim() || undefined,
-            };
+        : state.activeTab === "github"
+          ? { sourceType: "github", repo: $("#source-repo").value.trim() }
+          : state.activeTab === "file"
+            ? {
+                sourceType: "file",
+                path: $("#source-path").value.trim(),
+                recursive: $("#source-recursive").checked,
+              }
+            : {
+                sourceType: "text",
+                content: $("#source-text").value,
+                name: $("#source-name").value.trim() || undefined,
+              };
   const requestedName = $("#requested-name").value.trim();
   if (requestedName) body.requestedName = requestedName;
 

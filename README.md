@@ -19,8 +19,10 @@ Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 117 tests incl. end-to-end Source → Export
+npm test             # 148 tests incl. end-to-end Source → Export
 ```
+
+Every push runs the same four quality gates (typecheck, test, build, demo) in GitHub Actions (`.github/workflows/ci.yml`).
 
 ## Sources
 
@@ -30,16 +32,19 @@ npm test             # 117 tests incl. end-to-end Source → Export
 | Pasted Markdown/text | Paste tab | Any instructional Markdown; HTML stripped, entities decoded. |
 | URL | URL tab | Single-page http(s) fetch with safety limits (below). |
 | Local files | Local files tab | File or directory under the allowed root (`SKILLFORGE_DOCS_ROOT`, default: the workspace). |
+| GitHub repository | GitHub repo tab | Bounded docs-tree fetch via the GitHub API (below). |
 
 **URL safety limits:** http/https only; hosts that are private/loopback/link-local by name *or* DNS resolution are refused (SSRF guard, re-checked on every redirect); max 3 redirects; 1 MB / 15 s caps; only text-like content types; page JavaScript is never executed (JS-rendered pages are reported as empty rather than guessed at).
 
 **Local file safety:** paths must resolve inside the allowed root (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6; no code execution.
 
+**GitHub source limits:** `https://github.com/<owner>/<repo>` (or a `/tree/<ref>/<path>` URL) only; documentation-like files (`.md`, `.txt`, `.rst`, … — the same allowlist as local files) are read through the GitHub API and raw content endpoints; max 40 files / 800 KB per file / 1.4 MB total / depth 6; submodules are never followed; nothing is cloned, executed, or installed. Repos are read docs-first (root README, then `docs/`-like directories). Unauthenticated GitHub API access is rate-limited to 60 requests/hour per IP — set `SKILLFORGE_GITHUB_TOKEN` in `.env` to raise it (the token is sent to api.github.com only). Private repositories require such a token; without one they are reported as not found. Truncation is honest: skipped/omitted files are listed as notes in the generation log.
+
 ## What it does
 
 | Stage | Behavior |
 | --- | --- |
-| **Source** | One of the four input types above. |
+| **Source** | One of the five input types above. |
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
 | **Validate** | 16 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
@@ -82,7 +87,7 @@ The URL source has been exercised against real pages during development: a raw G
 
 - URL ingestion is single-page: no crawling, no JS rendering (documented honest failure instead).
 - The grounding check is heuristic (token overlap), not proof of correctness; review generated skills.
-- GitHub repository ingestion as a first-class source type is not implemented (paste/URL/local cover the same need manually).
+- GitHub source reads public repositories' documentation only (private repos need `SKILLFORGE_GITHUB_TOKEN`); refs with slashes in `/tree/` URLs take the first segment as the ref; API rate limits apply as described above.
 - The `glm`/`openai` providers require you to supply a key and have not been run against live endpoints here.
 - Evals are generated as manual grounding checks; SkillForge does not execute them.
 - PDF ingestion is not implemented.

@@ -7,16 +7,16 @@ feature/production-readiness
 2026-09-07T04:05:00Z (baseline verified)
 
 ## Current phase
-Phase 2 checkpoint A complete; starting checkpoint B (API integration)
+Phase 2 complete (all checkpoints A/B/C pushed); starting Phase 3 — provenance click-through UX
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(see git log — checkpoint A commit)
+(see git log — Phase 2C commit)
 
 ## Last pushed commit
-c4fa069 (CI workflow)
+90ffd7b (checkpoint B)
 
 ## Phase 1 verification (CI)
 - .github/workflows/ci.yml added: pull_request + push (main, feature/production-readiness); Node 20; npm ci; typecheck/test/build/demo; permissions contents:read; concurrency cancel-in-progress; no secrets.
@@ -41,12 +41,18 @@ c4fa069 (CI workflow)
   default-branch resolution, tree fetch, extension/priority filtering, file/total/depth
   bounds, raw-content fetch with host validation, typed errors, optional token env var);
   SourceType extended with "github"; tests/github-source.test.ts (24 tests, all green)
+- Phase 2B: API integration — GenerateBody sourceType+github and `repo` field, typed
+  error→status mapping (400/404/422/429/502), unified PIPELINE_SOURCE_TYPE mapping;
+  tests/api-github.test.ts (7 tests)
+- Phase 2C: UI GitHub repo tab + generic tab-body toggling (fixes pre-existing bug where
+  URL/Local-files panels never became visible); docs updated (README, ARCHITECTURE,
+  TASKS, PROJECT_STATUS, .env.example); live smoke test vs koajs/koa passed
+  (default branch master, 22 files, 311 KB, 9.2 s)
 
 ## In progress
-- Phase 2B: API integration (sourceType=github) + integration tests
+- Phase 3: provenance click-through UX
 
 ## Remaining
-- Phase 2 remaining: API integration (B), UI + docs (C)
 - Phase 3: provenance click-through UX
 - Phase 4: edit generated files before export
 - Phase 5: provider verification harness
@@ -68,11 +74,15 @@ c4fa069 (CI workflow)
 - src/core/types.ts (SourceType + "github")
 - src/core/sources/files.ts (exported TEXT_EXTENSIONS)
 - src/core/sources/github.ts (new)
-- tests/github-source.test.ts (new)
+- src/server/app.ts (github sourceType, error mapping, unified type mapping)
+- tests/github-source.test.ts, tests/api-github.test.ts (new)
+- web/index.html, web/app.js (GitHub tab, generic tab toggling)
+- README.md, ARCHITECTURE.md, TASKS.md, PROJECT_STATUS.md, .env.example
 
 ## Tests run in current phase
-- npm test: 141 passed (117 baseline + 24 new GitHub source tests), 0 failed
-- npm run typecheck: pass after each stage
+- npm test: 148 passed (117 baseline + 24 GitHub unit + 7 API), 0 failed
+- npm run typecheck / build / demo: all pass after each checkpoint
+- Live smoke: fetchGithubSource("https://github.com/koajs/koa") → 22 files, 311 KB, OK
 
 ## Known failures / blockers
 - (none)
