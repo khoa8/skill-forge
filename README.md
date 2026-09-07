@@ -22,7 +22,7 @@ npm run demo         # generate → validate → export both samples, inspect th
 npm test             # Vitest suite incl. end-to-end Source → Export
 ```
 
-Pull requests and pushes to `main` run the repository CI quality gate (typecheck, test, build, demo, offline provider verification, dependency audit) in GitHub Actions (`.github/workflows/ci.yml`).
+Pull requests and pushes to `main` run the repository CI quality gate defined in `.github/workflows/ci.yml` (that workflow is the single source of truth for which checks run).
 
 ## Deployment scope (read before binding beyond loopback)
 

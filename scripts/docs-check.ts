@@ -12,7 +12,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, resolve } from "node:path";
 
 const ROOT = process.cwd();
 
