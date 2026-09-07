@@ -32,7 +32,7 @@ const config: AppConfig = {
 
 const app = createApp(config);
 
-app.listen(bind.port, bind.host, () => {
+const server = app.listen(bind.port, bind.host, () => {
   console.log(`SkillForge v0.1.0 listening on http://${bind.host}:${bind.port}`);
   console.log(`  provider: ${config.provider}${config.provider === "mock" ? " (offline demo — no API key needed)" : ""}`);
   console.log(`  UI:       http://${bind.host}:${bind.port}/`);
@@ -45,4 +45,10 @@ app.listen(bind.port, bind.host, () => {
         `  exposure is deliberate, set SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1 to silence this warning.\n`,
     );
   }
+});
+// A failed bind (port already in use, unreachable host) must be an honest,
+// actionable startup failure — not an unhandled 'error' event stack trace.
+server.on("error", (err) => {
+  console.error(`SkillForge cannot start: ${(err as Error).message}`);
+  process.exit(1);
 });

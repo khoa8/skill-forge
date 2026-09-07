@@ -34,11 +34,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
-
+      # Build runs BEFORE test so the production smoke test in the suite can
+      # exercise the compiled output (dist/) as a hard gate.
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
 
       - name: Demo pipeline
         run: npm run demo
