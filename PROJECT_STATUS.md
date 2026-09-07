@@ -25,9 +25,9 @@
   - **Provider verification harness** (`npm run verify:provider`, `src/core/verify.ts`): one bounded generation → plan schema check → canonical build → deterministic validation with actionable, credential-free diagnostics; offline (mock) by default; tested with injected fetch; live glm/openai run not executed in this environment (no key available).
   - **Release hardening/remediation:** canonical metadata consistency, source-note propagation/persistence, public-only GitHub policy, exact final-byte bounds, response-body deadline coverage, and patched `qs@6.16.0` override with clean audit.
 
-## Verification evidence (current release, re-verified on the hardening branch)
+## Verification evidence (current production-hardening state)
 
-- `npm test` → **219/219 passing** across 23 test files.
+- `npm test` → **227/227 passing** across 24 test files.
 - `npm run typecheck` clean; `npm run build` emits working `dist/`.
 - `npm run demo` → 4 ZIPs verified non-empty with SKILL.md present.
 - `npm audit` → **0 vulnerabilities**.
@@ -42,7 +42,7 @@
 | --- | --- |
 | `npm run dev` | Dev server (tsx watch) at `127.0.0.1:8787` |
 | `npm start` | Dev server without watch |
-| `npm test` | Vitest suite (219 tests) |
+| `npm test` | Vitest suite (227 tests) |
 | `npm run verify:provider` | One bounded provider verification (offline mock by default) |
 | `npm run typecheck` / `npm run lint` | tsc --noEmit |
 | `npm run build` | tsc emit to `dist/` (server runs from dist with `node dist/src/server/index.js`) |
