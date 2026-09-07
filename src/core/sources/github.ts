@@ -1,5 +1,5 @@
 /**
- * P2 source adapter — bounded GitHub repository documentation ingestion.
+ * GitHub repository documentation source adapter — bounded ingestion.
  *
  * Reads documentation-like text files from a GitHub repository through the
  * GitHub REST API and raw content endpoints. Design constraints (AGENTS.md

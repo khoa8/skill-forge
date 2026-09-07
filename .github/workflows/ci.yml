@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - feature/production-hardening
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -52,8 +51,7 @@ jobs:
           SKILLFORGE_PROVIDER: mock
 
       - name: Dependency audit
-        # Strict gate: fails on any low-severity advisory or higher
-        # (current state: 0 vulnerabilities).
+        # Strict gate: fails on any low-severity advisory or higher.
         run: npm audit --audit-level=low
 
       - name: Documentation links

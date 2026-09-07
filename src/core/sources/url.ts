@@ -1,5 +1,5 @@
 /**
- * P1 source adapter — URL / documentation ingestion with safe limits.
+ * URL source adapter — documentation ingestion with safe limits.
  *
  * Design constraints (AGENTS.md §12 web safety):
  * - http/https only; no other protocols;
