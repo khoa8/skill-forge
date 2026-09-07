@@ -1,5 +1,5 @@
 /**
- * P1 source adapter — local file and directory ingestion.
+ * Local file and directory source adapter — bounded ingestion.
  *
  * Server-side paths only, restricted to an allowlist root (project workspace
  * or an explicitly configured docs directory). Safety rules:

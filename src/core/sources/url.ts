@@ -1,7 +1,7 @@
 /**
- * P1 source adapter — URL / documentation ingestion with safe limits.
+ * URL source adapter — documentation ingestion with safe limits.
  *
- * Design constraints (AGENTS.md §12 web safety, GOAL.md):
+ * Design constraints (AGENTS.md §12 web safety):
  * - http/https only; no other protocols;
  * - SSRF protection: block localhost, link-local, loopback, private, and
  *   unique-local addresses by name before any request (DNS re-resolution

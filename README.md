@@ -2,7 +2,7 @@
 
 **Turn documentation, text, or repositories into validated, portable AI Agent Skills.**
 
-SkillForge is not a summarizer or a chatbot. It runs an explicit pipeline — **Source → Analyze → Generate → Validate → Preview → Export** — and its differentiator is deterministic validation and honest source grounding: every generated claim carries line-range provenance, and gaps are marked instead of invented.
+SkillForge is not a summarizer or a chatbot. It runs an explicit pipeline — **Source → Analyze → Generate → Validate → Preview → Export** — and its differentiator is deterministic validation and honest source grounding: generated files retain source provenance, verbatim references, workflows, and examples carry exact source line ranges, and gaps are marked instead of invented.
 
 ![SkillForge generating and validating a skill from a bundled sample](docs/screenshot-results.png)
 
@@ -19,10 +19,10 @@ Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 219 tests incl. end-to-end Source → Export
+npm test             # Vitest suite incl. end-to-end Source → Export
 ```
 
-Every pull request and every push to `main` runs the same six quality gates (typecheck, test, build, demo, offline provider verification, dependency audit) in GitHub Actions (`.github/workflows/ci.yml`); provider verification is pinned to the offline mock provider and dependency audit fails on any advisory at low severity or above.
+Pull requests and pushes to `main` run the repository CI quality gate defined in `.github/workflows/ci.yml` (that workflow is the single source of truth for which checks run).
 
 ## Deployment scope (read before binding beyond loopback)
 
@@ -40,7 +40,7 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 
 **URL safety limits:** http/https only; hosts that are private/loopback/link-local by name *or* DNS resolution are refused (SSRF guard, re-checked on every redirect); max 3 redirects; 1 MB / 15 s caps; only text-like content types; page JavaScript is never executed (JS-rendered pages are reported as empty rather than guessed at).
 
-**Local file safety:** paths must resolve inside the allowed root (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6; no code execution.
+**Local file safety:** `SKILLFORGE_DOCS_ROOT` is the filesystem trust boundary — paths must resolve inside it (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6; no code execution. Documentation-like files inside the root are readable **including dotfiles** with allowed extensions (e.g. `.secret-notes.md`); use a docs-only root if the workspace holds sensitive Markdown.
 
 **GitHub source limits:** `https://github.com/<owner>/<repo>` (or a `/tree/<ref>/<path>` URL) only; **public repositories only** — private repositories are deliberately not fetched. Documentation-like files (`.md`, `.txt`, `.rst`, … — the same allowlist as local files) are read through the GitHub API and raw content endpoints; max 40 files / 800 KB per file / 1.4 MB total / depth 6; overall ingestion deadline of 60 s; submodules are never followed; nothing is cloned, executed, or installed. Repos are read docs-first (root README, then `docs/`-like directories). Unauthenticated GitHub API access is rate-limited to 60 requests/hour per IP — `SKILLFORGE_GITHUB_TOKEN` in `.env` only raises that rate limit for public repositories (it is sent to api.github.com only and never grants private-repo access). Truncation is honest: skipped/omitted files are listed as notes in the generation log and the results panel.
 
@@ -51,7 +51,7 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 | **Source** | One of the five input types above. Adapter notes — truncation, skipped files, followed redirects — are surfaced per-note in the generation log, in a "Source notes" panel, and persisted with the skill; skipping is never silent. |
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
-| **Validate** | 17 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
+| **Validate** | A fixed registry of deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
 | **Preview** | Inspect every generated file with its purpose and provenance before exporting. Provenance records are clickable and show the exact source lines (verbatim, never reconstructed). Generated files can be edited in place before export: edits are persisted, marked `user-edited` (their source provenance is dropped honestly), manifest hashes are resynchronized, and deterministic validation re-runs — failing edits block export. Generated skills persist on disk (`.data/skills/`) and survive server restarts. |
 | **Export** | Real ZIP downloads for **Claude Code** and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
 
@@ -74,14 +74,14 @@ Every file has a recorded purpose; ceremonial empty files are a validation error
 
 ## Validation behavior
 
-Validation is deterministic — same package in, same report out, no model calls. The 17 checks: required files; safe & unique paths (zip-slip/traversal); well-formed YAML front matter; valid `name` slug and `description`; canonical metadata consistency (SKILL.md front matter `name` and the manifest's `name`/`displayName`/`description`/`version`/`generator` must equal the canonical metadata — body text is editable, package identity is not); no empty sections; resolving internal links; parseable JSON; manifest↔package consistency; no placeholder text (`TODO`, `FIXME`, …); no empty files; duplicate IDs; eval integrity (unique ids, usable prompt/expectation, known kinds); provenance integrity (every file traceable, valid line ranges; user-edited files are honestly reported as no longer source-derived); SKILL.md size; unsupported export targets; and command grounding (shell commands in generated files must trace back to the source — unverifiable grounding is reported as *not verified*, never as passed).
+Validation is deterministic — same package in, same report out, no model calls. The checks: required files; safe & unique paths (zip-slip/traversal); well-formed YAML front matter; valid `name` slug and `description`; canonical metadata consistency (SKILL.md front matter `name` and the manifest's `name`/`displayName`/`description`/`version`/`generator` must equal the canonical metadata — body text is editable, package identity is not); no empty sections; resolving internal links; parseable JSON; manifest↔package consistency; no placeholder text (`TODO`, `FIXME`, …); no empty files; duplicate IDs; eval integrity (unique ids, usable prompt/expectation, known kinds); provenance integrity (every file traceable, valid line ranges; user-edited files are honestly reported as no longer source-derived); SKILL.md size; unsupported export targets; and command grounding (shell commands in generated files must trace back to the source — unverifiable grounding is reported as *not verified*, never as passed).
 
 The report states `passed`, `executed`, per-check status, file locations, and actionable messages. Warnings (e.g. placeholders, untraceable commands) do not block export; errors do — the export endpoint re-runs validation and refuses failing packages.
 
 ## Providers
 
 - `mock` (default): deterministic, offline, no key. Same source ⇒ byte-identical package.
-- `glm` / `openai`: OpenAI-compatible chat-completions adapters. Model output must parse against the skill-plan schema; malformed output fails with an actionable error instead of entering the package. Configure via `.env` (see `.env.example`). These adapters are implemented and unit-tested with injected fetch, but not exercised against a paid API in this repo — no compatibility claims beyond that.
+- `glm` / `openai`: OpenAI-compatible chat-completions adapters. Model output must parse against the skill-plan schema; malformed output fails with an actionable error instead of entering the package. Configure via `.env` (see `.env.example`). The adapters are covered by deterministic tests with injected transport; actual compatibility depends on the configured endpoint and model — use `npm run verify:provider` with your credentials to validate a live configuration.
 
 ### Verifying a provider
 
@@ -89,19 +89,15 @@ The report states `passed`, `executed`, per-check status, file locations, and ac
 npm run verify:provider
 ```
 
-Runs one small bounded generation through the configured provider (`SKILLFORGE_PROVIDER`, `SKILLFORGE_API_KEY`, optional `SKILLFORGE_BASE_URL` / `SKILLFORGE_MODEL`), schema-checks the plan, builds the canonical package, and runs deterministic validation — exiting nonzero on failure with actionable diagnostics. The API key is never printed. Without any configuration it verifies the offline demo provider, so the harness itself needs no key. Live `glm`/`openai` verification has not been executed in this repository (no paid key available); the harness is covered by tests with injected fetch.
-
-## Verified with live sources
-
-The URL source has been exercised against real pages during development: a raw GitHub README (markdown, passed all checks) and a GitHub docs HTML page (converted, passed all checks). JS-rendered single-page apps are honestly rejected (`url_no_content`) instead of producing empty skills.
+Runs one small bounded generation through the configured provider (`SKILLFORGE_PROVIDER`, `SKILLFORGE_API_KEY`, optional `SKILLFORGE_BASE_URL` / `SKILLFORGE_MODEL`), schema-checks the plan, builds the canonical package, and runs deterministic validation — exiting nonzero on failure with actionable diagnostics. The API key is never printed. Without any configuration it verifies the offline demo provider, so the harness itself needs no key. The harness is covered by deterministic tests with injected transport.
 
 ## Limitations
 
-- URL ingestion is single-page: no crawling, no JS rendering (documented honest failure instead).
+- URL ingestion is single-page and supports server-rendered text/HTML: no crawling, no page-JavaScript execution; JS-only pages may return `url_no_content` (an honest failure, never an empty skill).
 - The grounding check is heuristic (token overlap), not proof of correctness; review generated skills.
 - GitHub source reads **public repositories' documentation only** (private repositories are deliberately unsupported); refs with slashes in `/tree/` URLs take the first segment as the ref; API rate limits apply as described above.
-- The `glm`/`openai` providers require you to supply a key and have not been run against live endpoints here.
+- The `glm`/`openai` providers require you to supply a key; live compatibility is not guaranteed by the test suite — validate your configuration with `npm run verify:provider`.
 - Evals are generated as manual grounding checks; SkillForge does not execute them.
 - PDF ingestion is not implemented.
 
-See [PRODUCT.md](PRODUCT.md) for scope and [ARCHITECTURE.md](ARCHITECTURE.md) for the module map.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the module map, [docs/CANONICAL_FORMAT.md](docs/CANONICAL_FORMAT.md) for the package format, and [docs/EXPORTERS.md](docs/EXPORTERS.md) for exporter contracts.

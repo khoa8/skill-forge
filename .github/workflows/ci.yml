@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - feature/production-hardening
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -16,7 +15,7 @@ permissions:
 
 jobs:
   quality-gate:
-    name: typecheck, test, build, demo, provider-verify, audit
+    name: quality gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -52,6 +51,10 @@ jobs:
           SKILLFORGE_PROVIDER: mock
 
       - name: Dependency audit
-        # Strict gate: fails on any low-severity advisory or higher
-        # (current state: 0 vulnerabilities).
+        # Strict gate: fails on any low-severity advisory or higher.
         run: npm audit --audit-level=low
+
+      - name: Documentation links
+        # Dependency-free check: relative Markdown links/images resolve and
+        # no doc references removed status documents.
+        run: npm run docs:check

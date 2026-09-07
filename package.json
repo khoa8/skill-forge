@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "demo": "tsx scripts/demo.ts",
     "verify:provider": "tsx scripts/verify-provider.ts",
+    "docs:check": "tsx scripts/docs-check.ts",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
