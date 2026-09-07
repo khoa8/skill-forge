@@ -7,16 +7,16 @@ feature/production-readiness-remediation (based on feature/production-readiness 
 2026-09-07T06:00:00Z (bootstrap + audit triage)
 
 ## Current phase
-Phase 4 complete; starting Phase 5 — overall GitHub ingestion latency deadline
+Phase 5 complete; starting Phase 7 — documentation reconciliation
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-fix(github): enforce actual total byte limit
+fix(github): bound repository ingestion latency
 
 ## Last pushed commit
-55bdc0f (Phase 3)
+b63dd00 (Phase 4)
 
 ## Baseline verification (this remediation run)
 - npm ci: OK (installed cleanly)
@@ -59,6 +59,13 @@ fix(github): enforce actual total byte limit
   Ordering stays deterministic (docPriority + path). 2 new tests: missing/underreported metadata
   sizes with real bodies crossing the cap (stop + honest note + combined size under cap), and
   per-file underreported size skip note.
+- Phase 5: hard overall ingestion budget. FetchGithubOptions.overallTimeoutMs (default 60 s,
+  GITHUB_OVERALL_TIMEOUT_MS) drives a shared AbortSignal combined with each per-request timeout
+  (AbortSignal.any) for every api.github.com and raw request — no fetch can outlive the budget.
+  Deadline aborts surface as typed github_deadline_exceeded with actionable scope advice; raw
+  fetch deadline aborts stop the loop with the same typed error (no dangling fetches, ordering
+  unchanged). 2 new tests: hanging raw fetches + 250 ms budget → typed error well under the
+  per-request timeout; sufficient budget → normal deterministic order.
 - Phase 6 (early): npm audit triage —
   - Advisories: GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g (moderate) in qs ≤ 6.15.3, transitive via body-parser 1.20.6 (pins qs 6.15.3 exactly) under express 4.22.2; also reachable via supertest (dev).
   - `npm audit fix` cannot fix (no compatible patched release within pinned range). Upgrading to express 5 would NOT fix it either (express 5.2.1 pins qs 6.13.0, inside the vulnerable range) and would add migration risk.
@@ -67,11 +74,11 @@ fix(github): enforce actual total byte limit
 - Dependency commit: `chore(deps): resolve production readiness audit findings`
 
 ## In progress
-- Phase 5: overall GitHub ingestion latency deadline
+- Phase 7: documentation reconciliation
 
 ## Remaining
 - Phase 6: (done early — qs override; re-verify at Phase 8)
-- Phase 7: documentation reconciliation (README 148→actual count, limits, notes behavior)
+- Phase 8: full release audit + clean-state verification + browser verification + final verdict
 - Phase 7: documentation reconciliation (README 148→actual count, limits, notes behavior)
 - Phase 8: full release audit + clean-state verification + browser verification + final verdict
 
@@ -83,7 +90,8 @@ fix(github): enforce actual total byte limit
 - package.json (overrides), package-lock.json (qs 6.16.0), docs/PRODUCTION_READINESS_STATUS.md
 
 ## Tests run in current phase
-- npm test: 177 passed (175 + 2 actual-byte bound tests), 0 failed
+- npm test: 179 passed (177 + 2 deadline tests), 0 failed
+- npm run typecheck: pass
 - npm run typecheck / build / demo: pass
 
 ## Known failures / blockers

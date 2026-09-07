@@ -419,6 +419,53 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(result.input.content).toContain('alert("xss")');
   });
 
+  it("bounds total ingestion latency with a typed deadline error", async () => {
+    // Raw fetches hang until aborted (modeling a stalled CDN route); the
+    // overall budget must abort them and surface a typed error quickly.
+    const hangingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.github.com/")) {
+        return new Response(
+          JSON.stringify(
+            url.includes("/git/trees/")
+              ? {
+                  sha: "x",
+                  truncated: false,
+                  tree: [
+                    { path: "README.md", type: "blob", size: README.length },
+                    { path: "docs/guide.md", type: "blob", size: GUIDE.length },
+                  ],
+                }
+              : { default_branch: "main" },
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+    }) as unknown as typeof fetch;
+    const t0 = Date.now();
+    await expect(
+      fetchGithubSource("https://github.com/acme/widgets", {
+        fetchImpl: hangingFetch,
+        overallTimeoutMs: 250,
+      }),
+    ).rejects.toMatchObject({ code: "github_deadline_exceeded" });
+    // The deadline, not the per-request timeout, ended the run.
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("completes normally when the overall budget is sufficient (ordering unchanged)", async () => {
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree: stdTree(), raw: stdRaw() }),
+      overallTimeoutMs: 5000,
+    });
+    expect(result.files.map((f) => f.path)).toEqual(["README.md", "docs/guide.md", "CONTRIBUTING.md"]);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env.SKILLFORGE_GITHUB_TOKEN;

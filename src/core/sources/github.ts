@@ -28,6 +28,7 @@ export const MAX_GITHUB_FILE_BYTES = 800_000; // per file
 export const MAX_GITHUB_TOTAL_BYTES = 1_400_000; // combined (under ingest's 1.5 MB cap)
 export const MAX_GITHUB_DEPTH = 6; // path segment depth
 export const GITHUB_TIMEOUT_MS = 15_000;
+export const GITHUB_OVERALL_TIMEOUT_MS = 60_000;
 
 const API_HOST = "api.github.com";
 const RAW_HOSTS = new Set(["raw.githubusercontent.com", "objects.githubusercontent.com"]);
@@ -136,6 +137,10 @@ function isSafeRepoPath(path: string): boolean {
 export interface FetchGithubOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Hard budget for the whole ingestion (all API + raw requests). Default
+   * 60 s; when exceeded, a typed github_deadline_exceeded error is thrown and
+   * in-flight fetches are aborted through a shared AbortController. */
+  overallTimeoutMs?: number;
   maxFiles?: number;
   maxFileBytes?: number;
   maxTotalBytes?: number;
@@ -167,7 +172,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 async function apiFetch(
   fetchImpl: typeof fetch,
   url: string,
-  opts: Required<Pick<FetchGithubOptions, "timeoutMs">> & { token?: string },
+  opts: Required<Pick<FetchGithubOptions, "timeoutMs">> & { token?: string; signal: AbortSignal },
 ): Promise<Response> {
   let res: Response;
   const headers: Record<string, string> = {
@@ -175,9 +180,18 @@ async function apiFetch(
     accept: "application/vnd.github+json",
   };
   if (opts.token) headers.authorization = `Bearer ${opts.token}`;
+  // The per-request timeout is combined with the overall deadline: whichever
+  // fires first aborts the request, so no fetch can outlive the budget.
+  const signal = AbortSignal.any([AbortSignal.timeout(opts.timeoutMs), opts.signal]);
   try {
-    res = await fetchImpl(url, { headers, redirect: "error", signal: AbortSignal.timeout(opts.timeoutMs) });
+    res = await fetchImpl(url, { headers, redirect: "error", signal });
   } catch (err) {
+    if (opts.signal.aborted) {
+      throw new GithubSourceError(
+        `GitHub ingestion exceeded its overall time budget while fetching ${url}. Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.`,
+        "github_deadline_exceeded",
+      );
+    }
     const cause = err instanceof Error ? err.message : String(err);
     throw new GithubSourceError(
       `Request to ${url} failed: ${cause}. GitHub may be unreachable or the request timed out.`,
@@ -221,22 +235,27 @@ function throwForApiStatus(res: Response, url: string): void {
 type RawFetchResult =
   | { kind: "ok"; content: string }
   | { kind: "too_large" }
-  | { kind: "unreachable" };
+  | { kind: "unreachable" }
+  | { kind: "deadline_exceeded" };
 
 async function fetchRawFile(
   fetchImpl: typeof fetch,
   rawUrl: string,
   maxFileBytes: number,
   timeoutMs: number,
+  overallSignal: AbortSignal,
 ): Promise<RawFetchResult> {
   let res: Response;
   try {
+    // Combined per-request + overall-deadline signal (see apiFetch).
+    const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), overallSignal]);
     res = await fetchImpl(rawUrl, {
       headers: { "user-agent": "SkillForge/0.1 (documentation-to-skill; +https://github.com/skillforge)" },
       redirect: "follow",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     });
   } catch {
+    if (overallSignal.aborted) return { kind: "deadline_exceeded" };
     return { kind: "unreachable" }; // reported as a skipped-file note by the caller
   }
   if (!res.ok) return { kind: "unreachable" };
@@ -273,6 +292,9 @@ export async function fetchGithubSource(
 ): Promise<GithubSourceResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = opts.timeoutMs ?? GITHUB_TIMEOUT_MS;
+  const overallTimeoutMs = opts.overallTimeoutMs ?? GITHUB_OVERALL_TIMEOUT_MS;
+  // Hard budget for the entire ingestion; every request aborts when it fires.
+  const deadline = AbortSignal.timeout(overallTimeoutMs);
   const maxFiles = opts.maxFiles ?? MAX_GITHUB_FILES;
   const maxFileBytes = opts.maxFileBytes ?? MAX_GITHUB_FILE_BYTES;
   const maxTotalBytes = opts.maxTotalBytes ?? MAX_GITHUB_TOTAL_BYTES;
@@ -287,7 +309,7 @@ export async function fetchGithubSource(
   let ref = ref0.ref;
   let defaultBranchUsed = false;
   if (ref === undefined) {
-    const res = await apiFetch(fetchImpl, `${apiBase}`, { timeoutMs, token });
+    const res = await apiFetch(fetchImpl, `${apiBase}`, { timeoutMs, token, signal: deadline });
     const meta = (await res.json()) as { default_branch?: string };
     if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
       throw new GithubSourceError(
@@ -309,6 +331,7 @@ export async function fetchGithubSource(
   const treeRes = await apiFetch(fetchImpl, `${apiBase}/git/trees/${encodeURIComponent(ref)}?recursive=1`, {
     timeoutMs,
     token,
+    signal: deadline,
   });
   const treePayload = (await treeRes.json()) as { tree?: GithubTreeEntry[]; truncated?: boolean };
   const entries = Array.isArray(treePayload.tree) ? treePayload.tree : [];
@@ -361,7 +384,13 @@ export async function fetchGithubSource(
     }
     const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
     const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
-    const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs);
+    const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline);
+    if (fetched.kind === "deadline_exceeded") {
+      throw new GithubSourceError(
+        `GitHub ingestion exceeded its overall time budget (${Math.round(overallTimeoutMs / 1000)} s) after ${files.length} file(s). Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.`,
+        "github_deadline_exceeded",
+      );
+    }
     if (fetched.kind === "unreachable") {
       notes.push(`Skipped "${entry.path}": could not be fetched (missing or unreachable).`);
       continue;
