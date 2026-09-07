@@ -185,6 +185,8 @@ The production-readiness run exercised:
 - grounding is heuristic token overlap, not proof of correctness
 - generated evals are manual grounding checks and are not executed by SkillForge
 - PDF ingestion is not implemented
+- no built-in multi-user authentication or tenant isolation (local / trusted
+  self-hosted deployment model; non-loopback binds print an explicit warning)
 
 ## Final release flow (completed)
 
@@ -201,3 +203,29 @@ main
 The release is merged; there is no pending integration step. Post-merge CI on `main`
 (run 34109540258) is green. Remaining work items are product backlog (see `TASKS.md`),
 not release blockers.
+
+## Post-release hardening pass (feature/production-hardening)
+
+An independent audit of the production-critical boundaries followed the merge. Confirmed
+defects were fixed with regression coverage:
+
+1. **Streaming byte caps on response bodies** — URL pages and GitHub raw files are read
+   with the byte cap enforced *while* the body streams (`src/core/sources/body.ts`);
+   oversized or content-length-lying responses are torn down mid-read instead of being
+   buffered to completion first. api.github.com JSON bodies carry a generous 10 MB cap.
+   Deadline and exact final-size guarantees are preserved (the abort signal is raced into
+   the reader).
+2. **Terminal Express error handler** — malformed JSON bodies return 400 JSON, oversized
+   bodies return 413 JSON, unexpected errors return a generic 500; stack traces and error
+   internals never reach the client (previously the default Express handler leaked them in
+   development mode).
+3. **NDJSON disconnect guard** — generation stops when the client disconnects, and
+   EPIPE/ECONNRESET after disconnect can no longer raise unhandled stream errors.
+4. **Non-loopback binding warning** — binding `HOST` to a non-loopback address prints an
+   explicit no-authentication warning at startup (silenced only by
+   `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`); the supported model is documented as local /
+   trusted self-hosted use, not an Internet-facing multi-user SaaS.
+
+CI additionally enforces `npm run verify:provider` (pinned to the offline mock provider —
+CI can never reach a paid provider) and a strict `npm audit` gate (fails on any advisory
+at low severity or above).

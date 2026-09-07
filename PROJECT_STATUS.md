@@ -42,7 +42,7 @@
 | --- | --- |
 | `npm run dev` | Dev server (tsx watch) at `127.0.0.1:8787` |
 | `npm start` | Dev server without watch |
-| `npm test` | Vitest suite (187 tests) |
+| `npm test` | Vitest suite (205 tests) |
 | `npm run verify:provider` | One bounded provider verification (offline mock by default) |
 | `npm run typecheck` / `npm run lint` | tsc --noEmit |
 | `npm run build` | tsc emit to `dist/` (server runs from dist with `node dist/src/server/index.js`) |
@@ -61,7 +61,16 @@
 - `SKILLFORGE_DOCS_ROOT` — filesystem root for the Local-files source (default: cwd). See `.env.example`.
 - `SKILLFORGE_GITHUB_TOKEN` — optional; raises the GitHub API rate limit for public GitHub sources (api.github.com only). See `.env.example`.
 - `SKILLFORGE_PROVIDER` / `SKILLFORGE_API_KEY` / `SKILLFORGE_BASE_URL` / `SKILLFORGE_MODEL` — remote providers (optional).
-- `PORT` / `HOST` — server binding.
+- `PORT` / `HOST` — server binding (default loopback; non-loopback binds print a no-authentication warning).
+- `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1` — deliberately silences the non-loopback binding warning after acknowledging that the server has no built-in authentication. See `.env.example`.
+
+## Deployment model
+
+SkillForge is a **local / trusted self-hosted** tool: default loopback binding, no built-in
+authentication or tenant isolation. It is not designed or hardened as an untrusted
+Internet-facing multi-user SaaS; exposing it beyond loopback requires deliberately setting
+`HOST` to a non-loopback address (a startup warning fires unless
+`SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`) and providing your own external authentication/isolation.
 
 ## Resuming
 

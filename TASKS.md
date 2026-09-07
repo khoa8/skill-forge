@@ -94,3 +94,18 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
 - Grounding check is token-overlap heuristic; can miss paraphrased hallucinations and warn on benign rephrases.
 - `glm`/`openai` providers are implemented + unit-tested with injected fetch but not exercised against live APIs (no key available in this environment).
 - URL source cannot render JavaScript-heavy pages; it reports `url_no_content` instead of guessing.
+
+## Production hardening run (feature/production-hardening, post-merge)
+
+- [x] Streaming byte caps: URL and GitHub raw bodies enforce their caps WHILE streaming
+  (`src/core/sources/body.ts`) — oversized/content-length-lying responses are torn down
+  mid-read instead of buffered to completion; api.github.com JSON bounded at 10 MB
+- [x] Terminal Express error handler: malformed JSON → 400 JSON, oversized → 413 JSON,
+  unknown → generic 500; no stack traces or error internals to clients
+- [x] NDJSON disconnect guard: generation stops when the client leaves; EPIPE/ECONNRESET
+  after disconnect cannot raise unhandled stream errors
+- [x] Non-loopback binding warning: `HOST` beyond loopback prints an explicit
+  no-authentication warning (silenced only by `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`);
+  deployment model documented (local / trusted self-hosted; not a multi-user SaaS)
+- [x] CI strengthened: offline provider verification pinned to the mock provider, strict
+  `npm audit` gate (fails on low-severity advisories or above)

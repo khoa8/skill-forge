@@ -23,7 +23,7 @@ app.listen(port, host, () => {
   console.log(`SkillForge v0.1.0 listening on http://${host}:${port}`);
   console.log(`  provider: ${config.provider}${config.provider === "mock" ? " (offline demo — no API key needed)" : ""}`);
   console.log(`  UI:       http://${host}:${port}/`);
-  if (!isLoopbackHost(host)) {
+  if (!isLoopbackHost(host) && process.env.SKILLFORGE_ACKNOWLEDGE_EXPOSURE !== "1") {
     console.warn(
       `\n  WARNING: bound to non-loopback address "${host}".\n` +
         `  SkillForge has no built-in authentication or tenant isolation; any device that\n` +
