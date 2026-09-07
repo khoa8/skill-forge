@@ -1,8 +1,8 @@
 # SkillForge — Project Status
 
 **Original sprint date:** 2026-09-03 (Asia/Ho_Chi_Minh)
-**Current mode:** Production readiness release candidate on `feature/production-readiness`
-**State:** P0 complete and verified; P1 shipped; P1.5 production-readiness work and remediation are complete. The release-candidate branch has been independently audited and is under PR review for merge to `main`.
+**Current mode:** Production-readiness release **merged to `main`** (PR #1, post-merge CI green); production-hardening pass in progress on `feature/production-hardening`.
+**State:** P0 complete and verified; P1 shipped; P1.5 production-readiness work and remediation complete and **merged to `main`** via PR #1 (post-merge CI run 34109540258: success). No known release blockers within the supported deployment model (local / trusted self-hosted single-user; not a hardened multi-user SaaS).
 
 > There is no active wall-clock deadline. Do not restart P0; do not enter finalization prematurely.
 
@@ -16,7 +16,7 @@
   - **17 deterministic validators**: the original set plus `eval-integrity`, `provenance-integrity`, and `canonical-metadata-consistency`.
   - **UI:** five source tabs (Samples/Paste/URL/Local files/GitHub repo) with per-type validation and button states; browser-verified generation and real ZIP download.
   - **Link neutralization:** relative links inside verbatim excerpts render as paths, so exported packages never contain dangling internal references (found via live koa README; regression-tested).
-- **P1.5 shipped (feature/production-readiness):**
+- **P1.5 shipped (merged to `main` via PR #1):**
   - **CI quality gate** (`.github/workflows/ci.yml`): typecheck + test + build + demo on every push/PR, Node 20, `npm ci`, minimal permissions, concurrency cancellation.
   - **GitHub repository source** (`src/core/sources/github.ts`, `sourceType: "github"`): repo/tree URL parsing, default-branch resolution, one recursive-tree API call, docs-first ordering (README → docs/ → root → rest), extension allowlist, hard bounds (40 files / 800 KB per file / 1.4 MB total / depth 6 / 15 s per request), raw.githubusercontent.com content fetch with final-host validation, typed errors surfaced per code (invalid URL, unsupported host, not found, ref not found, no docs, rate limited 429, fetch failed 502, deadline exceeded), optional `SKILLFORGE_GITHUB_TOKEN` sent to api.github.com only (rate-limit raise for public repositories — **public repositories only**, private repos deliberately unsupported). No cloning, no code execution, submodules never followed; truncation and skipping are reported via notes that propagate to the stream, the persisted record, and the UI. Bounds are enforced on actual returned UTF-8 bytes, including the exact combined representation; overall ingestion deadline is 60 s and covers response-body reads.
   - **UI fix:** source tab bodies toggle generically. New **GitHub repo** tab with honest limits text.
@@ -25,7 +25,7 @@
   - **Provider verification harness** (`npm run verify:provider`, `src/core/verify.ts`): one bounded generation → plan schema check → canonical build → deterministic validation with actionable, credential-free diagnostics; offline (mock) by default; tested with injected fetch; live glm/openai run not executed in this environment (no key available).
   - **Release hardening/remediation:** canonical metadata consistency, source-note propagation/persistence, public-only GitHub policy, exact final-byte bounds, response-body deadline coverage, and patched `qs@6.16.0` override with clean audit.
 
-## Verification evidence (current release candidate)
+## Verification evidence (current release, re-verified on the hardening branch)
 
 - `npm test` → **187/187 passing** across 19 test files.
 - `npm run typecheck` clean; `npm run build` emits working `dist/`.

@@ -2,29 +2,38 @@
 
 ## Branch
 
-`feature/production-readiness`
+Released to `main` via PR #1.
 
-The remediation branch was fast-forwarded into this release-candidate branch after independent audit.
+Historical path (for the record — the remediation branch was fast-forwarded into
+`feature/production-readiness` after independent audit, then merged):
+
+```text
+feature/production-readiness-remediation
+        ↓ fast-forwarded
+feature/production-readiness
+        ↓ PR #1 (merged 2026-09-07, post-merge CI run 34109540258: success)
+main
+```
 
 ## Last updated
 
-2026-09-07 — final release-candidate documentation refresh for PR #1.
+2026-09-07 — reconciled to the merged state (PR #1 complete; release no longer pending).
 
 ## Current phase
 
-Production-readiness implementation and remediation are complete. Release PR review is in progress.
+Released. Production-readiness implementation, remediation, PR review, and merge are complete.
+Post-merge CI on `main` is green.
 
 ## Current status
 
-`READY_FOR_RELEASE_PR`
+`RELEASED_TO_MAIN`
 
-## Release PR
+## Release PR (historical record)
 
-- PR: #1 — `feat: production readiness release`
+- PR: #1 — `feat: production readiness release` — **merged**
 - Base: `main`
 - Head: `feature/production-readiness`
-- Release-candidate code baseline before this docs-only refresh: `9ab6f199920eb9df4d2372f0d82a14d5dbf0d514`
-- Do not merge until the final PR CI run is green and the PR audit remains clean.
+- Merge commit: `8094b2d` (`feat: production readiness release (#1)`)
 
 ## Final verification baseline
 
@@ -177,16 +186,18 @@ The production-readiness run exercised:
 - generated evals are manual grounding checks and are not executed by SkillForge
 - PDF ingestion is not implemented
 
-## Final release flow
+## Final release flow (completed)
 
-Current release path:
+The release path was:
 
 ```text
 feature/production-readiness-remediation
         ↓ fast-forwarded
 feature/production-readiness
-        ↓ PR #1
+        ↓ PR #1 — merged to main (2026-09-07)
 main
 ```
 
-The remediation branch is no longer a separate pending integration step. PR #1 is the only remaining release gate. Merge only after its final CI run is green and the PR receives final audit approval.
+The release is merged; there is no pending integration step. Post-merge CI on `main`
+(run 34109540258) is green. Remaining work items are product backlog (see `TASKS.md`),
+not release blockers.

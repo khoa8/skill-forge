@@ -2,6 +2,13 @@
 
 **Date:** 2026-09-03+ (continuation mode) · **State:** P0 + high-value P1 implemented, verified, documented.
 
+> **Status note (2026-09-07):** this report is a point-in-time record of the continuation
+> session. The production-readiness release (GitHub repository source, provenance
+> click-through, edit-before-export, CI gate, verification harness) has since **merged to
+> `main` via PR #1**; current verified state lives in `PROJECT_STATUS.md` and
+> `docs/PRODUCTION_READINESS_STATUS.md`. The verification numbers below describe that
+> earlier session, not the current tree.
+
 ---
 
 ## 1. What SkillForge is
