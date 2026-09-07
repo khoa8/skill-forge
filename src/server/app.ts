@@ -20,7 +20,7 @@ import { collectFiles, combineFiles, FileSourceError } from "../core/sources/fil
 import { fetchGithubSource, GithubSourceError } from "../core/sources/github.js";
 import {
   createStore,
-  defaultStore,
+  getDefaultStore,
   getSkill as loadSkill,
   EditError,
   toResponse,
@@ -137,7 +137,7 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 export function createApp(config: AppConfig, overrides: AppOverrides = {}): Express {
-  const store = overrides.storeRoot ? createStore(overrides.storeRoot) : defaultStore;
+  const store = overrides.storeRoot ? createStore(overrides.storeRoot) : getDefaultStore();
   const saveSkillImpl = store.saveSkill;
   const loadSkillImpl = overrides.loadSkill ?? store.getSkill;
   const listSkillsImpl = store.listSkills;

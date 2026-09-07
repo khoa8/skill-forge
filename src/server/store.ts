@@ -248,13 +248,19 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
   return { root, saveSkill, getSkill, listSkills, updateValidation, updateFileContent };
 }
 
-/** The default store used by production call sites and default app creation. */
-export const defaultStore = createStore();
-export const saveSkill = defaultStore.saveSkill;
-export const getSkill = defaultStore.getSkill;
-export const listSkills = defaultStore.listSkills;
-export const updateValidation = defaultStore.updateValidation;
-export const updateFileContent = defaultStore.updateFileContent;
+let defaultStoreSingleton: SkillStore | undefined;
+
+/** The default store used by production call sites. Created lazily on first
+ * use so SKILLFORGE_DATA_ROOT — which may come from .env loaded by the entry
+ * point — is honored regardless of module import order. */
+export function getDefaultStore(): SkillStore {
+  defaultStoreSingleton ??= createStore();
+  return defaultStoreSingleton;
+}
+
+/** Bound methods of the default store, resolving lazily (same reason as
+ * getDefaultStore — SKILLFORGE_DATA_ROOT may be set by the entry point). */
+export const getSkill: SkillStore["getSkill"] = (id) => getDefaultStore().getSkill(id);
 
 /** Upper bound for a single user edit (per-file, matches the source adapters). */
 export const MAX_EDIT_BYTES = 1_000_000;

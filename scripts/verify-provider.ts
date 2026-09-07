@@ -16,34 +16,39 @@
  * Usage: npm run verify:provider
  */
 import { verifyProvider } from "../src/core/verify.js";
-import { PROVIDER_IDS, type ProviderId } from "../src/core/providers/index.js";
+import { resolveRuntimeConfig, loadDotEnv, ConfigError } from "../src/config/env.js";
 
 function maskKey(configured: boolean): string {
   return configured ? "configured (never printed)" : "not set";
 }
 
 async function main(): Promise<number> {
-  const rawProvider = process.env.SKILLFORGE_PROVIDER?.trim() || "mock";
-  if (!PROVIDER_IDS.includes(rawProvider as ProviderId)) {
-    console.error(`Unsupported SKILLFORGE_PROVIDER "${rawProvider}". Supported: ${PROVIDER_IDS.join(", ")}.`);
-    return 2;
+  // Same configuration contract as the server: documented .env file (process
+  // environment keeps precedence), validated before any generation runs.
+  loadDotEnv();
+  let provider: ReturnType<typeof resolveRuntimeConfig>["provider"];
+  let apiKey: string | undefined;
+  let baseUrl: string | undefined;
+  let model: string | undefined;
+  try {
+    const runtime = resolveRuntimeConfig();
+    provider = runtime.provider;
+    apiKey = runtime.apiKey;
+    baseUrl = runtime.baseUrl;
+    model = runtime.model;
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(err.message);
+      return 2;
+    }
+    throw err;
   }
-  const provider = rawProvider as ProviderId;
-  const apiKey = process.env.SKILLFORGE_API_KEY?.trim() || undefined;
-  const baseUrl = process.env.SKILLFORGE_BASE_URL?.trim() || undefined;
-  const model = process.env.SKILLFORGE_MODEL?.trim() || undefined;
 
   console.log("SkillForge provider verification");
   console.log(`  provider : ${provider}`);
   console.log(`  base url : ${baseUrl ?? "(provider default)"}`);
   console.log(`  model    : ${model ?? "(provider default)"}`);
   console.log(`  api key  : ${maskKey(Boolean(apiKey))}`);
-  if (provider !== "mock" && !apiKey) {
-    console.error(
-      `\nProvider "${provider}" requires SKILLFORGE_API_KEY. Set it (never commit it), or run the offline harness with SKILLFORGE_PROVIDER=mock.`,
-    );
-    return 2;
-  }
 
   console.log("\nRunning one small bounded generation…\n");
   const result = await verifyProvider({ provider, apiKey, baseUrl, model });

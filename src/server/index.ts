@@ -1,31 +1,44 @@
 /**
- * Server entrypoint. Reads provider configuration from the environment
- * (see .env.example); without configuration it runs the fully offline demo
- * provider so no API key is ever required for the bundled workflow.
+ * Server entrypoint. Loads the documented `.env` file (process environment
+ * keeps precedence), validates provider configuration BEFORE serving traffic
+ * and exits with an actionable message on misconfiguration; without any
+ * configuration it runs the fully offline demo provider so no API key is ever
+ * required for the bundled workflow.
  */
+import { loadDotEnv, resolveRuntimeConfig, resolveServerBind, ConfigError } from "../config/env.js";
 import { createApp, isLoopbackHost, type AppConfig } from "./app.js";
 
-const provider = (process.env.SKILLFORGE_PROVIDER ?? "mock").trim().toLowerCase();
-const apiKey = process.env.SKILLFORGE_API_KEY?.trim() || undefined;
+loadDotEnv();
+
+let runtime: ReturnType<typeof resolveRuntimeConfig>;
+let bind: ReturnType<typeof resolveServerBind>;
+try {
+  runtime = resolveRuntimeConfig();
+  bind = resolveServerBind();
+} catch (err) {
+  if (err instanceof ConfigError) {
+    console.error(`SkillForge configuration error: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 
 const config: AppConfig = {
-  provider,
-  hasApiKey: apiKey !== undefined && apiKey.length > 0,
-  baseUrl: process.env.SKILLFORGE_BASE_URL?.trim() || undefined,
-  model: process.env.SKILLFORGE_MODEL?.trim() || undefined,
+  provider: runtime.provider,
+  hasApiKey: runtime.apiKey !== undefined,
+  baseUrl: runtime.baseUrl,
+  model: runtime.model,
 };
 
 const app = createApp(config);
-const port = Number(process.env.PORT ?? 8787);
-const host = process.env.HOST ?? "127.0.0.1";
 
-app.listen(port, host, () => {
-  console.log(`SkillForge v0.1.0 listening on http://${host}:${port}`);
+app.listen(bind.port, bind.host, () => {
+  console.log(`SkillForge v0.1.0 listening on http://${bind.host}:${bind.port}`);
   console.log(`  provider: ${config.provider}${config.provider === "mock" ? " (offline demo — no API key needed)" : ""}`);
-  console.log(`  UI:       http://${host}:${port}/`);
-  if (!isLoopbackHost(host) && process.env.SKILLFORGE_ACKNOWLEDGE_EXPOSURE !== "1") {
+  console.log(`  UI:       http://${bind.host}:${bind.port}/`);
+  if (!isLoopbackHost(bind.host) && process.env.SKILLFORGE_ACKNOWLEDGE_EXPOSURE !== "1") {
     console.warn(
-      `\n  WARNING: bound to non-loopback address "${host}".\n` +
+      `\n  WARNING: bound to non-loopback address "${bind.host}".\n` +
         `  SkillForge has no built-in authentication or tenant isolation; any device that\n` +
         `  can reach this address can generate skills, read stored skills and sources, and\n` +
         `  edit/export them. The supported model is local / trusted self-hosted use. If this\n` +
