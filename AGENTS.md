@@ -15,7 +15,7 @@ SkillForge is not primarily:
 - an agent runtime;
 - an IDE replacement.
 
-The MVP should make creating a useful agent skill dramatically easier than writing one manually.
+SkillForge should make creating a useful agent skill dramatically easier than writing one manually.
 
 ---
 
@@ -29,29 +29,24 @@ An individual developer or power user who wants to teach an AI coding/automation
 - a workflow;
 - a tool.
 
-Do not optimize the MVP for enterprise governance or organization-wide knowledge management.
+Do not optimize the core product for enterprise governance or organization-wide knowledge management.
 
 ---
 
-## 3. Supported source priority
+## 3. Supported-source principles
 
-P0:
-- pasted text/Markdown;
-- local Markdown/text files;
-- documentation URL where practical;
-- bundled sample.
+Source adapters ingest documentation and instructional material. Durable constraints:
 
-P1:
-- GitHub repository;
-- multi-page documentation;
-- PDF;
-- website crawling with safe limits.
+- imported content is untrusted and inert;
+- adapters have explicit size/time/count/depth bounds where relevant;
+- no arbitrary source-code execution;
+- unsafe network/file access must be rejected;
+- truncation and skipping are surfaced honestly;
+- new source types reuse the canonical ingestion pipeline where practical;
+- do not build an unbounded crawler platform;
+- authenticated/enterprise integrations require explicit security design before implementation.
 
-P2:
-- authenticated documentation;
-- enterprise knowledge bases.
-
-Do not build a web crawler platform during MVP.
+The current supported-source inventory is owned by `README.md`.
 
 ---
 
@@ -98,7 +93,7 @@ Do not claim compatibility with an ecosystem unless the generated output has bee
 
 ## 6. Core pipeline
 
-The MVP pipeline should be explicit:
+The core pipeline should be explicit:
 
 1. Source ingestion
 2. Source cleaning/chunking
@@ -194,7 +189,7 @@ Separate:
 - UI;
 - provider adapters.
 
-Do not add microservices or complex job infrastructure during MVP.
+Do not add microservices or complex job infrastructure without a demonstrated need.
 
 Long-running ingestion can use simple background execution if required, but do not build distributed orchestration prematurely.
 
@@ -257,7 +252,8 @@ Before export, the user should be able to inspect:
 - source provenance;
 - target ecosystem.
 
-Editing generated text may be P1, but preview is P0.
+Preview must be available before export. If generated content is editable, edits must
+preserve honest provenance, re-run validation, and block export when invalid.
 
 ---
 
@@ -299,7 +295,7 @@ Prompts belong in a discoverable module and should be versionable.
 
 ## 17. Tests
 
-P0 tests should cover:
+Core tests should cover:
 - source normalization;
 - canonical model schema;
 - deterministic validator;
@@ -341,7 +337,7 @@ Never show validation success if checks were skipped.
 
 ## 19. Scope controls
 
-Do not add during MVP:
+Out of scope for the core product:
 - marketplace;
 - social network;
 - team workspaces;
