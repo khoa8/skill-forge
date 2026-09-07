@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - feature/production-readiness
+      - feature/production-readiness-remediation
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
