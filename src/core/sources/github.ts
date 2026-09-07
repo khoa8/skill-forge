@@ -45,6 +45,48 @@ export class GithubSourceError extends Error {
   }
 }
 
+/** Throw the typed deadline error when the overall budget has fired. */
+function assertOverallAlive(overallSignal: AbortSignal): void {
+  if (overallSignal.aborted) {
+    throw new GithubSourceError(
+      "GitHub ingestion exceeded its overall time budget. Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.",
+      "github_deadline_exceeded",
+    );
+  }
+}
+
+/**
+ * Consume a response body under the overall deadline. Headers arriving
+ * quickly does not exempt the body: if the overall budget fires while the
+ * body is stalled, the typed github_deadline_exceeded error is thrown and
+ * the underlying reader is cancelled (no dangling reads).
+ * Network/body failures keep their existing typed error.
+ */
+async function readBodyWithDeadline(
+  res: Response,
+  overallSignal: AbortSignal,
+  kind: "text" | "json",
+): Promise<string | unknown> {
+  assertOverallAlive(overallSignal);
+  try {
+    return await (kind === "text" ? res.text() : res.json());
+  } catch (err) {
+    if (overallSignal.aborted) {
+      // Cancel any stalled reader before surfacing the typed error.
+      await res.body?.cancel().catch(() => {});
+      throw new GithubSourceError(
+        "GitHub ingestion exceeded its overall time budget while reading a response body. Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.",
+        "github_deadline_exceeded",
+      );
+    }
+    // Genuine network/body failure keeps the existing typed error.
+    throw new GithubSourceError(
+      `Reading the GitHub response body failed: ${err instanceof Error ? err.message : String(err)}.`,
+      "github_fetch_failed",
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // URL parsing / normalization
 // ---------------------------------------------------------------------------
@@ -265,7 +307,8 @@ async function fetchRawFile(
   if (res.url !== "" && !RAW_HOSTS.has(new URL(res.url).hostname.toLowerCase())) return { kind: "unreachable" };
   const declared = res.headers.get("content-length");
   if (declared && Number.parseInt(declared, 10) > maxFileBytes) return { kind: "too_large" };
-  const body = await res.text();
+  const read = await readBodyWithDeadline(res, overallSignal, "text");
+  const body = read as string;
   if (Buffer.byteLength(body, "utf8") > maxFileBytes) return { kind: "too_large" };
   return { kind: "ok", content: body };
 }
@@ -310,7 +353,7 @@ export async function fetchGithubSource(
   let defaultBranchUsed = false;
   if (ref === undefined) {
     const res = await apiFetch(fetchImpl, `${apiBase}`, { timeoutMs, token, signal: deadline });
-    const meta = (await res.json()) as { default_branch?: string };
+    const meta = (await readBodyWithDeadline(res, deadline, "json")) as { default_branch?: string };
     if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
       throw new GithubSourceError(
         `GitHub did not report a default branch for ${ref0.owner}/${ref0.repo}.`,
@@ -333,7 +376,10 @@ export async function fetchGithubSource(
     token,
     signal: deadline,
   });
-  const treePayload = (await treeRes.json()) as { tree?: GithubTreeEntry[]; truncated?: boolean };
+  const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json")) as {
+    tree?: GithubTreeEntry[];
+    truncated?: boolean;
+  };
   const entries = Array.isArray(treePayload.tree) ? treePayload.tree : [];
   if (treePayload.truncated === true) {
     notes.push("GitHub truncated the repository tree listing (very large repository); some files may not have been considered.");
@@ -378,10 +424,9 @@ export async function fetchGithubSource(
       notes.push(`Skipped "${entry.path}": too large (${(entry.size / 1000).toFixed(0)} KB, limit ${(maxFileBytes / 1000).toFixed(0)} KB).`);
       continue;
     }
-    if (typeof entry.size === "number" && totalBytes + entry.size > maxTotalBytes) {
-      notes.push(`Stopped at the total size limit (${(maxTotalBytes / 1_000_000).toFixed(1)} MB); remaining candidate(s) were not fetched.`);
-      break;
-    }
+    // (No metadata-based total pre-check: the authoritative hard bound is the
+    // exact post-fetch projection below — metadata `size` may be missing or
+    // wrong, so it must not gate the total.)
     const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
     const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
     const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline);
@@ -405,14 +450,16 @@ export async function fetchGithubSource(
       notes.push(`Skipped "${entry.path}": actual content ${(actualBytes / 1000).toFixed(0)} KB exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit (metadata underreported the size).`);
       continue;
     }
-    if (totalBytes + actualBytes > maxTotalBytes) {
+    // Hard bound: project the EXACT bytes this file will add to the final
+    // combined source (header + separators included, same formatter as the
+    // combination step). Reject before accepting, so the returned
+    // input.content can never exceed maxTotalBytes.
+    const projected = combinedChunkBytes(entry.path, fetched.content, files.length === 0);
+    if (totalBytes + projected > maxTotalBytes) {
       notes.push(`Stopped at the total size limit (${(maxTotalBytes / 1_000_000).toFixed(1)} MB) after ${files.length} file(s); "${entry.path}" (${(actualBytes / 1000).toFixed(0)} KB) would exceed it.`);
       break;
     }
-    // Accumulate the real combined-source footprint: content bytes plus the
-    // synthetic `# path` header and join separators, so the combined text
-    // handed to ingestion can never exceed the configured cap.
-    totalBytes += actualBytes + Buffer.byteLength(entry.path, "utf8") + 8;
+    totalBytes += projected;
     files.push({ path: entry.path, content: fetched.content });
   }
   if (files.length === 0) {
@@ -443,11 +490,27 @@ function extensionOf(path: string): string {
 
 /** Join fetched files with synthetic `# path` headers (same convention as the
  * local-file adapter) so per-file structure and provenance stay inspectable. */
+/**
+ * The exact chunk one file contributes to the combined source, in the exact
+ * format the combination step produces. Shared by the size projection (hard
+ * bound enforcement) and the final combination so the two can never drift.
+ */
+function combinedFileChunk(path: string, content: string): string {
+  return `# ${path}\n\n${content.trimEnd()}\n`;
+}
+
+/** Exact byte length a file adds to the combined source (including its join
+ * separator when it is not the first chunk). */
+function combinedChunkBytes(path: string, content: string, isFirst: boolean): number {
+  const chunk = Buffer.byteLength(combinedFileChunk(path, content), "utf8");
+  return isFirst ? chunk : chunk + Buffer.byteLength("\n\n", "utf8");
+}
+
 function combineGithubFiles(files: CollectedFile[], repoLabel: string): SourceInput {
   if (files.length === 1) {
     return { type: "github", name: repoLabel, content: files[0]!.content };
   }
-  const content = files.map((f) => `# ${f.path}\n\n${f.content.trimEnd()}\n`).join("\n\n");
+  const content = files.map((f) => combinedFileChunk(f.path, f.content)).join("\n\n");
   return {
     type: "github",
     name: `${repoLabel} docs (${files.length} files)`.slice(0, 200),

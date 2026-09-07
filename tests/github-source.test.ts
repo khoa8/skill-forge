@@ -224,14 +224,20 @@ describe("fetchGithubSource (injected fetch)", () => {
   });
 
   it("enforces the total-size bound and reports it", async () => {
-    const raw = stdRaw();
-    const tree = { sha: "x", truncated: false, tree: Object.keys(raw).map((p) => ({ path: p, type: "blob", size: 600 })) };
+    const raw: Record<string, string> = {
+      "docs/a.md": `# A\n\n${"a".repeat(400)}`,
+      "docs/b.md": `# B\n\n${"b".repeat(400)}`,
+      "docs/c.md": `# C\n\n${"c".repeat(400)}`,
+    };
+    const tree = { sha: "x", truncated: false, tree: Object.keys(raw).map((p) => ({ path: p, type: "blob", size: 410 })) };
     const result = await fetchGithubSource("https://github.com/acme/widgets", {
       fetchImpl: githubFetch({ tree, raw }),
       maxTotalBytes: 700,
     });
     expect(result.files.length).toBe(1);
-    expect(result.notes.some((n) => n.includes("total size limit"))).toBe(true);
+    expect(result.notes.some((n) => n.includes("total size limit") && n.includes("docs/b.md"))).toBe(true);
+    // Hard guarantee on the actual combined content.
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThanOrEqual(700);
   });
 
   it("skips over-large files instead of fetching them", async () => {
@@ -288,10 +294,10 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(result.input.content).not.toContain("../escape.md");
   });
 
-  it("enforces the total-size bound using actual fetched bytes, not metadata", async () => {
-    // Metadata claims each file is tiny (missing/underreported `size`), but
-    // the real bodies are large. The post-fetch check must stop inclusion and
-    // never return a combined source over the cap.
+  it("enforces the total-size bound as a hard cap on the final combined source", async () => {
+    // Metadata sizes are missing / underreported; the real bodies are large.
+    // The projection must account for the synthetic "# path" headers and
+    // separators exactly, and the combined result must never exceed the cap.
     const big1 = `# Big One\n\n${"x".repeat(600)}`;
     const big2 = `# Big Two\n\n${"y".repeat(600)}`;
     const tree = {
@@ -308,8 +314,57 @@ describe("fetchGithubSource (injected fetch)", () => {
     });
     expect(result.files.map((f) => f.path)).toEqual(["docs/one.md"]);
     expect(result.notes.some((n) => n.includes("total size limit") && n.includes("docs/two.md"))).toBe(true);
-    // The combined source must respect the cap (+ small header overhead).
-    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThan(700 + 50);
+    // Hard guarantee — no tolerance.
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThanOrEqual(700);
+  });
+
+  it("rejects a file whose content alone fits but whose combined contribution crosses the cap", async () => {
+    // The first file fits alone; the second file's content is also under the
+    // cap by itself, but adding its synthetic "# path" header and join
+    // separator pushes the projected combined size over the cap.
+    const cap = 250;
+    const first = "a".repeat(200);
+    const second = "b".repeat(45); // + "# docs/b.md\n\n" + "\n" + separator exceeds 250
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [
+        { path: "docs/a.md", type: "blob", size: first.length },
+        { path: "docs/b.md", type: "blob", size: second.length },
+      ],
+    };
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree, raw: { "docs/a.md": first, "docs/b.md": second } }),
+      maxTotalBytes: cap,
+    });
+    expect(result.files.map((f) => f.path)).toEqual(["docs/a.md"]);
+    expect(result.notes.some((n) => n.includes("total size limit") && n.includes("docs/b.md"))).toBe(true);
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThanOrEqual(cap);
+  });
+
+  it("keeps multiple boundary-adjacent files within the exact cap", async () => {
+    // Three files each sized so that all three together (with headers and
+    // separators) land exactly at the cap; nothing may exceed it.
+    const mk = (n: string, filler: string, len: number) => `# ${n}\n\n${filler.repeat(len)}`;
+    const a = mk("A", "a", 86);
+    const b = mk("B", "b", 86);
+    const c = mk("C", "c", 86);
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [
+        { path: "docs/a.md", type: "blob", size: a.length },
+        { path: "docs/b.md", type: "blob", size: b.length },
+        { path: "docs/c.md", type: "blob", size: c.length },
+      ],
+    };
+    const cap = 320;
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree, raw: { "docs/a.md": a, "docs/b.md": b, "docs/c.md": c } }),
+      maxTotalBytes: cap,
+    });
+    expect(result.files.length).toBeGreaterThanOrEqual(2);
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThanOrEqual(cap);
   });
 
   it("skips a file whose actual body exceeds the per-file limit despite honest metadata", async () => {
@@ -455,6 +510,71 @@ describe("fetchGithubSource (injected fetch)", () => {
       }),
     ).rejects.toMatchObject({ code: "github_deadline_exceeded" });
     // The deadline, not the per-request timeout, ended the run.
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("maps a stalled raw response body to the typed deadline error", async () => {
+    // Headers return immediately; res.text() hangs until the deadline fires.
+    const stallBody = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.github.com/")) {
+        return new Response(
+          JSON.stringify(
+            url.includes("/git/trees/")
+              ? { sha: "x", truncated: false, tree: [{ path: "README.md", type: "blob", size: README.length }] }
+              : { default_branch: "main" },
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const res = new Response("never delivered", { status: 200, headers: { "content-type": "text/plain" } });
+      Object.defineProperty(res, "url", { value: String(url) });
+      Object.defineProperty(res, "text", {
+        value: () =>
+          new Promise<string>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+          }),
+      });
+      return res;
+    }) as unknown as typeof fetch;
+    const t0 = Date.now();
+    await expect(
+      fetchGithubSource("https://github.com/acme/widgets", {
+        fetchImpl: stallBody,
+        overallTimeoutMs: 250,
+      }),
+    ).rejects.toMatchObject({ code: "github_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("maps a stalled API JSON body to the typed deadline error", async () => {
+    // The default-branch request returns headers at once but json() stalls
+    // until the overall deadline aborts it (same mechanism as the raw case).
+    const stallJson = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/git/trees/")) {
+        return new Response(JSON.stringify({ sha: "x", truncated: false, tree: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const res = new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      Object.defineProperty(res, "url", { value: String(url) });
+      Object.defineProperty(res, "json", {
+        value: () =>
+          new Promise<never>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+          }),
+      });
+      return res;
+    }) as unknown as typeof fetch;
+    const t0 = Date.now();
+    await expect(
+      fetchGithubSource("https://github.com/acme/widgets", {
+        fetchImpl: stallJson,
+        overallTimeoutMs: 250,
+      }),
+    ).rejects.toMatchObject({ code: "github_deadline_exceeded" });
     expect(Date.now() - t0).toBeLessThan(5000);
   });
 
