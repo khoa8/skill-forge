@@ -25,7 +25,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
-import { safeFetch, SafeFetchError, isPrivateIp, type SafeResponse } from "./safe-fetch.js";
+import { safeFetch, isPrivateIp, type SafeResponse } from "./safe-fetch.js";
 
 /** DNS lookup shape used for SSRF validation and injection. */
 export interface LookupAllFn {
@@ -154,12 +154,6 @@ function raceDeadline<T>(promise: Promise<T>, deadline: AbortSignal, timeoutMs: 
     );
   });
 }
-
-/** Injection shape: either a WHATWG-fetch-like impl or the safe transport. */
-export type FetchUrlImpl = (
-  url: string,
-  init: { redirect: "manual"; headers: Record<string, string>; signal: AbortSignal },
-) => Promise<Response | SafeResponse>;
 
 /** Uniform view over Response | SafeResponse for the fields the adapter uses. */
 interface FetchedResponse {
