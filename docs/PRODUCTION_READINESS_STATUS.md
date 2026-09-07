@@ -144,9 +144,11 @@ Note: the CI workflow triggers on main, feature/production-readiness, and this b
 READY_FOR_INTEGRATION_PR
 
 - Branch: feature/production-readiness-remediation
-- Final HEAD: 21407c8 ("docs: reconcile remediation status"; pushed, tree clean). This
-  documentation-only commit follows known-good code commits (cb94ab3, 4a63f8c) whose CI
-  also ran green.
+- Verified code HEAD: cb94ab3 ("fix(github): make maxTotalBytes a hard cap and cover body
+  reads with the deadline") with 4a63f8c ("fix(store): preserve ingestion notes in the
+  manifest across edits") — all code changes; CI ran green over them.
+- Final HEAD of the branch: `git rev-parse HEAD` (docs-only commits after the code HEAD;
+  the last one is e979104). Tree clean, everything pushed.
 - Comparison base for the integration PR: feature/production-readiness (b6be8d3)
 - Verification: 184/184 tests, typecheck/build/demo/verify:provider pass (clean `npm ci`),
   npm audit 0 vulnerabilities, GitHub Actions green at the final HEAD
