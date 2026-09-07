@@ -34,6 +34,9 @@ const StoredSkillSchema = z.object({
     name: z.string(),
     type: SourceType,
     text: z.string(),
+    /** Adapter ingestion notes (truncation, skipped files, redirects).
+     * Optional for backwards compatibility with previously stored skills. */
+    notes: z.array(z.string()).optional(),
   }),
   validation: ValidationReport,
 });

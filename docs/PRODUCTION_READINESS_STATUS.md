@@ -7,16 +7,16 @@ feature/production-readiness-remediation (based on feature/production-readiness 
 2026-09-07T06:00:00Z (bootstrap + audit triage)
 
 ## Current phase
-Phase 1 complete; starting Phase 2 — source-note propagation end to end
+Phase 2 complete; starting Phase 3 — accurate public-repository-only GitHub policy
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(fix(validation): enforce canonical metadata consistency)
+fix(source): propagate ingestion notes end to end
 
 ## Last pushed commit
-b51881f (bootstrap)
+32dc5d9 (Phase 1)
 
 ## Baseline verification (this remediation run)
 - npm ci: OK (installed cleanly)
@@ -36,6 +36,15 @@ b51881f (bootstrap)
   → ZIP metadata consistent). tests/validate.test.ts fixture now uses the real `manifestFor`
   builder (its old hand-written manifest lacked identity fields the new check compares).
   npm test: 171 passed.
+- Phase 2: source notes propagate end to end. SourceInput gained optional `notes`; the file/
+  URL/GitHub branches in app.ts now feed adapter notes into the pipeline input and persist
+  them (store `source.notes`, optional for backwards compatibility). normalizeSource merges
+  adapter notes with normalization notes → they land in manifest.json source.notes (already
+  wired) and NormalizedSource-derived detail. Pipeline emits `source-note` events per note and
+  includes `sourceNotes` on the result event. UI: progress log shows each note; results panel
+  has a persisted "Source notes" box (safe textContent rendering, fetched from the skill API).
+  tests/source-notes.test.ts (3 tests): GitHub file-count truncation (stream + persisted),
+  GitHub tree truncation, local skipped subdirectory note; notes never fail validation.
 - Phase 6 (early): npm audit triage —
   - Advisories: GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g (moderate) in qs ≤ 6.15.3, transitive via body-parser 1.20.6 (pins qs 6.15.3 exactly) under express 4.22.2; also reachable via supertest (dev).
   - `npm audit fix` cannot fix (no compatible patched release within pinned range). Upgrading to express 5 would NOT fix it either (express 5.2.1 pins qs 6.13.0, inside the vulnerable range) and would add migration risk.
@@ -44,7 +53,7 @@ b51881f (bootstrap)
 - Dependency commit: `chore(deps): resolve production readiness audit findings`
 
 ## In progress
-- Phase 2: source-note/truncation propagation end to end
+- (committing Phase 2)
 
 ## Remaining
 - Phase 3: accurate public-repository-only GitHub policy (docs + errors + UI)
@@ -61,8 +70,8 @@ b51881f (bootstrap)
 - package.json (overrides), package-lock.json (qs 6.16.0), docs/PRODUCTION_READINESS_STATUS.md
 
 ## Tests run in current phase
-- npm test: 171 passed (166 baseline + 5 canonical-metadata tests), 0 failed
-- npm run typecheck: pass
+- npm test: 174 passed (171 after Phase 1 + 3 source-notes tests), 0 failed
+- npm run typecheck / build / demo: pass
 
 ## Known failures / blockers
 - (none)

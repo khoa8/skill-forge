@@ -157,6 +157,10 @@ export function createApp(config: AppConfig): Express {
     let content: string;
     let name: string;
     let sourceNotes: string[] = [];
+    /** Canonical SourceInput type for this request (notes ride along). */
+    let inputType: SourceType = "text";
+    /** Adapter notes (truncation, redirects, skipped files) — persisted with the skill. */
+    let adapterNotes: string[] = [];
     if (body.sourceType === "sample") {
       if (!body.sampleId) {
         res.status(400).json({ error: "sourceType 'sample' requires `sampleId`." });
@@ -166,6 +170,7 @@ export function createApp(config: AppConfig): Express {
         const sample = getSample(body.sampleId);
         content = sample.content;
         name = sample.meta.title;
+        inputType = "sample";
       } catch (err) {
         res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
         return;
@@ -180,6 +185,7 @@ export function createApp(config: AppConfig): Express {
         content = fetched.input.content;
         name = body.name?.trim() || fetched.input.name;
         sourceNotes = fetched.notes;
+        adapterNotes = fetched.notes;
       } catch (err) {
         const status = err instanceof UrlSourceError && err.code === "url_invalid" ? 400 : 502;
         res.status(status).json({
@@ -198,6 +204,7 @@ export function createApp(config: AppConfig): Express {
         content = fetched.input.content;
         name = body.name?.trim() || fetched.input.name;
         sourceNotes = fetched.notes;
+        adapterNotes = fetched.notes;
       } catch (err) {
         const code = err instanceof GithubSourceError ? err.code : "github_fetch_failed";
         const status = err instanceof GithubSourceError ? (GITHUB_ERROR_STATUS[code] ?? 502) : 502;
@@ -217,10 +224,12 @@ export function createApp(config: AppConfig): Express {
         const combined = combineFiles(collected.files, body.name?.trim());
         content = combined.content;
         name = combined.name;
+        inputType = "file";
         sourceNotes = [
           `Read ${collected.files.length} file(s) from the allowed root.`,
           ...(collected.skipped.length > 0 ? [`Skipped: ${collected.skipped.slice(0, 5).join("; ")}${collected.skipped.length > 5 ? "; …" : ""}`] : []),
         ];
+        adapterNotes = sourceNotes;
       } catch (err) {
         const status = err instanceof FileSourceError && err.code === "file_outside_root" ? 403 : 400;
         res.status(status).json({
@@ -248,7 +257,7 @@ export function createApp(config: AppConfig): Express {
     void (async () => {
       try {
         for await (const event of runPipeline(
-          { type: pipelineSourceType, name, content },
+          { type: pipelineSourceType, name, content, notes: adapterNotes },
           {
             provider: body.provider ?? (config.provider as (typeof PROVIDER_IDS)[number]) ?? "mock",
             apiKey: config.hasApiKey ? process.env.SKILLFORGE_API_KEY : undefined,
@@ -269,7 +278,7 @@ export function createApp(config: AppConfig): Express {
                 codeBlockCount: event.analysis.codeBlocks.length,
                 lineCount: event.analysis.lineCount,
               },
-              source: { name, type: pipelineSourceType, text: content },
+              source: { name, type: pipelineSourceType, text: content, notes: adapterNotes },
               validation: event.validation,
               createdAt: new Date().toISOString(),
             });

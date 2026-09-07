@@ -284,6 +284,10 @@ function handlePipelineEvent(ev) {
       setStep(step, "done");
       logProgress(LOG_LABEL[ev.stage] ?? ev.stage, ev.detail ?? "done", ev.ms, false);
     }
+  } else if (ev.type === "source-note") {
+    // Adapter ingestion notes (truncation, skipped files, redirects) are part
+    // of the honest record — shown individually, never folded into a stage line.
+    logProgress("source note", ev.note, null, false);
   } else if (ev.type === "error") {
     const step = STEP_FOR_STAGE[ev.stage] ?? ev.stage ?? "ingest";
     setStep(step, "error");
@@ -339,8 +343,45 @@ function renderResults(skill, validation) {
   renderValidation(validation, true);
   renderFiles(skill);
   renderExportCards();
+  renderSourceNotes();
   $("#results").classList.remove("hidden");
   $("#results").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/** Persisted adapter ingestion notes (truncation, skipped files) — kept with
+ * the skill so the record stays honest after a reload. Rendered as safe text. */
+async function renderSourceNotes() {
+  const box = $("#source-notes");
+  if (!box) return;
+  box.innerHTML = "";
+  let notes = [];
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}`);
+    if (res.ok) {
+      const data = await res.json();
+      notes = Array.isArray(data.source?.notes) ? data.source.notes : [];
+    }
+  } catch {
+    notes = []; // absence of notes must never fabricate them
+  }
+  if (notes.length === 0) {
+    box.classList.add("hidden");
+    return;
+  }
+  const h = document.createElement("h2");
+  h.textContent = "Source notes";
+  const p = document.createElement("p");
+  p.className = "hint";
+  p.textContent = "Recorded during ingestion — truncation and skipping are reported, never silent:";
+  const ul = document.createElement("ul");
+  ul.className = "source-notes-list";
+  for (const note of notes) {
+    const li = document.createElement("li");
+    li.textContent = String(note); // safe text rendering
+    ul.append(li);
+  }
+  box.append(h, p, ul);
+  box.classList.remove("hidden");
 }
 
 function analysisSummary(_skill) {

@@ -87,6 +87,10 @@ export const SourceInput = z.object({
   /** Raw text for `text`; sample id for `sample`; file name for `file`. */
   name: z.string().min(1).max(200).default("source"),
   content: z.string().min(1),
+  /** Ingestion notes from the source adapter (redirects, truncation, skipped
+   * files, …). Merged into NormalizedSource.notes so they reach the manifest,
+   * pipeline events, and the persisted record — truncation is never silent. */
+  notes: z.array(z.string()).optional(),
 });
 export type SourceInput = z.infer<typeof SourceInput>;
 
