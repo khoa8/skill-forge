@@ -46,6 +46,20 @@ function findWebDir(): string {
 }
 const WEB_DIR = findWebDir();
 
+type AsyncRouteHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;
+
+/**
+ * Express 4 does not route rejected promises from async handlers into the
+ * error middleware chain — a rejection outside try/catch would become an
+ * unhandled rejection. Every async route is wrapped so a failure always
+ * reaches the terminal error handler instead.
+ */
+function asyncRoute(handler: AsyncRouteHandler): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    void Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
 const GenerateBody = z.object({
   sourceType: z.enum(["text", "sample", "url", "file", "github"]),
   /** For `text`: the pasted content. Required when sourceType is "text". */
@@ -110,13 +124,20 @@ export interface AppConfig {
   model?: string;
 }
 
+/** Narrow dependency overrides for tests (e.g. injecting an async failure to
+ * prove route rejections reach the terminal error handler). */
+export interface AppOverrides {
+  loadSkill?: typeof loadSkill;
+}
+
 /** True when the bind host only exposes the server to the local machine. */
 export function isLoopbackHost(host: string): boolean {
   const h = host.trim().toLowerCase();
   return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "::ffff:127.0.0.1" || h === "[::1]";
 }
 
-export function createApp(config: AppConfig): Express {
+export function createApp(config: AppConfig, overrides: AppOverrides = {}): Express {
+  const loadSkillImpl = overrides.loadSkill ?? loadSkill;
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "3mb" }));
@@ -149,7 +170,7 @@ export function createApp(config: AppConfig): Express {
     }
   });
 
-  app.post("/api/generate", async (req: Request, res: Response) => {
+  app.post("/api/generate", asyncRoute(async (req: Request, res: Response) => {
     const parsed = GenerateBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -318,27 +339,27 @@ export function createApp(config: AppConfig): Express {
         }
       }
     })();
-  });
+  }));
 
-  app.get("/api/skills", async (_req, res) => {
+  app.get("/api/skills", asyncRoute(async (_req, res) => {
     res.json({ skills: await listSkills() });
-  });
+  }));
 
-  app.get("/api/skills/:id", async (req, res) => {
-    const stored = await loadSkill(req.params.id!);
+  app.get("/api/skills/:id", asyncRoute(async (req, res) => {
+    const stored = await loadSkillImpl(req.params.id!);
     if (!stored) {
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
     }
     res.json(toResponse(stored));
-  });
+  }));
 
   // Provenance click-through: exact lines from the *normalized* source that a
   // provenance record refers to. The stored raw source is re-normalized with
   // the same deterministic function the pipeline used, so line numbers match
   // the record exactly.
-  app.get("/api/skills/:id/provenance/excerpt", async (req, res) => {
-    const stored = await loadSkill(req.params.id!);
+  app.get("/api/skills/:id/provenance/excerpt", asyncRoute(async (req, res) => {
+    const stored = await loadSkillImpl(req.params.id!);
     if (!stored) {
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
@@ -390,11 +411,11 @@ export function createApp(config: AppConfig): Express {
       totalLines: normalized.lineCount,
       text: sourceSlice(normalized, start, effectiveEnd),
     });
-  });
+  }));
 
   // Re-run deterministic validation on demand.
-  app.post("/api/skills/:id/validate", async (req, res) => {
-    const stored = await loadSkill(req.params.id!);
+  app.post("/api/skills/:id/validate", asyncRoute(async (req, res) => {
+    const stored = await loadSkillImpl(req.params.id!);
     if (!stored) {
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
@@ -406,13 +427,13 @@ export function createApp(config: AppConfig): Express {
     });
     await updateValidation(stored.id, report);
     res.json({ validation: report });
-  });
+  }));
 
   // Edit one generated text file before export. The stored skill is updated
   // atomically, the file is marked user-edited (its provenance records are
   // dropped), manifest hashes are resynchronized, and deterministic validation
   // re-runs against the edited content before the new state is served.
-  app.post("/api/skills/:id/update-file", async (req, res) => {
+  app.post("/api/skills/:id/update-file", asyncRoute(async (req, res) => {
     const parsed = UpdateFileBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -439,11 +460,11 @@ export function createApp(config: AppConfig): Express {
       }
       res.status(500).json({ error: err instanceof Error ? err.message : String(err), code: "edit_failed" });
     }
-  });
+  }));
 
   // Export: re-validates, refuses packages with errors, streams a real ZIP.
-  app.post("/api/skills/:id/export", async (req, res) => {
-    const stored = await loadSkill(req.params.id!);
+  app.post("/api/skills/:id/export", asyncRoute(async (req, res) => {
+    const stored = await loadSkillImpl(req.params.id!);
     if (!stored) {
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
@@ -486,7 +507,7 @@ export function createApp(config: AppConfig): Express {
       const status = err instanceof ExportError && err.code === "export_target_unsupported" ? 400 : 500;
       res.status(status).json({ error: err instanceof Error ? err.message : String(err), code });
     }
-  });
+  }));
 
   // Registered after all routes: catches body-parser failures (malformed or
   // oversized JSON) and any error that reaches the end of the middleware

@@ -138,6 +138,41 @@ describe("client disconnects mid-stream are safe", () => {
   });
 });
 
+describe("async route rejections reach the terminal handler (Express 4)", () => {
+  // Express 4 does not forward rejected promises from async handlers into the
+  // error middleware chain. The asyncRoute wrapper must guarantee that an
+  // async dependency failure becomes an honest JSON 500 — not a hang, not a
+  // leak of the underlying error.
+  it("maps a rejecting async dependency to a generic JSON 500 without internals", async () => {
+    const secret = "postgres://skillforge:super-secret-dsn@db.internal:5432/prod";
+    const failingApp = createApp({ provider: "mock", hasApiKey: false }, {
+      loadSkill: async () => {
+        throw new Error(`connection refused: ${secret}`);
+      },
+    });
+    const res = await request(failingApp).get("/api/skills/whatever-id").expect(500);
+    expect(res.headers["content-type"]).toContain("application/json");
+    expect(res.body.code).toBe("internal_error");
+    expect(res.body.error).toBe("Internal server error.");
+    expect(res.text).not.toContain(secret);
+    expect(res.text).not.toContain("<html");
+    // supertest completing at all proves the request did not hang.
+  });
+
+  it("a rejecting dependency on the excerpt route also lands on the generic 500", async () => {
+    const failingApp = createApp({ provider: "mock", hasApiKey: false }, {
+      loadSkill: async () => {
+        throw new Error("disk exploded");
+      },
+    });
+    const res = await request(failingApp)
+      .get("/api/skills/whatever-id/provenance/excerpt?start=1&end=2")
+      .expect(500);
+    expect(res.body.code).toBe("internal_error");
+    expect(res.text).not.toContain("disk exploded");
+  });
+});
+
 describe("isLoopbackHost (binding-warning classifier)", () => {
   it("treats loopback forms as loopback", () => {
     expect(isLoopbackHost("127.0.0.1")).toBe(true);
