@@ -216,12 +216,19 @@ function throwForApiStatus(res: Response, url: string): void {
 }
 
 /** Read one documentation file from raw.githubusercontent.com (CDN redirect allowed). */
+/** Outcome of a raw content fetch — distinguishable so the caller can report
+ * each skip reason honestly instead of a generic "could not be fetched". */
+type RawFetchResult =
+  | { kind: "ok"; content: string }
+  | { kind: "too_large" }
+  | { kind: "unreachable" };
+
 async function fetchRawFile(
   fetchImpl: typeof fetch,
   rawUrl: string,
   maxFileBytes: number,
   timeoutMs: number,
-): Promise<string | null> {
+): Promise<RawFetchResult> {
   let res: Response;
   try {
     res = await fetchImpl(rawUrl, {
@@ -230,18 +237,18 @@ async function fetchRawFile(
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
-    return null; // reported as a skipped-file note by the caller
+    return { kind: "unreachable" }; // reported as a skipped-file note by the caller
   }
-  if (!res.ok) return null;
+  if (!res.ok) return { kind: "unreachable" };
   // A redirect must land on GitHub's raw content hosts, never elsewhere.
   // (Manually constructed test responses have an empty final URL; the runtime
   // fetch always populates it.)
-  if (res.url !== "" && !RAW_HOSTS.has(new URL(res.url).hostname.toLowerCase())) return null;
+  if (res.url !== "" && !RAW_HOSTS.has(new URL(res.url).hostname.toLowerCase())) return { kind: "unreachable" };
   const declared = res.headers.get("content-length");
-  if (declared && Number.parseInt(declared, 10) > maxFileBytes) return null;
+  if (declared && Number.parseInt(declared, 10) > maxFileBytes) return { kind: "too_large" };
   const body = await res.text();
-  if (Buffer.byteLength(body, "utf8") > maxFileBytes) return null;
-  return body;
+  if (Buffer.byteLength(body, "utf8") > maxFileBytes) return { kind: "too_large" };
+  return { kind: "ok", content: body };
 }
 
 /**
@@ -334,7 +341,9 @@ export async function fetchGithubSource(
     );
   }
 
-  // Fetch file contents within the declared bounds.
+  // Fetch file contents within the declared bounds. The authoritative total
+  // bound uses the actual fetched UTF-8 byte length — tree metadata `size` is
+  // optional and can be missing or wrong, so it is only a pre-filter.
   const files: CollectedFile[] = [];
   let totalBytes = 0;
   for (const entry of candidates) {
@@ -352,13 +361,30 @@ export async function fetchGithubSource(
     }
     const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
     const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
-    const content = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs);
-    if (content === null) {
-      notes.push(`Skipped "${entry.path}": could not be fetched (missing, too large, or unreachable).`);
+    const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs);
+    if (fetched.kind === "unreachable") {
+      notes.push(`Skipped "${entry.path}": could not be fetched (missing or unreachable).`);
       continue;
     }
-    totalBytes += Buffer.byteLength(content, "utf8");
-    files.push({ path: entry.path, content });
+    if (fetched.kind === "too_large") {
+      notes.push(`Skipped "${entry.path}": actual content exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit${typeof entry.size === "number" && entry.size <= maxFileBytes ? " (metadata underreported the size)" : ""}.`);
+      continue;
+    }
+    const actualBytes = Buffer.byteLength(fetched.content, "utf8");
+    // Authoritative post-fetch check: trust the body, not the metadata.
+    if (actualBytes > maxFileBytes) {
+      notes.push(`Skipped "${entry.path}": actual content ${(actualBytes / 1000).toFixed(0)} KB exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit (metadata underreported the size).`);
+      continue;
+    }
+    if (totalBytes + actualBytes > maxTotalBytes) {
+      notes.push(`Stopped at the total size limit (${(maxTotalBytes / 1_000_000).toFixed(1)} MB) after ${files.length} file(s); "${entry.path}" (${(actualBytes / 1000).toFixed(0)} KB) would exceed it.`);
+      break;
+    }
+    // Accumulate the real combined-source footprint: content bytes plus the
+    // synthetic `# path` header and join separators, so the combined text
+    // handed to ingestion can never exceed the configured cap.
+    totalBytes += actualBytes + Buffer.byteLength(entry.path, "utf8") + 8;
+    files.push({ path: entry.path, content: fetched.content });
   }
   if (files.length === 0) {
     throw new GithubSourceError(

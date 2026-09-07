@@ -7,16 +7,16 @@ feature/production-readiness-remediation (based on feature/production-readiness 
 2026-09-07T06:00:00Z (bootstrap + audit triage)
 
 ## Current phase
-Phase 3 complete; starting Phase 4 — GitHub total-size bound on actual fetched bytes
+Phase 4 complete; starting Phase 5 — overall GitHub ingestion latency deadline
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-fix(github): make repository support claims accurate
+fix(github): enforce actual total byte limit
 
 ## Last pushed commit
-8948b5d (Phase 2)
+55bdc0f (Phase 3)
 
 ## Baseline verification (this remediation run)
 - npm ci: OK (installed cleanly)
@@ -51,6 +51,14 @@ fix(github): make repository support claims accurate
   as a rate-limit raise for public repositories. Token confinement test already existed;
   new test asserts the not-found error states "public repositories only" and never suggests
   token-granted private access. Raw fetches remain unauthenticated by design.
+- Phase 4: total-size bound now enforced on ACTUAL fetched bytes. fetchRawFile returns a
+  distinguishable outcome (ok / too_large / unreachable) so skip notes are specific; post-fetch
+  checks enforce maxFileBytes and maxTotalBytes against the real body (metadata `size` is
+  only a pre-filter since it is optional and can be underreported); totalBytes accounting
+  includes the synthetic `# path` header overhead so the combined source cannot exceed the cap.
+  Ordering stays deterministic (docPriority + path). 2 new tests: missing/underreported metadata
+  sizes with real bodies crossing the cap (stop + honest note + combined size under cap), and
+  per-file underreported size skip note.
 - Phase 6 (early): npm audit triage —
   - Advisories: GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g (moderate) in qs ≤ 6.15.3, transitive via body-parser 1.20.6 (pins qs 6.15.3 exactly) under express 4.22.2; also reachable via supertest (dev).
   - `npm audit fix` cannot fix (no compatible patched release within pinned range). Upgrading to express 5 would NOT fix it either (express 5.2.1 pins qs 6.13.0, inside the vulnerable range) and would add migration risk.
@@ -59,10 +67,11 @@ fix(github): make repository support claims accurate
 - Dependency commit: `chore(deps): resolve production readiness audit findings`
 
 ## In progress
-- Phase 4: GitHub total-size bound on actual fetched bytes
+- Phase 5: overall GitHub ingestion latency deadline
 
 ## Remaining
-- Phase 5: overall GitHub ingestion latency deadline
+- Phase 6: (done early — qs override; re-verify at Phase 8)
+- Phase 7: documentation reconciliation (README 148→actual count, limits, notes behavior)
 - Phase 7: documentation reconciliation (README 148→actual count, limits, notes behavior)
 - Phase 8: full release audit + clean-state verification + browser verification + final verdict
 
@@ -74,7 +83,7 @@ fix(github): make repository support claims accurate
 - package.json (overrides), package-lock.json (qs 6.16.0), docs/PRODUCTION_READINESS_STATUS.md
 
 ## Tests run in current phase
-- npm test: 175 passed (174 after Phase 2 + 1 public-only policy test), 0 failed
+- npm test: 177 passed (175 + 2 actual-byte bound tests), 0 failed
 - npm run typecheck / build / demo: pass
 
 ## Known failures / blockers

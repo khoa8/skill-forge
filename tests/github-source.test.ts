@@ -288,6 +288,48 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(result.input.content).not.toContain("../escape.md");
   });
 
+  it("enforces the total-size bound using actual fetched bytes, not metadata", async () => {
+    // Metadata claims each file is tiny (missing/underreported `size`), but
+    // the real bodies are large. The post-fetch check must stop inclusion and
+    // never return a combined source over the cap.
+    const big1 = `# Big One\n\n${"x".repeat(600)}`;
+    const big2 = `# Big Two\n\n${"y".repeat(600)}`;
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [
+        { path: "docs/one.md", type: "blob" }, // size deliberately missing
+        { path: "docs/two.md", type: "blob", size: 10 }, // deliberately underreported
+      ],
+    };
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree, raw: { "docs/one.md": big1, "docs/two.md": big2 } }),
+      maxTotalBytes: 700,
+    });
+    expect(result.files.map((f) => f.path)).toEqual(["docs/one.md"]);
+    expect(result.notes.some((n) => n.includes("total size limit") && n.includes("docs/two.md"))).toBe(true);
+    // The combined source must respect the cap (+ small header overhead).
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThan(700 + 50);
+  });
+
+  it("skips a file whose actual body exceeds the per-file limit despite honest metadata", async () => {
+    const huge = `# Huge\n\n${"z".repeat(150_000)}`;
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [
+        { path: "README.md", type: "blob", size: README.length },
+        { path: "docs/huge.md", type: "blob", size: 500 }, // underreported
+      ],
+    };
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree, raw: { "README.md": README, "docs/huge.md": huge } }),
+      maxFileBytes: 100_000,
+    });
+    expect(result.files.map((f) => f.path)).toEqual(["README.md"]);
+    expect(result.notes.some((n) => n.includes("docs/huge.md") && n.includes("per-file limit"))).toBe(true);
+  });
+
   it("reports GitHub-truncated tree listings honestly", async () => {
     const tree = { sha: "x", truncated: true, tree: [{ path: "README.md", type: "blob", size: README.length }] };
     const result = await fetchGithubSource("https://github.com/acme/widgets", {
