@@ -385,6 +385,65 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(result.notes.some((n) => n.includes("docs/huge.md") && n.includes("per-file limit"))).toBe(true);
   });
 
+  it("a single file with trailing whitespace can never bypass the total cap", async () => {
+    // Meaningful text is modest; trailing whitespace makes the raw body far
+    // larger than the cap. The projected (trimmed) chunk used to pass while
+    // the returned raw content exceeded the cap — the invariant is on the
+    // FINAL representation, so this must never happen.
+    const body = `# Trailing\n\n${"meaningful text here. ".repeat(10)}${" ".repeat(400)}\n\n`;
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [{ path: "docs/trailing.md", type: "blob" }], // size missing too
+    };
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree, raw: { "docs/trailing.md": body } }),
+      maxTotalBytes: 500,
+    });
+    // The returned representation is the projected one (trimmed + header), so
+    // the raw 634-byte body cannot leak past the cap.
+    expect(result.files.map((f) => f.path)).toEqual(["docs/trailing.md"]);
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThanOrEqual(500);
+    expect(result.input.content.includes(" ".repeat(400))).toBe(false);
+  });
+
+  it("a single file exactly under the cap is returned with header, trimmed", async () => {
+    const body = `# Compact\n\n${"k".repeat(120)}`;
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [{ path: "docs/compact.md", type: "blob", size: 5 }], // underreported
+    };
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree, raw: { "docs/compact.md": body } }),
+      maxTotalBytes: 500,
+    });
+    expect(result.files.map((f) => f.path)).toEqual(["docs/compact.md"]);
+    expect(Buffer.byteLength(result.input.content, "utf8")).toBeLessThanOrEqual(500);
+    // Unified representation: single-file output also carries the header and
+    // trimmed content — no drift between projection and output.
+    expect(result.input.content).toBe("# docs/compact.md\n\n# Compact\n\n" + "k".repeat(120) + "\n");
+  });
+
+  it("multibyte UTF-8 content is bounded by UTF-8 byte length, not character count", async () => {
+    // Each "日" is 3 bytes in UTF-8; 200 chars = 600 bytes + header > 500 cap.
+    const body = `# Multibyte\n\n${"日".repeat(200)}`;
+    const tree = {
+      sha: "x",
+      truncated: false,
+      tree: [{ path: "docs/mb.md", type: "blob", size: 100 }], // underreported, char-like
+    };
+    // The trimmed chunk is 628 bytes > the 500 cap, so the candidate cannot
+    // fit under the final representation: the adapter must stop honestly and
+    // report the typed outcome instead of returning an oversized source.
+    await expect(
+      fetchGithubSource("https://github.com/acme/widgets", {
+        fetchImpl: githubFetch({ tree, raw: { "docs/mb.md": body } }),
+        maxTotalBytes: 500,
+      }),
+    ).rejects.toMatchObject({ code: "github_no_docs" });
+  });
+
   it("reports GitHub-truncated tree listings honestly", async () => {
     const tree = { sha: "x", truncated: true, tree: [{ path: "README.md", type: "blob", size: README.length }] };
     const result = await fetchGithubSource("https://github.com/acme/widgets", {

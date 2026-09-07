@@ -463,8 +463,11 @@ export async function fetchGithubSource(
     files.push({ path: entry.path, content: fetched.content });
   }
   if (files.length === 0) {
+    const sizeStopped = notes.some((n) => n.includes("total size limit"));
     throw new GithubSourceError(
-      `Documentation files were listed in ${ref0.owner}/${ref0.repo}@${ref} but none could be fetched.`,
+      sizeStopped
+        ? `Documentation files were listed in ${ref0.owner}/${ref0.repo}@${ref} but none fit within the ${(maxTotalBytes / 1_000_000).toFixed(1)} MB total size limit (see the size-limit notes). Raise maxTotalBytes or scope the URL to a smaller docs subpath.`
+        : `Documentation files were listed in ${ref0.owner}/${ref0.repo}@${ref} but none could be fetched.`,
       "github_no_docs",
     );
   }
@@ -494,6 +497,9 @@ function extensionOf(path: string): string {
  * The exact chunk one file contributes to the combined source, in the exact
  * format the combination step produces. Shared by the size projection (hard
  * bound enforcement) and the final combination so the two can never drift.
+ * Used for EVERY file — there is deliberately no single-file special case,
+ * so the projected bytes always equal the returned representation
+ * (trailing whitespace trimmed, synthetic "# path" header included).
  */
 function combinedFileChunk(path: string, content: string): string {
   return `# ${path}\n\n${content.trimEnd()}\n`;
@@ -507,13 +513,10 @@ function combinedChunkBytes(path: string, content: string, isFirst: boolean): nu
 }
 
 function combineGithubFiles(files: CollectedFile[], repoLabel: string): SourceInput {
-  if (files.length === 1) {
-    return { type: "github", name: repoLabel, content: files[0]!.content };
-  }
   const content = files.map((f) => combinedFileChunk(f.path, f.content)).join("\n\n");
   return {
     type: "github",
-    name: `${repoLabel} docs (${files.length} files)`.slice(0, 200),
+    name: files.length === 1 ? repoLabel : `${repoLabel} docs (${files.length} files)`.slice(0, 200),
     content,
   };
 }
