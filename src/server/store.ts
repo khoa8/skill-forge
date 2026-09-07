@@ -18,6 +18,12 @@ import { manifestFor } from "../core/build.js";
 export const MAX_STORED = 50;
 const ROOT = join(process.cwd(), ".data", "skills");
 
+/** Absolute path of the skill store directory (read-only exposure for tests
+ * and diagnostics; all store writes remain internal and slug-validated). */
+export function getSkillsDir(): string {
+  return ROOT;
+}
+
 const StoredSkillSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]{1,80}$/),
   createdAt: z.string(),

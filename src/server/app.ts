@@ -283,11 +283,17 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     const pipelineSourceType = PIPELINE_SOURCE_TYPE[body.sourceType];
     // Client disconnects surface as EPIPE/ECONNRESET 'error' events on the
     // response; an unhandled 'error' event would crash the process. Swallow
-    // them here — the close flag below stops further work instead.
+    // them here — the abort below stops further work instead.
     res.on("error", () => {});
+    // End-to-end cancellation: a disconnect aborts the in-flight pipeline work
+    // itself (including a remote provider request), not just the writes.
+    const cancellation = new AbortController();
     let clientGone = false;
     res.on("close", () => {
       clientGone = true;
+      // Aborting also guarantees no unfinished result is persisted: the
+      // pipeline surfaces cancellation instead of yielding a result.
+      cancellation.abort();
     });
     void (async () => {
       try {
@@ -299,10 +305,9 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
             baseUrl: config.baseUrl,
             model: config.model,
             requestedName: body.requestedName,
+            signal: cancellation.signal,
           },
         )) {
-          // Stop generating once the consumer is gone; discarding a result
-          // nobody will receive is honest and avoids pointless provider work.
           if (clientGone || res.writableEnded) return;
           if (event.type === "result") {
             await saveSkill({
