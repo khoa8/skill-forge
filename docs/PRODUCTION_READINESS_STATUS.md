@@ -13,9 +13,10 @@ All remediation phases complete.
 READY_FOR_PR
 
 ## Last known good commit / Last pushed commit
-Final HEAD of this branch (see `git log --oneline -10`; final commit is the status-file
-checkpoint). HEAD was pushed and the remote branch moved; verify with
-`git status` (clean) and `git log origin/feature/production-readiness-remediation -1`.
+Final HEAD: 802a19f ("ci: run quality gate on the remediation branch") plus this status-file
+amendment — see `git log --oneline -3`. HEAD is pushed; verify with `git status` (clean) and
+`git log origin/feature/production-readiness-remediation -1`.
+Final CI run on this branch: **success** (run id 34099409998, typecheck/test/build/demo, 40 s).
 
 ## Baseline verification (this remediation run)
 - npm ci: OK
@@ -133,6 +134,9 @@ docs/PRODUCTION_READINESS_STATUS.md.
 2. `npm ci && npm test && npm run typecheck && npm run build && npm run demo && npm run verify:provider && npm audit`
 3. Open the PR (instructions below). Do not merge automatically.
 
+Note: the CI workflow triggers on main, feature/production-readiness, and this branch
+(commit 802a19f added the trigger), so the PR run will execute automatically.
+
 ## Final verdict
 READY_FOR_PR
 
@@ -140,7 +144,8 @@ READY_FOR_PR
 - HEAD: see `git log -1` (pushed; tree clean)
 - Comparison base: feature/production-readiness (b6be8d3); eventual target: main
 - Verification: 179/179 tests, typecheck/build/demo/verify:provider pass, npm audit 0
-  vulnerabilities, GitHub Actions green on the branch, 12-point browser verification recorded above
+  vulnerabilities, GitHub Actions green on the branch (run 34099409998 and successors),
+  12-point browser verification recorded above
 - Known non-blocking limitations: live provider verification not executed (no credentials);
   GitHub ingestion is public-repos-only by design; `/tree/` refs with slashes take the first
   segment as the ref.
