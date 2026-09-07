@@ -37,31 +37,148 @@ export class SafeFetchError extends Error {
 }
 
 /**
- * IP ranges refused to prevent SSRF: this-network, private (RFC 1918),
- * loopback, link-local (IPv4 + IPv6), unique-local, CGNAT, multicast and
- * reserved ranges, plus IPv4-mapped IPv6 forms.
+ * IP ranges refused to prevent SSRF. Binary/CIDR classification (no string
+ * prefixes): IPv4 is checked as a 32-bit number against the refused ranges;
+ * IPv6 is parsed into its 8 hextets and checked by prefix bits, including
+ * IPv4-mapped (::ffff:0:0/96, in BOTH dotted and hex textual forms — the URL
+ * canonicalizer emits the hex form), NAT64 (64:ff9b::/96), deprecated
+ * IPv4-compatible (::/96), 6to4 (2002::/16), and Teredo (2001::/32) embedded
+ * IPv4 addresses, which are re-classified as IPv4. Refused IPv6 ranges:
+ * loopback (::1), unspecified (::), link-local fe80::/10, unique-local
+ * fc00::/7, multicast ff00::/8, documentation 2001:db8::/32. Globally
+ * routable unicast (2000::/3 outside the refused ranges) stays usable.
+ * Unparseable input fails CLOSED (refused).
  */
 export function isPrivateIp(ip: string): boolean {
   if (ip.includes(":")) {
-    const v6 = ip.toLowerCase();
-    if (v6 === "::1" || v6 === "::") return true;
-    if (v6.startsWith("fe80") || v6.startsWith("fc") || v6.startsWith("fd")) return true;
-    if (v6.startsWith("::ffff:")) {
-      const v4 = v6.slice(7);
-      return isIP(v4) === 4 ? isPrivateIp(v4) : false;
-    }
-    return false;
+    const hextets = parseIPv6Hextets(ip);
+    return hextets === null ? true : isPrivateIPv6(hextets);
   }
-  const parts = ip.split(".").map((p) => Number.parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return true;
-  const [a, b] = parts as [number, number, number, number];
-  if (a === 0 || a === 10 || a === 127) return true; // this-network, private, loopback
-  if (a === 169 && b === 254) return true; // link-local
-  if (a === 172 && b >= 16 && b <= 31) return true; // private
-  if (a === 192 && b === 168) return true; // private
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  if (a >= 224) return true; // multicast + reserved
+  const v4 = parseIPv4(ip);
+  return v4 === null ? true : isPrivateIPv4(v4);
+}
+
+/** Refused IPv4 ranges, as bit checks. */
+function isPrivateIPv4(v4: number): boolean {
+  const first = v4 >>> 24; // /8 prefix
+  const firstTwo = v4 >>> 16; // /16 prefix value
+  if (first === 0 || first === 10 || first === 127) return true; // this-network, private, loopback
+  if (firstTwo === 0xa9fe) return true; // 169.254.0.0/16 link-local
+  if (firstTwo >= 0xac10 && firstTwo <= 0xac1f) return true; // 172.16.0.0/12 private
+  if (firstTwo === 0xc0a8) return true; // 192.168.0.0/16 private
+  if (firstTwo >= 0x6440 && firstTwo <= 0x647f) return true; // 100.64.0.0/10 CGNAT
+  if (first >= 224) return true; // multicast (224/4) + reserved/broadcast (240/4, 255.255.255.255)
   return false;
+}
+
+/** Refused IPv6 ranges, as hextet-prefix checks. */
+function isPrivateIPv6(h: number[]): boolean {
+  // IPv4-mapped ::ffff:0:0/96 — re-classify the embedded IPv4 (covers both
+  // textual forms: the URL canonicalizer emits hex, resolvers may emit either).
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
+    return isPrivateIPv4(((h[6]! << 16) | h[7]!) >>> 0);
+  }
+  // NAT64 well-known prefix 64:ff9b::/96 — same embedded-IPv4 treatment.
+  if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+    return isPrivateIPv4(((h[6]! << 16) | h[7]!) >>> 0);
+  }
+  // 6to4 2002::/16 — embedded IPv4 rides in hextets 1-2.
+  if (h[0] === 0x2002) {
+    return isPrivateIPv4(((h[1]! << 16) | h[2]!) >>> 0);
+  }
+  // Teredo 2001::/32 — client IPv4 is the obfuscated last 32 bits.
+  if (h[0] === 0x2001 && h[1] === 0) {
+    return isPrivateIPv4((((h[6]! ^ 0xffff) << 16) | (h[7]! ^ 0xffff)) >>> 0);
+  }
+  // Link-local fe80::/10 (full range, not just the fe80 prefix).
+  if (h[0]! >= 0xfe80 && h[0]! <= 0xfebf) return true;
+  // Deprecated site-local fec0::/10 (RFC 3879: never globally routed).
+  if (h[0]! >= 0xfec0 && h[0]! <= 0xfeff) return true;
+  // Unique-local fc00::/7.
+  if (h[0]! >= 0xfc00 && h[0]! <= 0xfdff) return true;
+  // Multicast ff00::/8.
+  if (h[0]! >= 0xff00) return true;
+  // Documentation-only 2001:db8::/32 (non-routable).
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return true;
+  // :: (unspecified), ::1 (loopback), and the deprecated IPv4-compatible
+  // ::/96 (first six hextets zero) are all refused.
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) return true;
+  return false;
+}
+
+/** Parse a dotted-quad IPv4 address to a 32-bit number; null when invalid. */
+function parseIPv4(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let out = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const n = Number(part);
+    if (n > 255) return null;
+    out = (out << 8) | n;
+  }
+  return out >>> 0;
+}
+
+/**
+ * Parse an IPv6 address into its 8 hextets; null when invalid (including
+ * zone IDs). Handles :: compression and a trailing embedded dotted-quad IPv4
+ * (::ffff:192.168.1.1 style). Head groups anchor the start, tail groups
+ * anchor the end; :: fills the middle with zeros.
+ */
+function parseIPv6Hextets(input: string): number[] | null {
+  if (input.includes("%")) return null; // zone IDs never appear on our dials; fail closed
+  let text = input;
+  let embeddedTail: number[] | null = null;
+  const lastColon = text.lastIndexOf(":");
+  if (lastColon !== -1 && text.slice(lastColon + 1).includes(".")) {
+    const v4 = parseIPv4(text.slice(lastColon + 1));
+    if (v4 === null) return null;
+    embeddedTail = [(v4 >>> 16) & 0xffff, v4 & 0xffff];
+    text = text.slice(0, lastColon);
+    if (text.endsWith(":")) text = text.slice(0, -1);
+  }
+  const parseGroup = (raw: string): number | null =>
+    /^[0-9a-f]{1,4}$/.test(raw) ? Number.parseInt(raw, 16) : null;
+  const headGroups: number[] = [];
+  const tailGroups: number[] = [];
+  const doubleColon = text.indexOf("::");
+  if (doubleColon !== -1) {
+    if (text.indexOf("::", doubleColon + 1) !== -1) return null; // more than one "::"
+    const headText = text.slice(0, doubleColon);
+    const tailText = text.slice(doubleColon + 2);
+    if (headText.length > 0) {
+      for (const raw of headText.split(":")) {
+        const g = parseGroup(raw);
+        if (g === null) return null;
+        headGroups.push(g);
+      }
+    }
+    if (tailText.length > 0) {
+      for (const raw of tailText.split(":")) {
+        const g = parseGroup(raw);
+        if (g === null) return null;
+        tailGroups.push(g);
+      }
+    }
+  } else {
+    for (const raw of text.split(":")) {
+      const g = parseGroup(raw);
+      if (g === null) return null;
+      tailGroups.push(g);
+    }
+  }
+  if (embeddedTail) tailGroups.push(...embeddedTail);
+  const explicit = headGroups.length + tailGroups.length;
+  if (explicit > 8) return null;
+  if (doubleColon !== -1) {
+    // :: must replace at least one group and the total must fit 8.
+    const fill = 8 - explicit;
+    if (fill < 1) return null;
+    return [...headGroups, ...new Array<number>(fill).fill(0), ...tailGroups];
+  }
+  if (explicit !== 8) return null;
+  return [...headGroups, ...tailGroups];
 }
 
 export interface SafeResponse {
