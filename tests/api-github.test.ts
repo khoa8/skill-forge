@@ -1,4 +1,5 @@
-import { describe, expect, it, afterEach, vi } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, expect, vi } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import request from "supertest";
 import { createApp } from "../src/server/app.js";
 
@@ -72,7 +73,16 @@ function eventsOf(text: string) {
 }
 
 describe("GitHub source via the API", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
 
   afterEach(() => {
     vi.unstubAllGlobals();

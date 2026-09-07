@@ -1,4 +1,5 @@
-import { describe, expect, it, afterEach, vi } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, expect, vi } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import request from "supertest";
 import JSZip from "jszip";
 import { createApp } from "../src/server/app.js";
@@ -22,7 +23,16 @@ function findManifestEntry(manifestJson: string, path: string) {
 }
 
 describe("edit generated files before export", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
   // A dedicated id so parallel test files that regenerate the bundled sample
   // cannot clobber this suite's stored skill mid-edit.
   const id = "edit-safe-demo";
@@ -156,7 +166,16 @@ describe("edit generated files before export", () => {
 /** Fix regression: regenerating manifest.json during an edit must retain the
  * original adapter ingestion notes (truncation/skips survive edits). */
 describe("source notes survive edits in the regenerated manifest", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
   const id = "notes-survive-edit";
   const small = "# Tiny Docs\n\nSmall but long enough for the minimum source length check to pass.";
 

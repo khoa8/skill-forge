@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, expect } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import request from "supertest";
 import JSZip from "jszip";
 import { createApp } from "../src/server/app.js";
@@ -82,7 +83,16 @@ describe("canonical-metadata-consistency (unit)", () => {
 });
 
 describe("canonical metadata via the API (edit → validate → export)", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
   const id = "metadata-consistency-demo";
 
   it("rejects an identity-changing front matter edit, then accepts the repair", async () => {

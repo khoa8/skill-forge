@@ -19,11 +19,9 @@ import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
 import { collectFiles, combineFiles, FileSourceError } from "../core/sources/files.js";
 import { fetchGithubSource, GithubSourceError } from "../core/sources/github.js";
 import {
-  saveSkill,
+  createStore,
+  defaultStore,
   getSkill as loadSkill,
-  listSkills,
-  updateValidation,
-  updateFileContent,
   EditError,
   toResponse,
 } from "./store.js";
@@ -124,9 +122,11 @@ export interface AppConfig {
   model?: string;
 }
 
-/** Narrow dependency overrides for tests (e.g. injecting an async failure to
- * prove route rejections reach the terminal error handler). */
+/** Narrow dependency overrides, mainly for tests. `storeRoot` isolates
+ * persistence in a temporary directory so tests can never touch the
+ * production `.data/skills` store; omit it for normal use. */
 export interface AppOverrides {
+  storeRoot?: string;
   loadSkill?: typeof loadSkill;
 }
 
@@ -137,7 +137,12 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 export function createApp(config: AppConfig, overrides: AppOverrides = {}): Express {
-  const loadSkillImpl = overrides.loadSkill ?? loadSkill;
+  const store = overrides.storeRoot ? createStore(overrides.storeRoot) : defaultStore;
+  const saveSkillImpl = store.saveSkill;
+  const loadSkillImpl = overrides.loadSkill ?? store.getSkill;
+  const listSkillsImpl = store.listSkills;
+  const updateValidationImpl = store.updateValidation;
+  const updateFileContentImpl = store.updateFileContent;
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "3mb" }));
@@ -310,7 +315,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         )) {
           if (clientGone || res.writableEnded) return;
           if (event.type === "result") {
-            await saveSkill({
+            await saveSkillImpl({
               id: event.skill.id,
               skill: event.skill,
               analysis: {
@@ -347,7 +352,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
   }));
 
   app.get("/api/skills", asyncRoute(async (_req, res) => {
-    res.json({ skills: await listSkills() });
+    res.json({ skills: await listSkillsImpl() });
   }));
 
   app.get("/api/skills/:id", asyncRoute(async (req, res) => {
@@ -430,7 +435,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       sourceText: stored.source.text,
       target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
     });
-    await updateValidation(stored.id, report);
+    await updateValidationImpl(stored.id, report);
     res.json({ validation: report });
   }));
 
@@ -448,7 +453,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       return;
     }
     try {
-      const stored = await updateFileContent(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText) =>
+      const stored = await updateFileContentImpl(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText) =>
         validatePackage({ skill, sourceText, target: undefined }),
       );
       res.json(toResponse(stored));

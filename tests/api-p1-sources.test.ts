@@ -1,4 +1,5 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, expect } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +10,16 @@ import { createApp } from "../src/server/app.js";
 /** P1 end-to-end: URL and file source types through the HTTP API, plus
  * persistence of generated skills across store restarts. */
 describe("P1 sources via the API", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
   let sandbox: string;
   const prevRoot = process.env.SKILLFORGE_DOCS_ROOT;
 

@@ -4,14 +4,24 @@
  *   for malformed and oversized JSON bodies;
  * - the loopback classifier used for the non-loopback binding warning.
  */
-import { describe, expect, it } from "vitest";
+import { describe, it, beforeAll, afterAll, expect } from "vitest";
 import request from "supertest";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp, isLoopbackHost, terminalErrorHandler } from "../src/server/app.js";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import type { Request, Response, NextFunction } from "express";
 
-const app = createApp({ provider: "mock", hasApiKey: false });
+let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
 
 describe("malformed JSON bodies fail safely", () => {
   it("returns JSON 400 (not an HTML stack trace) for invalid JSON", async () => {

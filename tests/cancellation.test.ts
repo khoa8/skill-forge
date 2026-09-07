@@ -7,17 +7,19 @@
  * Proves the mocked remote provider's fetch receives the abort, the pipeline
  * surfaces cancellation instead of a result, nothing is persisted, and the
  * server stays healthy. Normal non-aborted generation must be unchanged.
+ *
+ * All persistence in this file goes to unique temporary store roots
+ * (tests/helpers/store-isolation.ts) — never the production .data/skills.
  */
-import { describe, expect, it } from "vitest";
+import { describe, it, expect } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import request from "supertest";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
+import { readdir } from "node:fs/promises";
 import { runPipeline } from "../src/core/pipeline.js";
 import { createApp } from "../src/server/app.js";
-import { getSkillsDir } from "../src/server/store.js";
 import { getSample } from "../src/core/samples.js";
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
 
 const SAMPLE_TEXT = getSample("meridian-payments-api").content;
 
@@ -94,17 +96,17 @@ describe("HTTP disconnect cancels the in-flight provider request end to end", ()
       });
     }) as unknown as typeof fetch;
 
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
     // The generate route reads the key from the environment (never logs it);
     // set a test key so the provider resolves and actually issues its fetch.
     const originalKey = process.env.SKILLFORGE_API_KEY;
     process.env.SKILLFORGE_API_KEY = "sk-test-cancellation-key";
-    const app = createApp({ provider: "glm", hasApiKey: true, baseUrl: "https://example.invalid/v1", model: "m" });
+    const app = createApp({ provider: "glm", hasApiKey: true, baseUrl: "https://example.invalid/v1", model: "m" }, { storeRoot });
     const server = createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const { port } = server.address() as AddressInfo;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = slowRemoteFetch;
-    const skillsDir = getSkillsDir();
     try {
       const payload = JSON.stringify({ sourceType: "sample", sampleId: "meridian-payments-api" });
       const clientRequest = new Promise<void>((resolve, reject) => {
@@ -140,25 +142,14 @@ describe("HTTP disconnect cancels the in-flight provider request end to end", ()
       expect(fetchCalls.length).toBe(1);
       expect(fetchCalls[0]!.aborted).toBe(true);
 
-      // The generation store must not have gained a NEW entry from the aborted
-      // run. (Other tests may legitimately have persisted skills already, so
-      // compare against the pre-test store state rather than assuming empty.)
-      let idsBefore: string[] = [];
+      // The isolated store must have gained no entry from the aborted run.
+      let ids: string[] = [];
       try {
-        const { readdir } = await import("node:fs/promises");
-        idsBefore = await readdir(skillsDir);
+        ids = await readdir(storeRoot);
       } catch {
-        idsBefore = [];
+        ids = [];
       }
-      await new Promise((r) => setTimeout(r, 100));
-      let idsAfter: string[] = [];
-      try {
-        const { readdir } = await import("node:fs/promises");
-        idsAfter = await readdir(skillsDir);
-      } catch {
-        idsAfter = [];
-      }
-      expect(idsAfter.filter((id) => !idsBefore.includes(id))).toHaveLength(0);
+      expect(ids.filter((id) => !/^\./.test(id))).toHaveLength(0);
 
       const health = await request(app).get("/api/health").expect(200);
       expect(health.body.ok).toBe(true);
@@ -167,18 +158,17 @@ describe("HTTP disconnect cancels the in-flight provider request end to end", ()
       if (originalKey === undefined) delete process.env.SKILLFORGE_API_KEY;
       else process.env.SKILLFORGE_API_KEY = originalKey;
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      // Clean any store state this test could have created (defensive; the
-      // expectation is that nothing was persisted).
-      await rm(skillsDir, { recursive: true, force: true }).catch(() => {});
+      // Cleanup is scoped to THIS test's temporary store root.
+      await cleanup();
     }
   });
 
   it("non-aborted generation still persists exactly one result (unchanged behavior)", async () => {
-    const app = createApp({ provider: "mock", hasApiKey: false });
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
     const server = createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const { port } = server.address() as AddressInfo;
-    const skillsDir = getSkillsDir();
     const marker = `cancel-unmodified-${Date.now()}`;
     try {
       // requestedName gives the generated skill a unique id to assert on.
@@ -210,12 +200,11 @@ describe("HTTP disconnect cancels the in-flight provider request end to end", ()
       const skillId = events.find((e) => e.type === "result")!.skill!.id;
       expect(skillId).toBe(marker);
 
-      const { readdir } = await import("node:fs/promises");
-      const ids = await readdir(skillsDir);
+      const ids = await readdir(storeRoot);
       expect(ids.filter((id) => id === marker)).toHaveLength(1);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(join(skillsDir, marker), { recursive: true, force: true }).catch(() => {});
+      await cleanup();
     }
   });
 });
