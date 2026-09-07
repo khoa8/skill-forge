@@ -90,7 +90,9 @@ export function normalizeSource(input: SourceInput): NormalizedSource {
     lineCount: contentLines.length,
     sha256: sha256(finalText),
     originalName: input.name,
-    notes,
+    // Adapter notes (truncation, redirects, skipped files) come first so the
+    // normalization warnings read in ingestion order. Nothing is dropped.
+    notes: [...(input.notes ?? []), ...notes],
   };
 }
 

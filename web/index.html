@@ -41,6 +41,7 @@
           <button class="tab" data-tab="text" role="tab">Paste</button>
           <button class="tab" data-tab="url" role="tab">URL</button>
           <button class="tab" data-tab="file" role="tab">Local files</button>
+          <button class="tab" data-tab="github" role="tab">GitHub repo</button>
         </div>
       </div>
 
@@ -69,6 +70,12 @@
         <label class="field-label" for="source-path">File or directory path</label>
         <input id="source-path" type="text" placeholder="docs/ or README.md" />
         <label class="checkline"><input type="checkbox" id="source-recursive" /> Include subdirectories (bounded: depth 6, 40 files)</label>
+      </div>
+
+      <div class="tab-body hidden" id="tab-github">
+        <p class="hint">Read documentation files from a public GitHub repository through the GitHub API. SkillForge fetches bounded docs (Markdown/RST/text, max 40 files, 1.4 MB total) and never clones, executes, or installs repository code. Public repositories only — private repositories are not supported. Unauthenticated GitHub API rate limits apply (60 requests/hour); SKILLFORGE_GITHUB_TOKEN, if configured on the server, only raises that limit.</p>
+        <label class="field-label" for="source-repo">Repository URL</label>
+        <input id="source-repo" type="url" placeholder="https://github.com/owner/repo  ·  …/tree/main/docs" />
       </div>
 
       <div class="advanced">
@@ -111,6 +118,9 @@
         <div id="validation-banner" class="validation-banner"></div>
         <div id="validation-checks" class="checks"></div>
 
+        <!-- source notes (truncation / skipped files reported by adapters) -->
+        <div id="source-notes" class="source-notes hidden"></div>
+
         <!-- files -->
         <div class="result-head">
           <h2>Generated files</h2>
@@ -122,9 +132,19 @@
             <div class="file-view-head">
               <span id="file-view-path" class="mono"></span>
               <span id="file-view-meta" class="muted"></span>
+              <button id="file-edit-btn" class="btn small hidden" type="button">Edit</button>
             </div>
             <p id="file-view-purpose" class="hint"></p>
             <p id="file-view-provenance" class="hint provenance"></p>
+            <div id="file-edit-box" class="hidden">
+              <textarea id="file-edit-textarea" class="mono" rows="18" spellcheck="false" aria-label="Edit file content"></textarea>
+              <div class="edit-actions">
+                <span id="file-edit-status" class="hint"></span>
+                <button id="file-edit-save" class="btn primary" type="button">Save</button>
+                <button id="file-edit-cancel" class="btn" type="button">Cancel</button>
+              </div>
+              <div id="file-edit-error" class="error-box hidden" role="alert"></div>
+            </div>
             <pre id="file-view-content" class="mono"></pre>
           </div>
         </div>
@@ -143,6 +163,17 @@
     <span>SkillForge MVP — runs fully offline with the bundled demo provider.</span>
     <span class="muted">Generated content is grounded in your source; always review before use. Validation is deterministic and never skipped silently.</span>
   </footer>
+
+  <dialog id="provenance-dialog" class="prov-dialog" aria-labelledby="prov-title">
+    <div class="prov-head">
+      <h3 id="prov-title">Source excerpt</h3>
+      <button id="prov-close" class="btn" type="button">Close</button>
+    </div>
+    <p id="prov-verbatim" class="prov-verbatim">Exact excerpt from your source — verbatim, not generated.</p>
+    <p id="prov-meta" class="hint mono"></p>
+    <p id="prov-extraction" class="hint"></p>
+    <pre id="prov-lines" class="mono prov-lines"></pre>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>

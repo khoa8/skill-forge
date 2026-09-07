@@ -9,8 +9,11 @@
  */
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CanonicalSkill, SourceAnalysis, ValidationReport, SourceType } from "../core/types.js";
+import { normalizeSource } from "../core/ingest.js";
+import { manifestFor } from "../core/build.js";
 
 export const MAX_STORED = 50;
 const ROOT = join(process.cwd(), ".data", "skills");
@@ -31,6 +34,9 @@ const StoredSkillSchema = z.object({
     name: z.string(),
     type: SourceType,
     text: z.string(),
+    /** Adapter ingestion notes (truncation, skipped files, redirects).
+     * Optional for backwards compatibility with previously stored skills. */
+    notes: z.array(z.string()).optional(),
   }),
   validation: ValidationReport,
 });
@@ -67,7 +73,7 @@ export async function saveSkill(entry: {
   }
   const dir = skillDir(entry.id);
   await mkdir(dir, { recursive: true });
-  const tmp = join(dir, "skill.json.tmp");
+  const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
   await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
   await rename(tmp, join(dir, "skill.json"));
 }
@@ -137,9 +143,96 @@ export async function updateValidation(id: string, validation: ValidationReport)
   const existing = await getSkill(id);
   if (!existing) return;
   existing.validation = validation;
-  const tmp = join(skillDir(id), "skill.json.tmp");
+  const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);
   await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
   await rename(tmp, join(skillDir(id), "skill.json"));
+}
+
+/** Upper bound for a single user edit (per-file, matches the source adapters). */
+export const MAX_EDIT_BYTES = 1_000_000;
+
+/** Files the user may not edit directly. manifest.json is regenerated from
+ * the package inventory on every edit — hand-editing it would be discarded. */
+export function isEditablePath(path: string): boolean {
+  return path !== "manifest.json";
+}
+
+export class EditError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "EditError";
+  }
+}
+
+/**
+ * Apply a user content edit to one existing file of a stored skill, atomically:
+ * the file is marked userEdited, its provenance records are dropped (the text
+ * is no longer purely source-derived), manifest.json is regenerated so hashes
+ * never drift, and the caller re-validates before the write is visible.
+ */
+export async function updateFileContent(
+  id: string,
+  path: string,
+  content: string,
+  revalidate: (skill: StoredSkill["skill"], sourceText: string) => ValidationReport,
+): Promise<StoredSkill> {
+  const existing = await getSkill(id);
+  if (!existing) throw new EditError(`No skill with id "${id}".`, "skill_not_found");
+  if (!isEditablePath(path)) {
+    throw new EditError(
+      `"${path}" is regenerated from the package inventory and cannot be edited directly.`,
+      "file_not_editable",
+    );
+  }
+  const file = existing.skill.files.find((f) => f.path === path);
+  if (!file) {
+    throw new EditError(`No file "${path}" in skill "${id}". Only existing files can be edited.`, "file_not_found");
+  }
+  if (Buffer.byteLength(content, "utf8") > MAX_EDIT_BYTES) {
+    throw new EditError(
+      `Edit is ${Buffer.byteLength(content, "utf8")} bytes; the per-file limit is ${MAX_EDIT_BYTES}.`,
+      "edit_too_large",
+    );
+  }
+
+  file.content = content;
+  file.userEdited = true;
+  existing.skill.provenance = existing.skill.provenance.filter((p) => p.filePath !== path);
+
+  // Regenerate manifest.json from the new inventory (bytes + hashes resync).
+  const normalizedSource = normalizeSource({
+    type: existing.source.type,
+    name: existing.source.name,
+    content: existing.source.text,
+    // Preserve the persisted adapter ingestion notes so the regenerated
+    // manifest keeps the original provenance record (truncation/skips must
+    // survive edits — the edit changes files, not the source history).
+    notes: existing.source.notes ?? [],
+  });
+  const manifestFile = existing.skill.files.find((f) => f.path === "manifest.json");
+  if (manifestFile) {
+    manifestFile.content = manifestFor(
+      existing.skill.files.filter((f) => f.path !== "manifest.json"),
+      existing.skill.meta,
+      {
+        name: existing.source.name,
+        sha256: normalizedSource.sha256,
+        lineCount: normalizedSource.lineCount,
+        notes: normalizedSource.notes,
+      },
+    );
+  }
+
+  // Validation reflects the edited content before anything is served.
+  existing.validation = revalidate(existing.skill, existing.source.text);
+
+  const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);
+  await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
+  await rename(tmp, join(skillDir(id), "skill.json"));
+  return existing;
 }
 
 /** Map a StoredSkill back to the shape the HTTP layer returns. */

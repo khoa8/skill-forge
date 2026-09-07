@@ -29,7 +29,8 @@ export type PipelineEvent =
       ms?: number;
       detail?: string;
     }
-  | { type: "result"; skill: CanonicalSkill; analysis: SourceAnalysis; validation: ValidationReport }
+  | { type: "source-note"; note: string }
+  | { type: "result"; skill: CanonicalSkill; analysis: SourceAnalysis; validation: ValidationReport; sourceNotes: string[] }
   | { type: "error"; stage?: PipelineStage; code: string; message: string };
 
 export interface PipelineOptions {
@@ -103,6 +104,11 @@ export async function* runPipeline(
       ms: timings[0]!.ms,
       detail: `${normalized.lineCount} lines from "${normalized.originalName}"${normalized.notes.length > 0 ? ` (${normalized.notes.join(" ")})` : ""}`,
     };
+    // Surface adapter notes (truncation, skipped files, redirects) as their
+    // own events so the UI can render each one instead of a folded detail line.
+    for (const note of normalized.notes) {
+      yield { type: "source-note", note };
+    }
   } catch (err) {
     timings.push({ stage: "ingest", ms: Date.now() - t0, ok: false });
     const e = wrapError(err, "ingest");
@@ -193,5 +199,5 @@ export async function* runPipeline(
     return;
   }
 
-  yield { type: "result", skill, analysis, validation };
+  yield { type: "result", skill, analysis, validation, sourceNotes: normalized.notes };
 }

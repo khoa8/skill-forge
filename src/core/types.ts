@@ -31,6 +31,10 @@ export const SkillFile = z.object({
   content: z.string(),
   /** Why this file exists — every generated file must have a purpose. */
   purpose: z.string(),
+  /** Set when the user edited this file's content after generation. Its
+   * provenance records are then dropped: the content is no longer purely
+   * source-derived, and claiming line-range grounding would be false. */
+  userEdited: z.boolean().optional(),
 });
 export type SkillFile = z.infer<typeof SkillFile>;
 
@@ -75,7 +79,7 @@ export type CanonicalSkill = z.infer<typeof CanonicalSkill>;
 // Source / analysis types
 // ---------------------------------------------------------------------------
 
-export const SourceType = z.enum(["text", "sample", "file"]);
+export const SourceType = z.enum(["text", "sample", "file", "github"]);
 export type SourceType = z.infer<typeof SourceType>;
 
 export const SourceInput = z.object({
@@ -83,6 +87,10 @@ export const SourceInput = z.object({
   /** Raw text for `text`; sample id for `sample`; file name for `file`. */
   name: z.string().min(1).max(200).default("source"),
   content: z.string().min(1),
+  /** Ingestion notes from the source adapter (redirects, truncation, skipped
+   * files, …). Merged into NormalizedSource.notes so they reach the manifest,
+   * pipeline events, and the persisted record — truncation is never silent. */
+  notes: z.array(z.string()).optional(),
 });
 export type SourceInput = z.infer<typeof SourceInput>;
 

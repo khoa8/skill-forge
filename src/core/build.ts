@@ -533,36 +533,6 @@ export function buildCanonicalSkill(
   });
 
   // --- manifest.json (deterministic: no timestamps inside package files).
-  const manifest = {
-    schema: "skillforge.manifest/1",
-    name,
-    displayName,
-    description,
-    version: "0.1.0",
-    generator: generatorId,
-    source: {
-      name: source.originalName,
-      sha256: source.sha256,
-      lineCount: source.lineCount,
-      notes: source.notes,
-    },
-    gaps,
-    files: files
-      .slice()
-      .sort((a, b) => a.path.localeCompare(b.path))
-      .map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.content, "utf8"), sha256: sha256(f.content) })),
-  };
-  files.push({
-    path: "manifest.json",
-    content: JSON.stringify(manifest, null, 2) + "\n",
-    purpose: "Machine-readable package manifest: source identity, gap list, file inventory with hashes.",
-  });
-  provenance.push({
-    filePath: "manifest.json",
-    extraction: "manifest from package inventory",
-    sourceLines: [1, source.lineCount],
-  });
-
   const meta: SkillMeta = {
     name,
     displayName,
@@ -572,6 +542,21 @@ export function buildCanonicalSkill(
     generatedAt: new Date(0).toISOString(), // stamped by pipeline; builders stay deterministic
     gaps,
   };
+  files.push({
+    path: "manifest.json",
+    content: manifestFor(files, meta, {
+      name: source.originalName,
+      sha256: source.sha256,
+      lineCount: source.lineCount,
+      notes: source.notes,
+    }),
+    purpose: "Machine-readable package manifest: source identity, gap list, file inventory with hashes.",
+  });
+  provenance.push({
+    filePath: "manifest.json",
+    extraction: "manifest from package inventory",
+    sourceLines: [1, source.lineCount],
+  });
 
   return {
     schemaVersion: "1",
@@ -588,4 +573,44 @@ export function buildCanonicalSkill(
     files,
     provenance,
   };
+}
+
+/** Source identity block shared by build and post-edit manifest resync. */
+export interface ManifestSourceInfo {
+  name: string;
+  sha256: string;
+  lineCount: number;
+  notes: string[];
+}
+
+/**
+ * Render manifest.json content for a file inventory. Deterministic; used both
+ * at build time and after user edits so manifest hashes can never drift from
+ * the packaged files.
+ */
+export function manifestFor(
+  files: SkillFile[],
+  meta: SkillMeta,
+  source: ManifestSourceInfo,
+): string {
+  const manifest = {
+    schema: "skillforge.manifest/1",
+    name: meta.name,
+    displayName: meta.displayName,
+    description: meta.description,
+    version: meta.version,
+    generator: meta.generator,
+    source: {
+      name: source.name,
+      sha256: source.sha256,
+      lineCount: source.lineCount,
+      notes: source.notes,
+    },
+    gaps: meta.gaps,
+    files: files
+      .slice()
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.content, "utf8"), sha256: sha256(f.content) })),
+  };
+  return JSON.stringify(manifest, null, 2) + "\n";
 }

@@ -499,6 +499,78 @@ const exportTargetKnown = check("export-target", "Export target is supported", (
   return pass();
 });
 
+// Canonical metadata consistency: SKILL.md front matter and manifest.json
+// must agree with skill.meta — the canonical package identity. Users may edit
+// instructional body text, but a front-matter `name` that contradicts
+// skill.meta.name would silently re-brand the package (skill id, export
+// folder, manifest) — that inconsistency must fail validation, not export.
+const canonicalMetadataConsistency = check(
+  "canonical-metadata-consistency",
+  "Canonical metadata is internally consistent",
+  ({ skill }) => {
+    const outcomes: CheckOutcome[] = [];
+    const skillMd = skill.files.find((f) => f.path === "SKILL.md");
+    const manifestFile = skill.files.find((f) => f.path === "manifest.json");
+
+    // --- SKILL.md front matter vs skill.meta
+    if (skillMd) {
+      const split = splitFrontMatter(skillMd.content);
+      let fmName: unknown;
+      if (split) {
+        try {
+          const parsed = parseYaml(split.fm);
+          if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            fmName = (parsed as Record<string, unknown>).name;
+          }
+        } catch {
+          // covered by frontmatter-parse; no duplicate finding here
+        }
+      }
+      if (typeof fmName === "string" && fmName !== skill.meta.name) {
+        outcomes.push(
+          fail(
+            `SKILL.md front matter \`name: ${fmName}\` contradicts the canonical skill name "${skill.meta.name}". Body text is editable; canonical identity is not. Restore name: ${skill.meta.name} (or regenerate the skill).`,
+            "SKILL.md",
+          ),
+        );
+      }
+    }
+
+    // --- manifest.json identity fields vs skill.meta
+    if (manifestFile) {
+      let manifest: unknown;
+      try {
+        manifest = JSON.parse(manifestFile.content);
+      } catch {
+        // covered by json-parse / manifest-consistency; no duplicate finding
+        manifest = null;
+      }
+      if (manifest !== null && typeof manifest === "object" && !Array.isArray(manifest)) {
+        const m = manifest as Record<string, unknown>;
+        const expect: [string, unknown][] = [
+          ["name", skill.meta.name],
+          ["displayName", skill.meta.displayName],
+          ["description", skill.meta.description],
+          ["version", skill.meta.version],
+          ["generator", skill.meta.generator],
+        ];
+        for (const [field, canonical] of expect) {
+          if (m[field] !== canonical) {
+            outcomes.push(
+              fail(
+                `manifest.json \`${field}\` (${JSON.stringify(m[field] ?? null)}) does not match the canonical metadata (${JSON.stringify(canonical ?? null)}).`,
+                "manifest.json",
+              ),
+            );
+          }
+        }
+      }
+    }
+
+    return outcomes.length === 0 ? pass() : outcomes;
+  },
+);
+
 export const CHECKS: Check[] = [
   exportTargetKnown,
   requiredFiles,
@@ -506,6 +578,7 @@ export const CHECKS: Check[] = [
   emptyFiles,
   frontMatterParses,
   frontMatterFields,
+  canonicalMetadataConsistency,
   emptySections,
   brokenLinks,
   jsonParses,

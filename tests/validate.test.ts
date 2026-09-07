@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
-import { buildCanonicalSkill, derivePlanFromAnalysis } from "../src/core/build.js";
+import { buildCanonicalSkill, derivePlanFromAnalysis, manifestFor } from "../src/core/build.js";
 import { validatePackage, skippedValidationReport, splitFrontMatter } from "../src/core/validate.js";
 import type { CanonicalSkill } from "../src/core/types.js";
 import { getSample } from "../src/core/samples.js";
@@ -19,12 +19,16 @@ const healthy = buildSkill(getSample("meridian-payments-api").content);
  * does not mask the specific check under test. */
 function resyncManifest(skill: CanonicalSkill): CanonicalSkill {
   const files = skill.files.filter((f) => f.path !== "manifest.json");
-  const manifest = {
-    schema: "skillforge.manifest/1",
-    name: skill.meta.name,
-    files: files.map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.content, "utf8"), sha256: "test" })),
-  };
-  files.push({ path: "manifest.json", content: JSON.stringify(manifest, null, 2) + "\n", purpose: "manifest" });
+  // Use the real manifest builder so the synthetic manifest carries the same
+  // identity fields (name, displayName, description, version, generator) the
+  // canonical-metadata-consistency check compares against.
+  const manifest = manifestFor(files, skill.meta, {
+    name: "fixture-source",
+    sha256: "test",
+    lineCount: 1,
+    notes: [],
+  });
+  files.push({ path: "manifest.json", content: manifest, purpose: "manifest" });
   return { ...skill, files };
 }
 

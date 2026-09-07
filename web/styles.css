@@ -234,3 +234,53 @@ input:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent
   display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   font-size: 12.5px; color: var(--text-muted);
 }
+
+/* Provenance click-through */
+.prov-record {
+  background: none; border: none; padding: 0; margin: 0;
+  font: inherit; color: var(--accent-strong); cursor: pointer;
+  text-decoration: underline dotted; text-underline-offset: 3px;
+}
+.prov-record:hover, .prov-record:focus-visible { color: var(--text); }
+
+.prov-dialog {
+  width: min(760px, 92vw); max-height: 84vh;
+  background: var(--bg-panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 18px 20px;
+}
+.prov-dialog::backdrop { background: rgba(5, 7, 12, 0.65); }
+.prov-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.prov-head h3 { margin: 0; font-size: 16px; }
+.prov-verbatim {
+  margin: 10px 0 4px; font-size: 12.5px; font-weight: 600;
+  color: var(--ok, #7dd487);
+}
+.prov-lines {
+  margin: 10px 0 0; padding: 12px 14px; overflow: auto; max-height: 52vh;
+  background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 12.5px; line-height: 1.55; white-space: pre;
+}
+
+/* Edit generated files before export */
+.file-view-head { display: flex; align-items: baseline; gap: 10px; }
+.file-view-head #file-edit-btn { margin-left: auto; flex: none; }
+.btn.small { padding: 4px 12px; font-size: 12.5px; }
+#file-edit-box textarea {
+  width: 100%; background: var(--bg-inset); color: var(--text);
+  border: 1px solid var(--accent, #6c8cff); border-radius: 8px;
+  padding: 10px 12px; font-size: 12.5px; line-height: 1.5; resize: vertical;
+  min-height: 240px;
+}
+.edit-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.edit-actions #file-edit-status { margin: 0; flex: 1; }
+
+/* Source notes (ingestion/truncation record) */
+.source-notes {
+  border: 1px dashed var(--border); border-radius: 10px;
+  padding: 10px 14px; margin-top: 12px; background: var(--bg-inset);
+}
+.source-notes h2 { margin: 0 0 4px; font-size: 14px; }
+.source-notes p { margin: 0 0 6px; }
+.source-notes-list { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--text-muted); }
+.source-notes-list li { margin: 3px 0; }

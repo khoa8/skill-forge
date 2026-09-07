@@ -18,7 +18,8 @@ export const MAX_TOTAL_BYTES = 1_400_000; // combined (under ingest's 1.5 MB cap
 export const MAX_FILES = 40;
 export const MAX_DEPTH = 6;
 
-const TEXT_EXTENSIONS = new Set([
+/** Documentation-like text extensions shared by the file and GitHub adapters. */
+export const TEXT_EXTENSIONS = new Set([
   ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".json", ".yaml", ".yml", ".toml",
 ]);
 
