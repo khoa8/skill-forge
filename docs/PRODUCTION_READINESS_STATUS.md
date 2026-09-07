@@ -7,16 +7,16 @@ feature/production-readiness-remediation (based on feature/production-readiness 
 2026-09-07T06:00:00Z (bootstrap + audit triage)
 
 ## Current phase
-Bootstrap complete; dependency triage (Phase 6) resolved early; starting Phase 1 — canonical metadata consistency
+Phase 1 complete; starting Phase 2 — source-note propagation end to end
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-(bootstrap commit — see git log)
+(fix(validation): enforce canonical metadata consistency)
 
 ## Last pushed commit
-b6be8d3 (base branch head)
+b51881f (bootstrap)
 
 ## Baseline verification (this remediation run)
 - npm ci: OK (installed cleanly)
@@ -28,6 +28,14 @@ b6be8d3 (base branch head)
 
 ## Completed
 - Bootstrap: remediation branch created from latest remote feature/production-readiness and pushed
+- Phase 1: `canonical-metadata-consistency` validator added to CHECKS (17 checks total now).
+  Fails when SKILL.md front matter `name` ≠ skill.meta.name, or when manifest
+  name/displayName/description/version/generator ≠ skill.meta. Body-only edits remain valid.
+  tests/canonical-metadata.test.ts (5 tests): unit pass/contradiction/manifest-field/body-edit
+  + API flow (body edit valid → renamed front matter fails → export 422 → repair → export 200
+  → ZIP metadata consistent). tests/validate.test.ts fixture now uses the real `manifestFor`
+  builder (its old hand-written manifest lacked identity fields the new check compares).
+  npm test: 171 passed.
 - Phase 6 (early): npm audit triage —
   - Advisories: GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g (moderate) in qs ≤ 6.15.3, transitive via body-parser 1.20.6 (pins qs 6.15.3 exactly) under express 4.22.2; also reachable via supertest (dev).
   - `npm audit fix` cannot fix (no compatible patched release within pinned range). Upgrading to express 5 would NOT fix it either (express 5.2.1 pins qs 6.13.0, inside the vulnerable range) and would add migration risk.
@@ -36,10 +44,9 @@ b6be8d3 (base branch head)
 - Dependency commit: `chore(deps): resolve production readiness audit findings`
 
 ## In progress
-- Phase 1: canonical metadata consistency validator (`canonical-metadata-consistency`)
+- Phase 2: source-note/truncation propagation end to end
 
 ## Remaining
-- Phase 2: source-note/truncation propagation end to end
 - Phase 3: accurate public-repository-only GitHub policy (docs + errors + UI)
 - Phase 4: GitHub total-size bound on actual fetched bytes
 - Phase 5: overall GitHub ingestion latency deadline
@@ -54,9 +61,8 @@ b6be8d3 (base branch head)
 - package.json (overrides), package-lock.json (qs 6.16.0), docs/PRODUCTION_READINESS_STATUS.md
 
 ## Tests run in current phase
-- npm test: 166 passed (before AND after the qs override)
-- npm audit: 0 vulnerabilities (was 3 moderate)
-- typecheck/build/demo: pass
+- npm test: 171 passed (166 baseline + 5 canonical-metadata tests), 0 failed
+- npm run typecheck: pass
 
 ## Known failures / blockers
 - (none)
@@ -64,7 +70,8 @@ b6be8d3 (base branch head)
 ## Exact resume instructions
 1. `git fetch origin && git switch feature/production-readiness-remediation && git pull --ff-only`
 2. Read this file; compare with `git log --oneline -6`.
-3. Resume at the first incomplete phase: Phase 1 (canonical metadata consistency validator + tests per remediation task §Phase 1).
+3. Resume at the first incomplete phase: Phase 2 (source-note propagation: adapter notes →
+   pipeline events → persisted store → UI; per remediation task §Phase 2).
 
 ## Next intended action
-Implement `canonical-metadata-consistency` validation + required tests; commit `fix(validation): enforce canonical metadata consistency`.
+Commit + push Phase 1, then implement source-note propagation with the required tests.
