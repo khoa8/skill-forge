@@ -144,7 +144,9 @@ Note: the CI workflow triggers on main, feature/production-readiness, and this b
 READY_FOR_INTEGRATION_PR
 
 - Branch: feature/production-readiness-remediation
-- Final HEAD: 2682947 (see `git log -1`; pushed, tree clean)
+- Final HEAD: 21407c8 ("docs: reconcile remediation status"; pushed, tree clean). This
+  documentation-only commit follows known-good code commits (cb94ab3, 4a63f8c) whose CI
+  also ran green.
 - Comparison base for the integration PR: feature/production-readiness (b6be8d3)
 - Verification: 184/184 tests, typecheck/build/demo/verify:provider pass (clean `npm ci`),
   npm audit 0 vulnerabilities, GitHub Actions green at the final HEAD
@@ -201,4 +203,5 @@ final release audit and its own PR. Do not open or merge that PR as part of this
 - Final CI run at the final code HEAD: see the run list for
   `feature/production-readiness-remediation` (workflow "CI", jobs: typecheck, test, build,
   demo). The final push of this branch triggers a fresh run; its result is recorded here:
-  run id 34162105522 — success (36 s).
+  run id 34103762013 — success (44 s) at 21407c8. The preceding code commits also ran
+  green: run 34099521795 (success) and the first-audit runs 34099409998/34099521795.
