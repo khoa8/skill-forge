@@ -16,6 +16,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
+import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
 
 export const MAX_URL_BYTES = 1_000_000; // 1 MB of payload
 export const URL_TIMEOUT_MS = 15_000;
@@ -247,13 +248,25 @@ export async function fetchUrlSource(
       "url_too_large",
     );
   }
-  const body = await response.text();
-  if (Buffer.byteLength(body, "utf8") > maxBytes) {
+  // Enforce the byte cap WHILE streaming the body (content-length is
+  // advisory); an oversized connection is torn down mid-read instead of being
+  // buffered to completion first.
+  let rawBody: Uint8Array;
+  try {
+    rawBody = await readBodyCapped(response, maxBytes);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      throw new UrlSourceError(
+        `The page exceeds ${maxBytes} bytes. Fetch a more specific page.`,
+        "url_too_large",
+      );
+    }
     throw new UrlSourceError(
-      `The page exceeds ${maxBytes} bytes after download. Fetch a more specific page.`,
-      "url_too_large",
+      `Reading the response body failed: ${err instanceof Error ? err.message : String(err)}.`,
+      "url_fetch_failed",
     );
   }
+  const body = decodeUtf8(rawBody);
 
   const isHtml = contentType.includes("html") || /^\s*<(!doctype|html)/i.test(body);
   let text: string;

@@ -5,7 +5,7 @@
  * UI shows real per-stage progress. Export re-runs deterministic validation
  * and refuses packages with errors — the download button is never a fake.
  */
-import express, { type Express, type Request, type Response } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -108,6 +108,12 @@ export interface AppConfig {
   hasApiKey: boolean;
   baseUrl?: string;
   model?: string;
+}
+
+/** True when the bind host only exposes the server to the local machine. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "::ffff:127.0.0.1" || h === "[::1]";
 }
 
 export function createApp(config: AppConfig): Express {
@@ -254,6 +260,14 @@ export function createApp(config: AppConfig): Express {
 
     const started = Date.now();
     const pipelineSourceType = PIPELINE_SOURCE_TYPE[body.sourceType];
+    // Client disconnects surface as EPIPE/ECONNRESET 'error' events on the
+    // response; an unhandled 'error' event would crash the process. Swallow
+    // them here — the close flag below stops further work instead.
+    res.on("error", () => {});
+    let clientGone = false;
+    res.on("close", () => {
+      clientGone = true;
+    });
     void (async () => {
       try {
         for await (const event of runPipeline(
@@ -266,6 +280,9 @@ export function createApp(config: AppConfig): Express {
             requestedName: body.requestedName,
           },
         )) {
+          // Stop generating once the consumer is gone; discarding a result
+          // nobody will receive is honest and avoids pointless provider work.
+          if (clientGone || res.writableEnded) return;
           if (event.type === "result") {
             await saveSkill({
               id: event.skill.id,
@@ -286,15 +303,19 @@ export function createApp(config: AppConfig): Express {
           res.write(JSON.stringify(event) + "\n");
         }
       } catch (err) {
-        res.write(
-          JSON.stringify({
-            type: "error",
-            code: "pipeline_stream_failed",
-            message: err instanceof Error ? err.message : String(err),
-          }) + "\n",
-        );
+        if (!clientGone) {
+          res.write(
+            JSON.stringify({
+              type: "error",
+              code: "pipeline_stream_failed",
+              message: err instanceof Error ? err.message : String(err),
+            }) + "\n",
+          );
+        }
       } finally {
-        res.end(`{"type":"done","ms":${Date.now() - started}}\n`);
+        if (!clientGone && !res.writableEnded) {
+          res.end(`{"type":"done","ms":${Date.now() - started}}\n`);
+        }
       }
     })();
   });
@@ -467,5 +488,48 @@ export function createApp(config: AppConfig): Express {
     }
   });
 
+  // Registered after all routes: catches body-parser failures (malformed or
+  // oversized JSON) and any error that reaches the end of the middleware
+  // chain, so clients get honest JSON instead of an HTML stack trace.
+  app.use(terminalErrorHandler);
+
   return app;
+}
+
+/**
+ * Terminal error handler. JSON only — never an HTML stack trace. body-parser
+ * failures (malformed JSON, oversized bodies) are mapped to honest statuses;
+ * anything unexpected becomes a generic 500 that echoes no error internals.
+ */
+export function terminalErrorHandler(
+  err: unknown,
+  _req: Request,
+  res: Response,
+  _next: NextFunction,
+): void {
+  if (res.headersSent) {
+    // The response is already streaming (e.g. NDJSON generation); the stream
+    // owner is responsible for it. Terminate instead of writing a second body.
+    res.end();
+    return;
+  }
+  const type =
+    typeof err === "object" && err !== null && "type" in err
+      ? String((err as { type?: unknown }).type)
+      : "";
+  if (type === "entity.too.large") {
+    res.status(413).json({
+      error: `Request body too large. The JSON body limit is 3 MB.`,
+      code: "payload_too_large",
+    });
+    return;
+  }
+  if (type === "entity.parse.failed" || type === "entity.decode.failed" || type === "encoding.invalid") {
+    res.status(400).json({
+      error: "Request body is not valid JSON for content-type application/json.",
+      code: "invalid_json_body",
+    });
+    return;
+  }
+  res.status(500).json({ error: "Internal server error.", code: "internal_error" });
 }
