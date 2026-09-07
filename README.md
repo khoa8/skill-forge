@@ -24,6 +24,21 @@ npm test             # Vitest suite incl. end-to-end Source → Export
 
 Pull requests and pushes to `main` run the repository CI quality gate defined in `.github/workflows/ci.yml` (that workflow is the single source of truth for which checks run).
 
+## Production run (compiled)
+
+```bash
+npm ci
+npm run build
+npm prune --omit=dev   # dev tooling (tsx, TypeScript, Vitest) is not needed to serve
+npm start              # node dist/server/index.js — no dev dependencies required
+```
+
+`npm run dev` remains the developer/watch workflow (tsx watch with auto-reload). The production server resolves the static UI and the documented `.env` file relative to its install location, so it can be started from any working directory.
+
+### Configuration (.env)
+
+`cp .env.example .env` and edit — `.env` values are loaded automatically by `npm run dev`, `npm start`, and `npm run verify:provider`. Variables already present in the shell/process environment take precedence over `.env` values, and `.env` values are never logged. Before serving traffic the provider configuration is validated: an unsupported `SKILLFORGE_PROVIDER` fails startup, and a non-mock provider without `SKILLFORGE_API_KEY` refuses to start (rather than serving a health endpoint that looks healthy while every generation is guaranteed to fail). With no `.env` at all the server runs the offline mock provider.
+
 ## Deployment scope (read before binding beyond loopback)
 
 SkillForge is built for **local / trusted self-hosted use**. It has **no built-in authentication, authorization, or tenant isolation**: anyone who can reach the server can generate skills, read stored skills (including their full sources), edit generated files, and export packages. The default `HOST=127.0.0.1` binding restricts it to your machine. Binding to a non-loopback address (e.g. `HOST=0.0.0.0`) exposes the unauthenticated service to your network — SkillForge prints a startup warning for that case, which you can only silence by explicitly setting `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`. Putting the server on the public Internet as a multi-user service is not a supported configuration without adding an external authentication/isolation layer in front of it.
@@ -38,7 +53,7 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 | Local files | Local files tab | File or directory under the allowed root (`SKILLFORGE_DOCS_ROOT`, default: the workspace). |
 | GitHub repository | GitHub repo tab | Bounded docs-tree fetch via the GitHub API (below). |
 
-**URL safety limits:** http/https only; hosts that are private/loopback/link-local by name *or* DNS resolution are refused (SSRF guard, re-checked on every redirect); max 3 redirects; 1 MB / 15 s caps; only text-like content types; page JavaScript is never executed (JS-rendered pages are reported as empty rather than guessed at).
+**URL safety limits:** http/https only; hosts that are private/loopback/link-local by name are refused, and connections are pinned to DNS records that were resolved and validated as public at connection time (closing the DNS re-resolution/rebinding gap between validation and use — the check is re-run for every redirect target); max 3 redirects; 1 MB cap; one 15 s end-to-end deadline covering DNS, redirects, connection, and body streaming (a stalled response fails with `url_deadline_exceeded`, HTTP 504, instead of hanging); only text-like content types; page JavaScript is never executed (JS-rendered pages are reported as empty rather than guessed at).
 
 **Local file safety:** `SKILLFORGE_DOCS_ROOT` is the filesystem trust boundary — paths must resolve inside it (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6; no code execution. Documentation-like files inside the root are readable **including dotfiles** with allowed extensions (e.g. `.secret-notes.md`); use a docs-only root if the workspace holds sensitive Markdown.
 
@@ -99,5 +114,6 @@ Runs one small bounded generation through the configured provider (`SKILLFORGE_P
 - The `glm`/`openai` providers require you to supply a key; live compatibility is not guaranteed by the test suite — validate your configuration with `npm run verify:provider`.
 - Evals are generated as manual grounding checks; SkillForge does not execute them.
 - PDF ingestion is not implemented.
+- SkillForge has no built-in authentication; see the deployment scope above before binding beyond loopback.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the module map, [docs/CANONICAL_FORMAT.md](docs/CANONICAL_FORMAT.md) for the package format, and [docs/EXPORTERS.md](docs/EXPORTERS.md) for exporter contracts.
