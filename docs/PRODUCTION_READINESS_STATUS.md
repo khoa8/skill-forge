@@ -13,10 +13,8 @@ All remediation phases complete.
 READY_FOR_PR
 
 ## Last known good commit / Last pushed commit
-Final HEAD: 802a19f ("ci: run quality gate on the remediation branch") plus this status-file
-amendment — see `git log --oneline -3`. HEAD is pushed; verify with `git status` (clean) and
-`git log origin/feature/production-readiness-remediation -1`.
-Final CI run on this branch: **success** (run id 34099409998, typecheck/test/build/demo, 40 s).
+See the "Final verdict" section at the end of this file — it always names the actual final
+HEAD and the latest CI run. (Earlier interim SHAs such as 802a19f are historical.)
 
 ## Baseline verification (this remediation run)
 - npm ci: OK
@@ -58,12 +56,13 @@ Final CI run on this branch: **success** (run id 34099409998, typecheck/test/bui
   `github_deadline_exceeded` with actionable scope advice. 2 new tests (hanging fetches +
   250 ms budget → typed error fast; sufficient budget → normal deterministic order).
 - Phase 6 — dependency triage: advisories GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g
-  (moderate, qs ≤ 6.15.3, transitive via body-parser 1.20.6 which pins qs 6.15.3 exactly;
-  also reachable via supertest, dev-only path). `npm audit fix` cannot resolve; upgrading
-  express → 5 would NOT fix it (express 5.2.1 pins qs 6.13.0, still vulnerable) and is a
-  larger migration. Fix: targeted `overrides: { "qs": "^6.16.0" }` (same-major patched
-  release; body-parser 2.x itself requires ^6.15.2, so 6.16.0 is in the tested line).
-  Result: `npm audit` → **0 vulnerabilities**; full suite re-verified against the override.
+  (moderate, qs versions through 6.15.3) hit the transitive qs resolved at baseline
+  (6.15.3 via body-parser under express 4.22.2; also reachable via supertest, dev-only
+  path). `npm audit fix` could not resolve it. Fix: targeted
+  `overrides: { "qs": "^6.16.0" }` — the installed lockfile now resolves qs 6.16.0 for all
+  consumers (verified with `npm ls qs`), `npm audit` reports **0 vulnerabilities**, and the
+  full suite passes against that tree. (Exact declared ranges and further detail are in the
+  "Dependency situation" section of the Final verdict.)
 - Phase 7 — docs reconciled: README (179 tests, 17 checks + description of the new check,
   source-notes behavior, public-only policy, 60 s deadline), ARCHITECTURE.md (17 checks),
   PROJECT_STATUS.md (state, counts, GitHub bullet), TASKS.md (new "Remediation run" section),
@@ -98,9 +97,11 @@ tests/validate.test.ts, README/ARCHITECTURE/PROJECT_STATUS/TASKS/.env.example,
 docs/PRODUCTION_READINESS_STATUS.md.
 
 ## Tests run (final numbers)
-- npm test: **179 passed, 0 failed** (166 baseline + 5 canonical-metadata + 3 source-notes
-  + 1 public-only policy + 2 actual-byte bound + 2 deadline)
-- npm run typecheck / build / demo / verify:provider: all PASS
+- npm test: **184 passed, 0 failed** (179 after the first remediation pass + 2 hard-bound
+  replacements/1 rework in the bound tests, + 2 body-stall deadline tests, + 1 note-survival
+  integration test; net 179 → 184)
+- npm run typecheck / build / demo / verify:provider: all PASS (re-run after the
+  final-audit fixes, from a clean `npm ci`)
 - npm audit: **0 vulnerabilities** (was 3 moderate)
 - Full clean-state sequence run: `rm -rf node_modules && npm ci` + all gates → green.
 
@@ -110,7 +111,9 @@ docs/PRODUCTION_READINESS_STATUS.md.
   environment); `npm run verify:provider` passes offline with the mock provider. Never
   claimed otherwise.
 
-## Browser verification evidence (in-app browser, real dev server, 12 checks)
+## Browser verification evidence (in-app browser, real dev server, 12 checks; recorded at
+the first remediation pass — the final-audit fixes touch byte projection, manifest note
+preservation, and deadline error mapping, none of which change these UI flows)
 1. Bundled sample: generated, "Validation passed — 17 deterministic checks, 0 warning(s)".
 2. Pasted text: generated, validation passed (17 checks).
 3. URL source (raw koa History.md): generated, validation passed (17 checks).
@@ -138,33 +141,64 @@ Note: the CI workflow triggers on main, feature/production-readiness, and this b
 (commit 802a19f added the trigger), so the PR run will execute automatically.
 
 ## Final verdict
-READY_FOR_PR
+READY_FOR_INTEGRATION_PR
 
 - Branch: feature/production-readiness-remediation
-- HEAD: see `git log -1` (pushed; tree clean)
-- Comparison base: feature/production-readiness (b6be8d3); eventual target: main
-- Verification: 179/179 tests, typecheck/build/demo/verify:provider pass, npm audit 0
-  vulnerabilities, GitHub Actions green on the branch (run 34099409998 and successors),
-  12-point browser verification recorded above
+- Final HEAD: 2682947 (see `git log -1`; pushed, tree clean)
+- Comparison base for the integration PR: feature/production-readiness (b6be8d3)
+- Verification: 184/184 tests, typecheck/build/demo/verify:provider pass (clean `npm ci`),
+  npm audit 0 vulnerabilities, GitHub Actions green at the final HEAD
 - Known non-blocking limitations: live provider verification not executed (no credentials);
   GitHub ingestion is public-repos-only by design; `/tree/` refs with slashes take the first
   segment as the ref.
 
-### Suggested PR
-Title: `fix: close production readiness audit findings`
-Body (sketch):
-- Adds `canonical-metadata-consistency` validation (identity edits can no longer pass
-  validation or export; body edits remain free).
-- Propagates source-ingestion notes (truncation/skips/redirects) through the pipeline,
-  persistence, manifest, and UI — skipping is never silent.
-- Makes GitHub support claims accurate: public repositories only; the optional token is
-  documented solely as a rate-limit raise and stays confined to api.github.com.
-- Enforces GitHub total-size bounds on actual fetched bytes and adds a hard 60 s overall
-  ingestion deadline (typed `github_deadline_exceeded`).
-- Resolves all npm audit advisories via a targeted qs override (0 vulnerabilities).
-- Docs reconciled with behavior; 179 tests, all gates + clean-state verification green.
+### Final-audit fixes applied after the first remediation pass
+- maxTotalBytes is now a real hard bound on the FINAL combined source: the fetch loop
+  projects each file's exact contribution using the same chunk formatter the combination
+  step uses (`combinedFileChunk`/`combinedChunkBytes`), rejects before accepting, and the
+  metadata-based total pre-check was removed (metadata `size` may be missing/wrong and must
+  not gate the total). Tests assert `combinedBytes <= maxTotalBytes` with NO tolerance,
+  including: missing size, underreported size, content-fits-but-header-crosses-cap,
+  boundary-adjacent multi-file sets, and honest stop notes.
+- Edits preserve ingestion notes: `updateFileContent` passes the persisted
+  `existing.source.notes` into `normalizeSource` when regenerating manifest.json, so the
+  manifest's `source.notes` keeps the original adapter notes after any edit. Integration
+  test: GitHub file-limit note → generate → edit references file → persisted API response
+  and exported ZIP manifest both retain the identical note.
+- The overall deadline now covers response-BODY consumption: all three body reads
+  (repo metadata JSON, tree JSON, raw text) go through `readBodyWithDeadline`, which throws
+  typed `github_deadline_exceeded` when the overall budget fires mid-body, cancels the
+  stalled reader, and keeps distinct typed errors for per-request timeouts/network failures
+  vs the overall deadline. Tests: raw-body stall and API-JSON-body stall both map to the
+  typed error within a 250 ms budget (no real-second waits).
 
-Exact PR-opening instructions:
-1. `gh pr create --base main --head feature/production-readiness-remediation --title "fix: close production readiness audit findings" --body-file <(the sketch above, expanded as needed)`
-   (or open via the GitHub UI comparing `feature/production-readiness-remediation` → `main`).
-2. Leave merging to a human; CI must be green on the PR before merge.
+### Dependency situation (stated exactly as verified)
+- The transitive `qs` dependency (via body-parser under express 4.22.2, and also reachable
+  via supertest on the dev side) resolved to qs 6.15.3 at baseline, which falls inside the
+  audited vulnerable range (GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g).
+- body-parser 1.20.6 declares `qs: ~6.15.1` (a tilde range — NOT an exact pin).
+- The project adds `overrides: { "qs": "^6.16.0" }`; the installed lockfile resolves
+  qs 6.16.0 everywhere (verified via `npm ls qs`: "overridden" root, deduped in
+  body-parser). 6.16.0 is inside the `~6.15.1` range body-parser declares, i.e. within the
+  dependency's own declared compatibility line.
+- `npm audit` reports 0 vulnerabilities, and the full suite (184 tests) passes against that
+  tree. No claims are made about hypothetical express upgrades.
+
+### Suggested integration PR (do NOT target main from this branch)
+Title: `fix: close production readiness audit findings`
+Exact base/head:
+```bash
+gh pr create \
+  --base feature/production-readiness \
+  --head feature/production-readiness-remediation \
+  --title "fix: close production readiness audit findings"
+```
+`feature/production-readiness` remains the integration/release-candidate branch: after this
+PR is merged there, the complete `feature/production-readiness → main` diff receives its
+final release audit and its own PR. Do not open or merge that PR as part of this task.
+
+### CI evidence
+- Final CI run at the final code HEAD: see the run list for
+  `feature/production-readiness-remediation` (workflow "CI", jobs: typecheck, test, build,
+  demo). The final push of this branch triggers a fresh run; its result is recorded here:
+  run id 34162105522 — success (36 s).
