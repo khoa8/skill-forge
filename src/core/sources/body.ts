@@ -61,6 +61,16 @@ function readChunkWithSignal(
 }
 
 /**
+ * Structural shape readBodyCapped needs: a WHATWG Response (GitHub adapter)
+ * or a custom transport response exposing a `body` stream. `text()` is only
+ * consulted when no stream exists (manually constructed test responses).
+ */
+export interface CappedBodyLike {
+  body?: ReadableStream<Uint8Array> | null;
+  text?(): Promise<string>;
+}
+
+/**
  * Read a response body fully, refusing early (and cancelling the underlying
  * stream) once more than maxBytes has been received. Returns the exact bytes
  * received; the caller decodes/parses them.
@@ -72,7 +82,7 @@ function readChunkWithSignal(
  * apply its existing deadline/error mapping.
  */
 export async function readBodyCapped(
-  res: Response,
+  res: CappedBodyLike,
   maxBytes: number,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
@@ -82,7 +92,7 @@ export async function readBodyCapped(
   const body = res.body;
   if (!body) {
     // Manually constructed Response shapes (some tests) expose no stream.
-    const bytes = new TextEncoder().encode(await res.text());
+    const bytes = new TextEncoder().encode(res.text ? await res.text() : "");
     if (bytes.byteLength > maxBytes) throw new BodyTooLargeError(maxBytes);
     return bytes;
   }

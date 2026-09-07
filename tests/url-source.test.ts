@@ -3,12 +3,13 @@ import type { LookupAddress } from "node:dns";
 import {
   assertSafeUrl,
   isPrivateHost,
-  isPrivateIp,
   htmlToText,
   fetchUrlSource,
   UrlSourceError,
   MAX_URL_BYTES,
+  type LookupAllFn,
 } from "../src/core/sources/url.js";
+import { isPrivateIp } from "../src/core/sources/safe-fetch.js";
 
 type LookupFn = (hostname: string, options: { all: true; verbatim: true }) => Promise<LookupAddress[]>;
 
@@ -60,6 +61,18 @@ describe("URL safety guards", () => {
     ).rejects.toMatchObject({ code: "url_private_host" });
   });
 
+  it("refuses mixed record sets containing any private address", async () => {
+    await expect(
+      fetchUrlSource("https://sneaky.example.com/doc", {
+        fetchImpl: (async () => htmlResponse("<p>x</p>")) as typeof fetch,
+        lookupImpl: fakeLookupFn([
+          { address: "93.184.216.34", family: 4 },
+          { address: "10.0.0.7", family: 4 },
+        ]),
+      }),
+    ).rejects.toMatchObject({ code: "url_private_host" });
+  });
+
   it("re-validates redirect targets against the SSRF guard", async () => {
     const calls: string[] = [];
     const fakeFetch = (async (input: string | URL | Request) => {
@@ -104,6 +117,57 @@ describe("URL safety guards", () => {
         lookupImpl: lookup,
       }),
     ).rejects.toMatchObject({ code: "url_too_large" });
+  });
+});
+
+describe("URL ingestion end-to-end deadline", () => {
+  it("fails with url_deadline_exceeded when headers arrive but the body stalls", async () => {
+    // Stream that never ends: only the shared deadline can end the read.
+    const stalled = new ReadableStream<Uint8Array>({ start() {} });
+    const t0 = Date.now();
+    await expect(
+      fetchUrlSource("https://example.com/slow-body", {
+        fetchImpl: (async () =>
+          new Response(stalled, { status: 200, headers: { "content-type": "text/plain" } })) as unknown as typeof fetch,
+        lookupImpl: fakeLookupFn(PUBLIC),
+        timeoutMs: 200,
+      }),
+    ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("does not restart the deadline on every redirect hop", async () => {
+    // Each hop answers quickly but takes 80 ms; the 200 ms global budget must
+    // abort the CHAIN (old behavior restarted a fresh timeout per hop).
+    let hops = 0;
+    const slowRedirect = (async () => {
+      hops += 1;
+      await new Promise((r) => setTimeout(r, 80));
+      return new Response(null, { status: 302, headers: { location: `https://next${hops}.example.com/x` } });
+    }) as unknown as typeof fetch;
+    const t0 = Date.now();
+    await expect(
+      fetchUrlSource("https://start.example.com/x", {
+        fetchImpl: slowRedirect,
+        lookupImpl: fakeLookupFn(PUBLIC),
+        timeoutMs: 200,
+      }),
+    ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(hops).toBeGreaterThanOrEqual(2);
+    expect(hops).toBeLessThanOrEqual(4);
+  });
+
+  it("bounds stalled DNS validation with the same deadline", async () => {
+    const never = new Promise<LookupAddress[]>(() => {});
+    const t0 = Date.now();
+    await expect(
+      fetchUrlSource("https://slow-dns.example.com/x", {
+        lookupImpl: (async () => never) as unknown as LookupAllFn,
+        timeoutMs: 150,
+      }),
+    ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
 });
 

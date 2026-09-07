@@ -219,10 +219,11 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         sourceNotes = fetched.notes;
         adapterNotes = fetched.notes;
       } catch (err) {
-        const status = err instanceof UrlSourceError && err.code === "url_invalid" ? 400 : 502;
+        const code = err instanceof UrlSourceError ? err.code : "url_fetch_failed";
+        const status = code === "url_invalid" ? 400 : code === "url_deadline_exceeded" ? 504 : 502;
         res.status(status).json({
           error: err instanceof Error ? err.message : String(err),
-          code: err instanceof UrlSourceError ? err.code : "url_fetch_failed",
+          code,
         });
         return;
       }
