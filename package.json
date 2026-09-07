@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/server/index.ts",
     "start": "node dist/server/index.js",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-runtime-assets.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
