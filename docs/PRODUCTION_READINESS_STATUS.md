@@ -10,7 +10,7 @@ feature/production-readiness-remediation (based on feature/production-readiness 
 All remediation phases complete.
 
 ## Current status
-READY_FOR_PR
+READY_FOR_INTEGRATION_PR
 
 ## Last known good commit / Last pushed commit
 See the "Final verdict" section at the end of this file — it always names the actual final
@@ -61,8 +61,8 @@ HEAD and the latest CI run. (Earlier interim SHAs such as 802a19f are historical
   path). `npm audit fix` could not resolve it. Fix: targeted
   `overrides: { "qs": "^6.16.0" }` — the installed lockfile now resolves qs 6.16.0 for all
   consumers (verified with `npm ls qs`), `npm audit` reports **0 vulnerabilities**, and the
-  full suite passes against that tree. (Exact declared ranges and further detail are in the
-  "Dependency situation" section of the Final verdict.)
+  full suite passes against that tree. Note the override deliberately moves qs OUTSIDE
+  body-parser's declared `~6.15.1` range — see "Dependency situation" in the Final verdict.
 - Phase 7 — docs reconciled: README (179 tests, 17 checks + description of the new check,
   source-notes behavior, public-only policy, 60 s deadline), ARCHITECTURE.md (17 checks),
   PROJECT_STATUS.md (state, counts, GitHub bullet), TASKS.md (new "Remediation run" section),
@@ -143,54 +143,39 @@ Note: the CI workflow triggers on main, feature/production-readiness, and this b
 ## Final verdict
 READY_FOR_INTEGRATION_PR
 
-- Branch: feature/production-readiness-remediation
-- Verified code HEAD: cb94ab3 ("fix(github): make maxTotalBytes a hard cap and cover body
-  reads with the deadline") with 4a63f8c ("fix(store): preserve ingestion notes in the
-  manifest across edits") — all code changes; CI ran green over them.
-- Final HEAD of the branch: `git rev-parse HEAD` (docs-only commits after the code HEAD;
-  the last one is e979104). Tree clean, everything pushed.
-- Comparison base for the integration PR: feature/production-readiness (b6be8d3)
-- Verification: 184/184 tests, typecheck/build/demo/verify:provider pass (clean `npm ci`),
-  npm audit 0 vulnerabilities, GitHub Actions green at the final HEAD
-- Known non-blocking limitations: live provider verification not executed (no credentials);
-  GitHub ingestion is public-repos-only by design; `/tree/` refs with slashes take the first
-  segment as the ref.
-
-### Final-audit fixes applied after the first remediation pass
-- maxTotalBytes is now a real hard bound on the FINAL combined source: the fetch loop
-  projects each file's exact contribution using the same chunk formatter the combination
-  step uses (`combinedFileChunk`/`combinedChunkBytes`), rejects before accepting, and the
-  metadata-based total pre-check was removed (metadata `size` may be missing/wrong and must
-  not gate the total). Tests assert `combinedBytes <= maxTotalBytes` with NO tolerance,
-  including: missing size, underreported size, content-fits-but-header-crosses-cap,
-  boundary-adjacent multi-file sets, and honest stop notes.
-- Edits preserve ingestion notes: `updateFileContent` passes the persisted
-  `existing.source.notes` into `normalizeSource` when regenerating manifest.json, so the
-  manifest's `source.notes` keeps the original adapter notes after any edit. Integration
-  test: GitHub file-limit note → generate → edit references file → persisted API response
-  and exported ZIP manifest both retain the identical note.
-- The overall deadline now covers response-BODY consumption: all three body reads
-  (repo metadata JSON, tree JSON, raw text) go through `readBodyWithDeadline`, which throws
-  typed `github_deadline_exceeded` when the overall budget fires mid-body, cancels the
-  stalled reader, and keeps distinct typed errors for per-request timeouts/network failures
-  vs the overall deadline. Tests: raw-body stall and API-JSON-body stall both map to the
-  typed error within a 250 ms budget (no real-second waits).
+- Branch: feature/production-readiness-remediation (based on feature/production-readiness @ b6be8d3)
+- Verified code HEAD: c2752d3 — "fix(github): make maxTotalBytes authoritative for the exact
+  returned content" (includes the single-file blocker fix, its regression tests, and the
+  pinned qs security override). Everything after this commit on the branch is documentation
+  only; the actual final tip SHA is reported in the agent response, not self-referentially here.
+- Comparison base for the integration PR: feature/production-readiness (b6be8d3). PR base/head:
+  base = feature/production-readiness, head = feature/production-readiness-remediation. Do NOT
+  open remediation → main.
+- Verification at the code HEAD (clean `npm ci`): **187/187 tests**, typecheck/build/demo/
+  verify:provider pass, `npm audit` → **0 vulnerabilities**.
+- CI: the workflow runs on every push to this branch; the latest run at the branch tip is the
+  authoritative evidence and was green at the last update. Historical run ids (34099409998,
+  34099521795, 34103762013, 34104033432, 34104157312) were all successes on this branch and
+  are retained for the record.
+- Known non-blocking limitations: live GLM/OpenAI provider verification never executed (no
+  credentials; offline mock verification passes and is never claimed as live); GitHub
+  ingestion is public-repositories-only by design; `/tree/` refs containing slashes take the
+  first segment as the ref.
 
 ### Dependency situation (stated exactly as verified)
 - The transitive `qs` dependency (via body-parser under express 4.22.2, and also reachable
   via supertest on the dev side) resolved to qs 6.15.3 at baseline, which falls inside the
   audited vulnerable range (GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g).
-- body-parser 1.20.6 declares `qs: ~6.15.1` (a tilde range — NOT an exact pin).
-- The project adds `overrides: { "qs": "^6.16.0" }`; the installed lockfile resolves
-  qs 6.16.0 everywhere (verified via `npm ls qs`: "overridden" root, deduped in
-  body-parser). 6.16.0 is inside the `~6.15.1` range body-parser declares, i.e. within the
-  dependency's own declared compatibility line.
-- `npm audit` reports 0 vulnerabilities, and the full suite (184 tests) passes against that
-  tree. No claims are made about hypothetical express upgrades.
+- body-parser 1.20.6 declares `qs: ~6.15.1`. The project intentionally overrides the
+  transitive dependency to patched qs 6.16.0, which is OUTSIDE that declared tilde range
+  (a ~6.15.1 range stays below 6.16.0). This is a deliberate, pinned security override
+  (`"overrides": { "qs": "6.16.0" }`) validated by the full application test suite, and
+  `npm audit` reports 0 vulnerabilities. It is kept despite crossing the declared
+  transitive range because the installed tree is stable, the suite passes, and the audit
+  is clean; the pin makes the security override reproducible.
+- No claims are made about hypothetical express upgrades.
 
-### Suggested integration PR (do NOT target main from this branch)
-Title: `fix: close production readiness audit findings`
-Exact base/head:
+### Integration PR (do NOT target main from this branch)
 ```bash
 gh pr create \
   --base feature/production-readiness \
@@ -200,9 +185,3 @@ gh pr create \
 `feature/production-readiness` remains the integration/release-candidate branch: after this
 PR is merged there, the complete `feature/production-readiness → main` diff receives its
 final release audit and its own PR. Do not open or merge that PR as part of this task.
-
-### CI evidence
-- CI is green at the final docs-only HEAD too: run id 34104033432 — success (40 s) at
-  808bdb7 ("docs: mark verified code HEAD and docs-only tail"). Earlier runs:
-  34103762013 (success, 21407c8), and the code commits ran green as well. Every commit on
-  this branch, including the last one, has a green CI run, so the evidence is unambiguous.
