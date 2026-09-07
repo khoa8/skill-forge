@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, expect } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import request from "supertest";
 import { createApp } from "../src/server/app.js";
 import { normalizeSource, sourceSlice } from "../src/core/ingest.js";
@@ -36,7 +37,16 @@ function eventsOf(text: string) {
 }
 
 describe("provenance excerpt endpoint", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
   let skillId: string;
   let firstRecord: { filePath: string; sourceLines: [number, number]; extraction: string };
 

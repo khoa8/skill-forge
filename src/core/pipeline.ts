@@ -39,6 +39,10 @@ export interface PipelineOptions {
   baseUrl?: string;
   model?: string;
   requestedName?: string;
+  /** Optional caller cancellation (e.g. HTTP client disconnect). When it
+   * fires, an in-flight remote provider request is aborted and no further
+   * pipeline work runs. Optional — offline/CLI consumers omit it. */
+  signal?: AbortSignal;
 }
 
 export interface StageTiming {
@@ -142,6 +146,8 @@ export async function* runPipeline(
   yield { type: "stage", stage: "generate", status: "start", detail: `provider: ${options.provider}` };
   let skill: CanonicalSkill;
   try {
+    // Cancellation check before starting the stage.
+    options.signal?.throwIfAborted();
     const provider = resolveProvider(
       {
         provider: options.provider,
@@ -154,6 +160,7 @@ export async function* runPipeline(
       source: normalized,
       analysis,
       requestedName: options.requestedName,
+      signal: options.signal,
     });
     skill = buildCanonicalSkill(normalized, analysis, plan, provider.id);
     skill.meta.generatedAt = new Date().toISOString();

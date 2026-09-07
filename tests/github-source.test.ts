@@ -588,11 +588,11 @@ describe("fetchGithubSource (injected fetch)", () => {
       }
       const res = new Response("never delivered", { status: 200, headers: { "content-type": "text/plain" } });
       Object.defineProperty(res, "url", { value: String(url) });
-      Object.defineProperty(res, "text", {
-        value: () =>
-          new Promise<string>((_resolve, reject) => {
-            init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-          }),
+      // Stall the body stream itself (production reads res.body, not
+      // res.text()): the stream never enqueues and never ends; the abort
+      // signal raced into the reader rejects the read at the deadline.
+      Object.defineProperty(res, "body", {
+        value: new ReadableStream<Uint8Array>({ start() {} }),
       });
       return res;
     }) as unknown as typeof fetch;
@@ -619,11 +619,11 @@ describe("fetchGithubSource (injected fetch)", () => {
       }
       const res = new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
       Object.defineProperty(res, "url", { value: String(url) });
-      Object.defineProperty(res, "json", {
-        value: () =>
-          new Promise<never>((_resolve, reject) => {
-            init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-          }),
+      // Stall the body stream itself (production reads res.body, not
+      // res.json()): the stream never enqueues and never ends; the abort
+      // signal raced into the reader rejects the read at the deadline.
+      Object.defineProperty(res, "body", {
+        value: new ReadableStream<Uint8Array>({ start() {} }),
       });
       return res;
     }) as unknown as typeof fetch;

@@ -2,29 +2,38 @@
 
 ## Branch
 
-`feature/production-readiness`
+Released to `main` via PR #1.
 
-The remediation branch was fast-forwarded into this release-candidate branch after independent audit.
+Historical path (for the record — the remediation branch was fast-forwarded into
+`feature/production-readiness` after independent audit, then merged):
+
+```text
+feature/production-readiness-remediation
+        ↓ fast-forwarded
+feature/production-readiness
+        ↓ PR #1 (merged 2026-09-07, post-merge CI run 34109540258: success)
+main
+```
 
 ## Last updated
 
-2026-09-07 — final release-candidate documentation refresh for PR #1.
+2026-09-07 — reconciled to the merged state (PR #1 complete; release no longer pending).
 
 ## Current phase
 
-Production-readiness implementation and remediation are complete. Release PR review is in progress.
+Released. Production-readiness implementation, remediation, PR review, and merge are complete.
+Post-merge CI on `main` is green.
 
 ## Current status
 
-`READY_FOR_RELEASE_PR`
+`RELEASED_TO_MAIN`
 
-## Release PR
+## Release PR (historical record)
 
-- PR: #1 — `feat: production readiness release`
+- PR: #1 — `feat: production readiness release` — **merged**
 - Base: `main`
 - Head: `feature/production-readiness`
-- Release-candidate code baseline before this docs-only refresh: `9ab6f199920eb9df4d2372f0d82a14d5dbf0d514`
-- Do not merge until the final PR CI run is green and the PR audit remains clean.
+- Merge commit: `8094b2d` (`feat: production readiness release (#1)`)
 
 ## Final verification baseline
 
@@ -176,17 +185,77 @@ The production-readiness run exercised:
 - grounding is heuristic token overlap, not proof of correctness
 - generated evals are manual grounding checks and are not executed by SkillForge
 - PDF ingestion is not implemented
+- no built-in multi-user authentication or tenant isolation (local / trusted
+  self-hosted deployment model; non-loopback binds print an explicit warning)
 
-## Final release flow
+## Final release flow (completed)
 
-Current release path:
+The release path was:
 
 ```text
 feature/production-readiness-remediation
         ↓ fast-forwarded
 feature/production-readiness
-        ↓ PR #1
+        ↓ PR #1 — merged to main (2026-09-07)
 main
 ```
 
-The remediation branch is no longer a separate pending integration step. PR #1 is the only remaining release gate. Merge only after its final CI run is green and the PR receives final audit approval.
+The release is merged; there is no pending integration step. Post-merge CI on `main`
+(run 34109540258) is green. Remaining work items are product backlog (see `TASKS.md`),
+not release blockers.
+
+## Post-release hardening pass (feature/production-hardening)
+
+An independent audit of the production-critical boundaries followed the merge. Confirmed
+defects were fixed with regression coverage:
+
+1. **Streaming byte caps on response bodies** — URL pages and GitHub raw files are read
+   with the byte cap enforced *while* the body streams (`src/core/sources/body.ts`);
+   oversized or content-length-lying responses are torn down mid-read instead of being
+   buffered to completion first. api.github.com JSON bodies carry a generous 10 MB cap.
+   Deadline and exact final-size guarantees are preserved (the abort signal is raced into
+   the reader).
+2. **Terminal Express error handler** — malformed JSON bodies return 400 JSON, oversized
+   bodies return 413 JSON, unexpected errors return a generic 500; stack traces and error
+   internals never reach the client (previously the default Express handler leaked them in
+   development mode).
+3. **NDJSON disconnect cancellation** — a client disconnect aborts generation end to end:
+   HTTP disconnect → AbortController → `runPipeline(signal)` → `provider.generate(signal)`
+   → remote provider fetch abort. An in-flight remote provider request is cancelled
+   immediately instead of running to completion or timeout, no unfinished result is
+   persisted, and EPIPE/ECONNRESET after disconnect cannot raise unhandled stream errors.
+4. **Non-loopback binding warning** — binding `HOST` to a non-loopback address prints an
+   explicit no-authentication warning at startup (silenced only by
+   `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`); the supported model is documented as local /
+   trusted self-hosted use, not an Internet-facing multi-user SaaS.
+
+CI additionally enforces `npm run verify:provider` (pinned to the offline mock provider —
+CI can never reach a paid provider) and a strict `npm audit` gate (fails on any advisory
+at low severity or above).
+
+## Post-audit remediation run (feature/production-hardening-remediation)
+
+An audit of the hardening branch returned CHANGES_REQUESTED with five findings; all were
+remediated on `feature/production-hardening-remediation`:
+
+1. **Remote provider response bodies byte-bounded** — success bodies stream under a 10 MB
+   cap and non-2xx diagnostic bodies under a 256 KB cap (shared `readBodyCapped` reader,
+   enforced while streaming; missing or lying `content-length` cannot bypass it). Oversized
+   bodies surface as typed `provider_response_too_large` / bounded diagnostics;
+   `provider_bad_json` semantics are unchanged; the API key never appears in errors.
+2. **Express 4 async errors reach the terminal handler** — every async route is wrapped so
+   rejected promises land on the terminal error handler (generic 500 JSON, no internals)
+   instead of becoming unhandled rejections; proven by real route-level regression tests.
+3. **End-to-end disconnect cancellation** — implemented (see hardening item 3 above); no
+   result is persisted for an aborted generation; offline/CLI consumers omit the signal
+   and are unchanged.
+4. **Current-state test evidence reconciled** — PROJECT_STATUS now reports the actual
+   suite size (219 tests / 23 files at this remediation HEAD), not the pre-hardening
+   release baseline (187/19), which remains clearly labeled as the historical release
+   record.
+5. **README CI wording matches triggers** — "Every pull request and every push to `main`
+   (and the hardening branch)" instead of "Every push".
+
+GitHub Actions actions were also bumped to `checkout@v5` / `setup-node@v5` (node24 action
+runtime) to clear the Node 20 action-runtime deprecation warnings — no workflow-semantics
+change.

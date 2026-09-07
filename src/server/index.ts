@@ -3,7 +3,7 @@
  * (see .env.example); without configuration it runs the fully offline demo
  * provider so no API key is ever required for the bundled workflow.
  */
-import { createApp, type AppConfig } from "./app.js";
+import { createApp, isLoopbackHost, type AppConfig } from "./app.js";
 
 const provider = (process.env.SKILLFORGE_PROVIDER ?? "mock").trim().toLowerCase();
 const apiKey = process.env.SKILLFORGE_API_KEY?.trim() || undefined;
@@ -23,4 +23,13 @@ app.listen(port, host, () => {
   console.log(`SkillForge v0.1.0 listening on http://${host}:${port}`);
   console.log(`  provider: ${config.provider}${config.provider === "mock" ? " (offline demo — no API key needed)" : ""}`);
   console.log(`  UI:       http://${host}:${port}/`);
+  if (!isLoopbackHost(host) && process.env.SKILLFORGE_ACKNOWLEDGE_EXPOSURE !== "1") {
+    console.warn(
+      `\n  WARNING: bound to non-loopback address "${host}".\n` +
+        `  SkillForge has no built-in authentication or tenant isolation; any device that\n` +
+        `  can reach this address can generate skills, read stored skills and sources, and\n` +
+        `  edit/export them. The supported model is local / trusted self-hosted use. If this\n` +
+        `  exposure is deliberate, set SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1 to silence this warning.\n`,
+    );
+  }
 });

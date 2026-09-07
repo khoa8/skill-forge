@@ -50,3 +50,19 @@ export function joinPackagePath(...parts: string[]): string {
   }
   return safe;
 }
+
+/** Marker replacing redacted credential occurrences in diagnostics. */
+export const REDACTED = "[REDACTED]";
+
+/**
+ * Replace every exact occurrence of `secret` in `text` with [REDACTED].
+ * No-ops safely on empty/undefined inputs, so callers can apply it
+ * unconditionally to any diagnostics text that might embed a credential
+ * (remote response bodies, transport error messages). The invariant: the
+ * configured API key must never leave the provider adapter in cleartext.
+ */
+export function redactSecret(text: string | undefined | null, secret: string | undefined | null): string {
+  if (!text) return "";
+  if (!secret || secret.length === 0) return text;
+  return text.split(secret).join(REDACTED);
+}

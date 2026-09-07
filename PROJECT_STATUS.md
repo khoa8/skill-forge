@@ -1,8 +1,8 @@
 # SkillForge — Project Status
 
 **Original sprint date:** 2026-09-03 (Asia/Ho_Chi_Minh)
-**Current mode:** Production readiness release candidate on `feature/production-readiness`
-**State:** P0 complete and verified; P1 shipped; P1.5 production-readiness work and remediation are complete. The release-candidate branch has been independently audited and is under PR review for merge to `main`.
+**Current mode:** Production-readiness release **merged to `main`** (PR #1, post-merge CI green); production-hardening pass in progress on `feature/production-hardening`.
+**State:** P0 complete and verified; P1 shipped; P1.5 production-readiness work and remediation complete and **merged to `main`** via PR #1 (post-merge CI run 34109540258: success). No known release blockers within the supported deployment model (local / trusted self-hosted single-user; not a hardened multi-user SaaS).
 
 > There is no active wall-clock deadline. Do not restart P0; do not enter finalization prematurely.
 
@@ -16,8 +16,8 @@
   - **17 deterministic validators**: the original set plus `eval-integrity`, `provenance-integrity`, and `canonical-metadata-consistency`.
   - **UI:** five source tabs (Samples/Paste/URL/Local files/GitHub repo) with per-type validation and button states; browser-verified generation and real ZIP download.
   - **Link neutralization:** relative links inside verbatim excerpts render as paths, so exported packages never contain dangling internal references (found via live koa README; regression-tested).
-- **P1.5 shipped (feature/production-readiness):**
-  - **CI quality gate** (`.github/workflows/ci.yml`): typecheck + test + build + demo on every push/PR, Node 20, `npm ci`, minimal permissions, concurrency cancellation.
+- **P1.5 shipped (merged to `main` via PR #1):**
+  - **CI quality gate** (`.github/workflows/ci.yml`): typecheck + test + build + demo + offline provider verification + dependency audit on every pull request and pushes to `main` (and the hardening branch), Node 20, `npm ci`, minimal permissions, concurrency cancellation.
   - **GitHub repository source** (`src/core/sources/github.ts`, `sourceType: "github"`): repo/tree URL parsing, default-branch resolution, one recursive-tree API call, docs-first ordering (README → docs/ → root → rest), extension allowlist, hard bounds (40 files / 800 KB per file / 1.4 MB total / depth 6 / 15 s per request), raw.githubusercontent.com content fetch with final-host validation, typed errors surfaced per code (invalid URL, unsupported host, not found, ref not found, no docs, rate limited 429, fetch failed 502, deadline exceeded), optional `SKILLFORGE_GITHUB_TOKEN` sent to api.github.com only (rate-limit raise for public repositories — **public repositories only**, private repos deliberately unsupported). No cloning, no code execution, submodules never followed; truncation and skipping are reported via notes that propagate to the stream, the persisted record, and the UI. Bounds are enforced on actual returned UTF-8 bytes, including the exact combined representation; overall ingestion deadline is 60 s and covers response-body reads.
   - **UI fix:** source tab bodies toggle generically. New **GitHub repo** tab with honest limits text.
   - **Provenance click-through** (`GET /api/skills/:id/provenance/excerpt`): provenance records open a dialog with the exact, line-numbered source excerpt; out-of-range requests are refused honestly (422).
@@ -25,9 +25,9 @@
   - **Provider verification harness** (`npm run verify:provider`, `src/core/verify.ts`): one bounded generation → plan schema check → canonical build → deterministic validation with actionable, credential-free diagnostics; offline (mock) by default; tested with injected fetch; live glm/openai run not executed in this environment (no key available).
   - **Release hardening/remediation:** canonical metadata consistency, source-note propagation/persistence, public-only GitHub policy, exact final-byte bounds, response-body deadline coverage, and patched `qs@6.16.0` override with clean audit.
 
-## Verification evidence (current release candidate)
+## Verification evidence (current production-hardening state)
 
-- `npm test` → **187/187 passing** across 19 test files.
+- `npm test` → **227/227 passing** across 24 test files.
 - `npm run typecheck` clean; `npm run build` emits working `dist/`.
 - `npm run demo` → 4 ZIPs verified non-empty with SKILL.md present.
 - `npm audit` → **0 vulnerabilities**.
@@ -42,7 +42,7 @@
 | --- | --- |
 | `npm run dev` | Dev server (tsx watch) at `127.0.0.1:8787` |
 | `npm start` | Dev server without watch |
-| `npm test` | Vitest suite (187 tests) |
+| `npm test` | Vitest suite (227 tests) |
 | `npm run verify:provider` | One bounded provider verification (offline mock by default) |
 | `npm run typecheck` / `npm run lint` | tsc --noEmit |
 | `npm run build` | tsc emit to `dist/` (server runs from dist with `node dist/src/server/index.js`) |
@@ -61,7 +61,16 @@
 - `SKILLFORGE_DOCS_ROOT` — filesystem root for the Local-files source (default: cwd). See `.env.example`.
 - `SKILLFORGE_GITHUB_TOKEN` — optional; raises the GitHub API rate limit for public GitHub sources (api.github.com only). See `.env.example`.
 - `SKILLFORGE_PROVIDER` / `SKILLFORGE_API_KEY` / `SKILLFORGE_BASE_URL` / `SKILLFORGE_MODEL` — remote providers (optional).
-- `PORT` / `HOST` — server binding.
+- `PORT` / `HOST` — server binding (default loopback; non-loopback binds print a no-authentication warning).
+- `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1` — deliberately silences the non-loopback binding warning after acknowledging that the server has no built-in authentication. See `.env.example`.
+
+## Deployment model
+
+SkillForge is a **local / trusted self-hosted** tool: default loopback binding, no built-in
+authentication or tenant isolation. It is not designed or hardened as an untrusted
+Internet-facing multi-user SaaS; exposing it beyond loopback requires deliberately setting
+`HOST` to a non-loopback address (a startup warning fires unless
+`SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`) and providing your own external authentication/isolation.
 
 ## Resuming
 

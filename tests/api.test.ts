@@ -1,10 +1,20 @@
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, it, beforeAll, afterAll, expect } from "vitest";
 import request from "supertest";
 import JSZip from "jszip";
 import { createApp } from "../src/server/app.js";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import { getSample } from "../src/core/samples.js";
 
-const app = createApp({ provider: "mock", hasApiKey: false });
+let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
 
 /** superagent needs an explicit binary parser to expose ZIP bytes as Buffer. */
 const binaryParser = (res: unknown, cb: (err: Error | null, body?: unknown) => void) => {

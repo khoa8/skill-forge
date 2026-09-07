@@ -11,6 +11,10 @@ export interface GenerateInput {
   analysis: SourceAnalysis;
   /** Optional user hint for naming the skill. */
   requestedName?: string;
+  /** Optional caller cancellation (e.g. HTTP client disconnect). Remote
+   * providers abort their in-flight request when it fires; offline providers
+   * may ignore it. */
+  signal?: AbortSignal;
 }
 
 export interface GenerationProvider {

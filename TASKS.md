@@ -94,3 +94,34 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
 - Grounding check is token-overlap heuristic; can miss paraphrased hallucinations and warn on benign rephrases.
 - `glm`/`openai` providers are implemented + unit-tested with injected fetch but not exercised against live APIs (no key available in this environment).
 - URL source cannot render JavaScript-heavy pages; it reports `url_no_content` instead of guessing.
+
+## Production hardening run (feature/production-hardening, post-merge)
+
+- [x] Streaming byte caps: URL and GitHub raw bodies enforce their caps WHILE streaming
+  (`src/core/sources/body.ts`) — oversized/content-length-lying responses are torn down
+  mid-read instead of buffered to completion; api.github.com JSON bounded at 10 MB
+- [x] Terminal Express error handler: malformed JSON → 400 JSON, oversized → 413 JSON,
+  unknown → generic 500; no stack traces or error internals to clients
+- [x] NDJSON disconnect guard: generation stops when the client leaves; EPIPE/ECONNRESET
+  after disconnect cannot raise unhandled stream errors
+- [x] Non-loopback binding warning: `HOST` beyond loopback prints an explicit
+  no-authentication warning (silenced only by `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`);
+  deployment model documented (local / trusted self-hosted; not a multi-user SaaS)
+- [x] CI strengthened: offline provider verification pinned to the mock provider, strict
+  `npm audit` gate (fails on low-severity advisories or above)
+
+## Post-audit remediation run (feature/production-hardening-remediation)
+
+- [x] Provider response bodies byte-bounded: success bodies streamed under a 10 MB cap,
+  non-2xx diagnostics under 256 KB (shared `readBodyCapped` reader; missing/lying
+  `content-length` cannot bypass); typed `provider_response_too_large`; key never leaked
+- [x] Express 4 async routes wrapped so rejections reach the terminal error handler
+  (generic 500 JSON, no internals); real route-level regression test with injected
+  failing dependency
+- [x] End-to-end disconnect cancellation: disconnect → AbortController → pipeline →
+  provider fetch abort; in-flight remote request cancelled immediately, no result
+  persisted for aborted runs, offline/CLI path unchanged
+- [x] Docs truthfulness: current test counts (219/23), README CI wording matches actual
+  triggers, disconnect semantics documented as implemented
+- [x] CI actions bumped to checkout@v5 / setup-node@v5 (node24 action runtime; clears
+  Node 20 action-runtime deprecation warnings, no semantics change)

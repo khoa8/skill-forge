@@ -5,8 +5,7 @@ on:
   push:
     branches:
       - main
-      - feature/production-readiness
-      - feature/production-readiness-remediation
+      - feature/production-hardening
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -17,15 +16,15 @@ permissions:
 
 jobs:
   quality-gate:
-    name: typecheck, test, build, demo
+    name: typecheck, test, build, demo, provider-verify, audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -44,3 +43,15 @@ jobs:
 
       - name: Demo pipeline
         run: npm run demo
+
+      - name: Provider verification (offline)
+        run: npm run verify:provider
+        env:
+          # Pinned to the offline mock provider so CI can never reach a paid
+          # remote provider even if repository/runner variables leak in.
+          SKILLFORGE_PROVIDER: mock
+
+      - name: Dependency audit
+        # Strict gate: fails on any low-severity advisory or higher
+        # (current state: 0 vulnerabilities).
+        run: npm audit --audit-level=low

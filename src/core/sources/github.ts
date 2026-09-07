@@ -22,6 +22,7 @@
  */
 import type { SourceInput } from "../types.js";
 import { TEXT_EXTENSIONS, type CollectedFile } from "./files.js";
+import { readBodyCapped, BodyTooLargeError } from "./body.js";
 
 export const MAX_GITHUB_FILES = 40;
 export const MAX_GITHUB_FILE_BYTES = 800_000; // per file
@@ -29,6 +30,10 @@ export const MAX_GITHUB_TOTAL_BYTES = 1_400_000; // combined (under ingest's 1.5
 export const MAX_GITHUB_DEPTH = 6; // path segment depth
 export const GITHUB_TIMEOUT_MS = 15_000;
 export const GITHUB_OVERALL_TIMEOUT_MS = 60_000;
+/** Cap for api.github.com JSON payloads (repo metadata, tree listings). The
+ * trees API truncates huge listings server-side; 10 MB is far above anything
+ * a legitimate response carries, so hitting it means the host is misbehaving. */
+const MAX_GITHUB_JSON_BYTES = 10_000_000;
 
 const API_HOST = "api.github.com";
 const RAW_HOSTS = new Set(["raw.githubusercontent.com", "objects.githubusercontent.com"]);
@@ -60,17 +65,35 @@ function assertOverallAlive(overallSignal: AbortSignal): void {
  * quickly does not exempt the body: if the overall budget fires while the
  * body is stalled, the typed github_deadline_exceeded error is thrown and
  * the underlying reader is cancelled (no dangling reads).
+ *
+ * The body is streamed under a hard byte cap (per-file cap for raw content,
+ * a generous bound for api.github.com JSON) — an oversized or lying body is
+ * refused mid-read instead of being buffered to completion first.
  * Network/body failures keep their existing typed error.
  */
 async function readBodyWithDeadline(
   res: Response,
   overallSignal: AbortSignal,
   kind: "text" | "json",
+  maxBytes: number,
 ): Promise<string | unknown> {
   assertOverallAlive(overallSignal);
   try {
-    return await (kind === "text" ? res.text() : res.json());
+    const bytes = await readBodyCapped(res, maxBytes, overallSignal);
+    return kind === "text" ? new TextDecoder("utf-8").decode(bytes) : JSON.parse(new TextDecoder("utf-8").decode(bytes));
   } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      // Cancel any pending read before surfacing the cap error.
+      await res.body?.cancel().catch(() => {});
+      if (kind === "json") {
+        throw new GithubSourceError(
+          `The response body exceeded the ${maxBytes} byte limit before finishing. The source host is misbehaving or the content is larger than supported.`,
+          "github_fetch_failed",
+        );
+      }
+      // Raw-content callers map this onto their honest per-file skip path.
+      throw err;
+    }
     if (overallSignal.aborted) {
       // Cancel any stalled reader before surfacing the typed error.
       await res.body?.cancel().catch(() => {});
@@ -307,10 +330,15 @@ async function fetchRawFile(
   if (res.url !== "" && !RAW_HOSTS.has(new URL(res.url).hostname.toLowerCase())) return { kind: "unreachable" };
   const declared = res.headers.get("content-length");
   if (declared && Number.parseInt(declared, 10) > maxFileBytes) return { kind: "too_large" };
-  const read = await readBodyWithDeadline(res, overallSignal, "text");
-  const body = read as string;
-  if (Buffer.byteLength(body, "utf8") > maxFileBytes) return { kind: "too_large" };
-  return { kind: "ok", content: body };
+  // The body is streamed under the per-file cap: an oversized or underreported
+  // body is torn down mid-read instead of being buffered to completion first.
+  try {
+    const read = await readBodyWithDeadline(res, overallSignal, "text", maxFileBytes);
+    return { kind: "ok", content: read as string };
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) return { kind: "too_large" };
+    throw err;
+  }
 }
 
 /**
@@ -353,7 +381,7 @@ export async function fetchGithubSource(
   let defaultBranchUsed = false;
   if (ref === undefined) {
     const res = await apiFetch(fetchImpl, `${apiBase}`, { timeoutMs, token, signal: deadline });
-    const meta = (await readBodyWithDeadline(res, deadline, "json")) as { default_branch?: string };
+    const meta = (await readBodyWithDeadline(res, deadline, "json", MAX_GITHUB_JSON_BYTES)) as { default_branch?: string };
     if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
       throw new GithubSourceError(
         `GitHub did not report a default branch for ${ref0.owner}/${ref0.repo}.`,
@@ -376,7 +404,7 @@ export async function fetchGithubSource(
     token,
     signal: deadline,
   });
-  const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json")) as {
+  const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_GITHUB_JSON_BYTES)) as {
     tree?: GithubTreeEntry[];
     truncated?: boolean;
   };

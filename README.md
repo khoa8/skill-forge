@@ -19,10 +19,14 @@ Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 187 tests incl. end-to-end Source → Export
+npm test             # 219 tests incl. end-to-end Source → Export
 ```
 
-Every push runs the same four quality gates (typecheck, test, build, demo) in GitHub Actions (`.github/workflows/ci.yml`).
+Every pull request and every push to `main` runs the same six quality gates (typecheck, test, build, demo, offline provider verification, dependency audit) in GitHub Actions (`.github/workflows/ci.yml`); provider verification is pinned to the offline mock provider and dependency audit fails on any advisory at low severity or above.
+
+## Deployment scope (read before binding beyond loopback)
+
+SkillForge is built for **local / trusted self-hosted use**. It has **no built-in authentication, authorization, or tenant isolation**: anyone who can reach the server can generate skills, read stored skills (including their full sources), edit generated files, and export packages. The default `HOST=127.0.0.1` binding restricts it to your machine. Binding to a non-loopback address (e.g. `HOST=0.0.0.0`) exposes the unauthenticated service to your network — SkillForge prints a startup warning for that case, which you can only silence by explicitly setting `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`. Putting the server on the public Internet as a multi-user service is not a supported configuration without adding an external authentication/isolation layer in front of it.
 
 ## Sources
 

@@ -1,4 +1,5 @@
-import { describe, expect, it, afterEach, vi } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, expect, vi } from "vitest";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,7 +43,16 @@ function stubGithubFetch(o: { files: { path: string; type?: string; size?: numbe
 }
 
 describe("source notes reach the client and the store", () => {
-  const app = createApp({ provider: "mock", hasApiKey: false });
+  let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false, }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
 
   afterEach(() => {
     vi.unstubAllGlobals();

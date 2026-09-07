@@ -9,7 +9,8 @@
  */
 import { PlanSchema, type SkillPlan } from "../plan.js";
 import { ProviderError, type GenerationProvider, type GenerateInput } from "./types.js";
-import { slugify } from "../util.js";
+import { slugify, redactSecret } from "../util.js";
+import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "../sources/body.js";
 
 export interface OpenAICompatibleOptions {
   id?: string;
@@ -20,6 +21,21 @@ export interface OpenAICompatibleOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }
+
+/**
+ * Hard caps on provider response bodies, enforced WHILE the body streams
+ * (shared reader, same one the source adapters use). A timeout bounds elapsed
+ * time, not memory, so a misbehaving endpoint streaming an unbounded body
+ * must be refused mid-read instead of buffered to completion.
+ *
+ * - Success bodies: legitimate chat-completions responses carrying a SkillForge
+ *   plan are a few KB; 10 MB is far above anything real while still bounding
+ *   memory.
+ * - Non-2xx diagnostic bodies: only a 500-char slice is ever attached to the
+ *   error, so a much smaller cap suffices; hints are preserved either way.
+ */
+const MAX_PROVIDER_RESPONSE_BYTES = 10_000_000;
+const MAX_PROVIDER_ERROR_BYTES = 256_000;
 
 const SYSTEM_PROMPT = `You are a skill planner for SkillForge. You convert documentation into a plan for an AI agent skill.
 Respond with ONLY a JSON object matching this TypeScript type:
@@ -72,6 +88,12 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       .filter(Boolean)
       .join("\n");
 
+    // The provider timeout and the caller's cancellation (e.g. HTTP client
+    // disconnect) both abort the in-flight request: whichever fires first.
+    const signal = input.signal
+      ? AbortSignal.any([AbortSignal.timeout(this.timeoutMs), input.signal])
+      : AbortSignal.timeout(this.timeoutMs);
+
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
@@ -88,37 +110,70 @@ export class OpenAICompatibleProvider implements GenerationProvider {
           ],
           temperature: 0.2,
         }),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal,
       });
     } catch (err) {
+      // Transport errors can embed request material (custom network stacks may
+      // include headers); sanitize before the text leaves the provider.
+      const raw = err instanceof Error ? err.message : String(err);
       throw new ProviderError(
-        `Provider request failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Provider request failed: ${redactSecret(raw, this.apiKey)}`,
         "provider_request_failed",
       );
     }
 
     if (!response.ok) {
-      const body = await safeText(response);
+      // Non-2xx bodies are diagnostics: stream them under a small cap so a
+      // misbehaving endpoint cannot push unbounded data into memory, and keep
+      // the bounded detail + remediation hints. A hostile or misconfigured
+      // endpoint may echo the API key — redact every occurrence before the
+      // body text is attached to the error.
+      let body = "";
+      try {
+        body = decodeUtf8(await readBodyCapped(response, MAX_PROVIDER_ERROR_BYTES, signal));
+      } catch (err) {
+        if (err instanceof BodyTooLargeError) {
+          body = "(error body exceeded the diagnostic size cap and was discarded)";
+        } else {
+          body = "";
+        }
+      }
       throw new ProviderError(
         `Provider returned HTTP ${response.status} ${response.statusText}. Check the API key, base URL, and model name.`,
         "provider_http_error",
-        body.slice(0, 500),
+        redactSecret(body, this.apiKey).slice(0, 500),
       );
     }
 
     let payload: unknown;
     try {
-      payload = await response.json();
-    } catch {
+      payload = JSON.parse(
+        decodeUtf8(await readBodyCapped(response, MAX_PROVIDER_RESPONSE_BYTES, signal)),
+      );
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        throw new ProviderError(
+          `Provider response body exceeded the ${MAX_PROVIDER_RESPONSE_BYTES} byte limit and was discarded mid-read. The endpoint is misbehaving or the model returned an unbounded response.`,
+          "provider_response_too_large",
+        );
+      }
+      if (signal.aborted) {
+        throw new ProviderError(
+          "Provider request was aborted before the response body finished reading.",
+          "provider_request_failed",
+        );
+      }
       throw new ProviderError("Provider returned a non-JSON response body.", "provider_bad_json");
     }
 
     const content = extractMessageContent(payload);
     if (content === null) {
+      // Detail is remote-controlled data: serialize and redact before it can
+      // carry the configured key anywhere.
       throw new ProviderError(
         "Provider response did not contain a chat message with text content.",
         "provider_unexpected_shape",
-        payload,
+        redactSecret(JSON.stringify(payload), this.apiKey),
       );
     }
 
@@ -127,7 +182,7 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       throw new ProviderError(
         "Provider message did not contain a JSON object. Re-run generation or try a different model.",
         "provider_no_json",
-        content.slice(0, 500),
+        redactSecret(content, this.apiKey).slice(0, 500),
       );
     }
 
@@ -140,7 +195,7 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       throw new ProviderError(
         `Model output did not match the skill plan schema: ${issues}`,
         "provider_schema_mismatch",
-        rawJson,
+        redactSecret(JSON.stringify(rawJson), this.apiKey),
       );
     }
 
@@ -154,14 +209,6 @@ export class OpenAICompatibleProvider implements GenerationProvider {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max) + "\n…(truncated)";
-}
-
-async function safeText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
 }
 
 function extractMessageContent(payload: unknown): string | null {
