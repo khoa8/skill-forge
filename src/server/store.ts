@@ -207,6 +207,10 @@ export async function updateFileContent(
     type: existing.source.type,
     name: existing.source.name,
     content: existing.source.text,
+    // Preserve the persisted adapter ingestion notes so the regenerated
+    // manifest keeps the original provenance record (truncation/skips must
+    // survive edits — the edit changes files, not the source history).
+    notes: existing.source.notes ?? [],
   });
   const manifestFile = existing.skill.files.find((f) => f.path === "manifest.json");
   if (manifestFile) {

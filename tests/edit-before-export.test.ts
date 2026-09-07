@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import request from "supertest";
 import JSZip from "jszip";
 import { createApp } from "../src/server/app.js";
@@ -151,4 +151,84 @@ describe("edit generated files before export", () => {
     const editedEntry = manifest.files.find((f: { path: string }) => f.path === editPath);
     expect(editedEntry!.sha256).toBe(sha256("## Test cards (user-reviewed)\n\nUse 4242-4242-4242-4242 in the sandbox only.\n"));
   });
+});
+
+/** Fix regression: regenerating manifest.json during an edit must retain the
+ * original adapter ingestion notes (truncation/skips survive edits). */
+describe("source notes survive edits in the regenerated manifest", () => {
+  const app = createApp({ provider: "mock", hasApiKey: false });
+  const id = "notes-survive-edit";
+  const small = "# Tiny Docs\n\nSmall but long enough for the minimum source length check to pass.";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubGithubFetch() {
+    const files = Array.from({ length: 45 }, (_, i) => ({
+      path: `docs/page-${String(i).padStart(2, "0")}.md`,
+      type: "blob",
+      size: 40,
+    }));
+    const raw: Record<string, string> = {};
+    for (let i = 0; i < 45; i++) {
+      raw[`docs/page-${String(i).padStart(2, "0")}.md`] = `# Page ${i}\n\nContent for page ${i} of the note-survival fixture.`;
+    }
+    vi.stubGlobal(
+      "fetch",
+      (async (input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+          return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (url.includes("/git/trees/")) {
+          return new Response(JSON.stringify({ sha: "x", truncated: false, tree: files }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        const path = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+        const res = new Response(raw[path] ?? small, { status: 200, headers: { "content-type": "text/plain" } });
+        Object.defineProperty(res, "url", { value: url });
+        return res;
+      }) as unknown as typeof fetch,
+    );
+  }
+
+  it("keeps the file-limit ingestion note in manifest.json after an edit + export", async () => {
+    stubGithubFetch();
+    const gen = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "github", repo: "https://github.com/acme/manydocs", requestedName: id })
+      .expect(200);
+    const result = gen.text.trim().split("\n").map((l) => JSON.parse(l)).find((e) => e.type === "result");
+    const originalNotes: string[] = result.sourceNotes;
+    expect(originalNotes.some((n: string) => n.includes("file limit"))).toBe(true);
+
+    // Edit an allowed generated file.
+    const get1 = await request(app).get(`/api/skills/${id}`).expect(200);
+    const refFile = get1.body.skill.files.find((f: { path: string }) => f.path.startsWith("references/"));
+    const edited = refFile.content + "\nPost-edit review line.\n";
+    await request(app)
+      .post(`/api/skills/${id}/update-file`)
+      .send({ path: refFile.path, content: edited })
+      .expect(200);
+
+    // The persisted API response still carries the original note.
+    const get2 = await request(app).get(`/api/skills/${id}`).expect(200);
+    expect(get2.body.source.notes).toEqual(originalNotes);
+
+    // The regenerated manifest inside the exported ZIP retains it too.
+    const exportRes = await request(app)
+      .post(`/api/skills/${id}/export`)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(c));
+        r.on("end", () => cb(null, Buffer.concat(chunks)));
+      })
+      .send({ target: "generic" })
+      .expect(200);
+    const zip = await JSZip.loadAsync(exportRes.body);
+    const manifest = JSON.parse(await zip.files[`${id}/manifest.json`]!.async("string"));
+    expect(manifest.source.notes).toEqual(originalNotes);
+    expect(manifest.source.notes.some((n: string) => n.includes("file limit"))).toBe(true);
+  }, 20000);
 });
