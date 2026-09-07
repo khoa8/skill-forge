@@ -1,6 +1,6 @@
 # SkillForge — Architecture
 
-A modular monolith in TypeScript (Node 22, ESM). No microservices, no job queue; long work is bounded and synchronous-fast for the demo path.
+A modular monolith in TypeScript (Node.js ≥ 20 per `package.json` `engines`, ESM). No microservices, no job queue; long work is bounded and synchronous-fast for the demo path.
 
 ```
 Source ──▶ ingest ──▶ analyze ──▶ provider.generate ──▶ build ──▶ validate ──▶ (UI preview)
@@ -18,17 +18,17 @@ Source ──▶ ingest ──▶ analyze ──▶ provider.generate ──▶ 
 | Analysis | `src/core/analyze.ts` | Deterministic line-based markdown/text analysis: sections (exact line ranges), fenced code, shell commands (prompt-stripped), ordered procedures (≥3 steps), warnings (with wrapped continuations), constraint headings. |
 | Plan schema | `src/core/plan.ts` | `PlanSchema` — the structured contract every provider must satisfy. |
 | Builder | `src/core/build.ts` | Shared canonical-package synthesis: SKILL.md, references (verbatim excerpts), workflows, examples (comment-prefix only for formats that allow comments), evals, manifest with hashes; gap rendering; provenance records. |
-| Providers | `src/core/providers/` | `GenerationProvider` interface; `MockProvider` (deterministic, offline); `OpenAICompatibleProvider` (GLM/OpenAI-compatible, schema-validated output, injectable fetch); `resolveProvider`. |
+| Providers | `src/core/providers/` | `GenerationProvider` interface; `MockProvider` (deterministic, offline); `OpenAICompatibleProvider` (GLM/OpenAI-compatible, schema-validated output, injectable fetch); `resolveProvider`. Remote responses are streamed under hard byte caps and the configured API key is redacted from all diagnostics. |
 | Verify harness | `src/core/verify.ts` + `scripts/verify-provider.ts` (`npm run verify:provider`) | One bounded generation through the configured provider → plan schema check → canonical build → deterministic validation; credential-free reporting, nonzero exit on failure; injectable fetch for tests. |
 | Pipeline | `src/core/pipeline.ts` | Orchestrates ingest→analyze→generate→validate as an async generator of discriminated events (stage progress with timings, typed errors, result). |
-| Validator | `src/core/validate.ts` | Pure check registry (17 checks) over the package (+ optional source text for grounding). Deterministic; catches its own internal errors and reports them as failures. Includes canonical-metadata-consistency (front matter / manifest identity must match `skill.meta`). |
+| Validator | `src/core/validate.ts` | Pure check registry of pure deterministic checks over the package (+ optional source text for grounding). Deterministic; catches its own internal errors and reports them as failures. Includes canonical-metadata-consistency (front matter / manifest identity must match `skill.meta`). |
 | Exporters | `src/core/export/exporters.ts` | Vendor adapters only place vendor differences live: `claude-code`, `generic`; `EXPORT_TARGET_INFO` (with format basis); `buildZip` (sanitized entries, JSZip). |
 | Samples | `src/core/samples.ts` + `src/core/samples/*.md` | Bundled demo docs (Meridian Payments API, FastForge CLI). |
-| URL source | `src/core/sources/url.ts` | P1: SSRF-guarded single-page fetch (protocol allowlist, DNS-based private-host refusal re-checked per redirect, size/time caps), HTML→markdown-ish conversion. Fetch/DNS injectable for tests. |
-| File source | `src/core/sources/files.ts` | P1: local file/directory ingestion bounded by an allowlist root (`SKILLFORGE_DOCS_ROOT`), realpath containment (symlink escapes refused), extension/size/count/depth limits, multi-file combining. |
-| GitHub source | `src/core/sources/github.ts` | P1.5: bounded documentation-tree ingestion from github.com repo/tree URLs — URL parsing/normalization, default-branch resolution, one recursive-tree API request, docs-first priority (README → docs/ → root → rest), extension allowlist, 40-file/800 KB/1.4 MB/depth-6/15 s bounds, raw-content fetch with final-host validation, typed errors, optional `SKILLFORGE_GITHUB_TOKEN` (api.github.com only). No cloning; submodules never followed; fetch injectable for tests. |
+| URL source | `src/core/sources/url.ts` | SSRF-guarded single-page fetch (protocol allowlist, DNS-based private-host refusal re-checked per redirect, size/time caps), HTML→markdown-ish conversion. Fetch/DNS injectable for tests. |
+| File source | `src/core/sources/files.ts` | Local file/directory ingestion bounded by an allowlist root (`SKILLFORGE_DOCS_ROOT`), realpath containment (symlink escapes refused), extension/size/count/depth limits, multi-file combining. |
+| GitHub source | `src/core/sources/github.ts` | Bounded documentation-tree ingestion from github.com repo/tree URLs — URL parsing/normalization, default-branch resolution, one recursive-tree API request, docs-first priority (README → docs/ → root → rest), extension allowlist, 40-file/800 KB/1.4 MB/depth-6/15 s bounds, raw-content fetch with final-host validation, typed errors, optional `SKILLFORGE_GITHUB_TOKEN` (api.github.com only). No cloning; submodules never followed; fetch injectable for tests. |
 | HTTP API | `src/server/app.ts` | Express app: NDJSON-streaming `/api/generate` (source types: text/sample/url/file/github), skill store, on-demand `/validate`, validation-gated `/export` (422 on errors), static UI. |
-| Store | `src/server/store.ts` | P1: file-backed persistence under `.data/skills/<id>/skill.json` — atomic writes, zod-validated reads, newest-50 eviction; survives restarts. |
+| Store | `src/server/store.ts` | File-backed persistence under `<data-root>/skills/<id>/skill.json` (default `.data/skills`, relocatable via `SKILLFORGE_DATA_ROOT`; injectable root for tests) — atomic writes, zod-validated reads, newest-50 eviction; survives restarts. |
 | UI | `web/` | Vanilla JS/HTML/CSS. Stepper mirrors real pipeline events; file inspector with purpose + provenance; validation panel with re-run; real download via blob. |
 
 ## Key design decisions

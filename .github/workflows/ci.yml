@@ -55,3 +55,8 @@ jobs:
         # Strict gate: fails on any low-severity advisory or higher
         # (current state: 0 vulnerabilities).
         run: npm audit --audit-level=low
+
+      - name: Documentation links
+        # Dependency-free check: relative Markdown links/images resolve and
+        # no doc references removed status documents.
+        run: npm run docs:check

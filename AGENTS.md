@@ -323,6 +323,11 @@ The first screen must explain the workflow in seconds:
 
 Keep the main path visually obvious.
 
+The stepper reflects real pipeline state (idle / active / done / error). "Validation
+passed" is shown **only** when validation actually executed and passed; skipped
+validation renders an explicit not-success state. The Download button is real: the
+server re-validates and streams an actual ZIP, and blocked exports explain why.
+
 Include:
 - loading states;
 - progress;
@@ -353,24 +358,42 @@ The product generates skills. It does not need to become the system that runs ev
 
 ## 20. Documentation
 
-Maintain:
-- `README.md`
-- `PRODUCT.md`
-- `ARCHITECTURE.md`
-- `TASKS.md`
-- `.env.example`
-- docs for canonical format and exporters.
+The repository keeps a small set of durable documents with explicit ownership:
 
-README should include:
-- one-sentence value proposition;
-- real screenshot/GIF when available;
-- quick start;
-- supported inputs/outputs;
-- validation behavior;
-- example generated package;
-- limitations.
+| Document | Owns |
+| --- | --- |
+| `README.md` | User-facing entrypoint: what SkillForge is, quick start, supported source/export categories, validation & grounding behavior, deployment scope/security warning, stable limitations, links to deeper docs. |
+| `ARCHITECTURE.md` | Durable technical architecture: modules/boundaries, data/control flows, key design decisions, security-relevant constraints. |
+| `AGENTS.md` | Durable contributor/agent contract: invariants, scope controls, security rules, testing expectations, documentation governance (this section). |
+| `docs/CANONICAL_FORMAT.md` | The canonical package/manifest schema contract. |
+| `docs/EXPORTERS.md` | Exporter contracts: targets, format basis, behavior, how to add one. |
+| `.env.example` | Configuration contract: every runtime env var, its purpose, defaults, exposure implications. |
 
-Do not claim integrations that are only planned.
+Transient evidence (exact test counts, test-file counts, CI run IDs, commit SHAs, branch
+lifecycle, PR state, sprint/session status, remediation chronology, completed-task
+archives) does **not** belong in these documents. Git history, PRs, and CI runs are the
+evidence layer. Exact verification numbers go in commit messages, PR descriptions, or the
+task handoff — never in durable docs.
+
+### When to update documentation
+
+Update a durable doc only when the change modifies a fact that document owns:
+
+| Change type | Required durable docs review |
+| --- | --- |
+| User-facing workflow / supported input or output | README |
+| Configuration / env change | `.env.example` (and README only if user-facing) |
+| Architecture / module boundary change | ARCHITECTURE |
+| Canonical package / schema semantics | docs/CANONICAL_FORMAT |
+| Exporter format/target behavior | docs/EXPORTERS (+ README target list if applicable) |
+| Contributor / security invariant | AGENTS |
+| Tests added or fixed only | **no docs update by default** |
+| Internal refactor with no contract change | **no docs update by default** |
+| Bug fix restoring documented behavior | **no docs update unless the docs were wrong** |
+| CI run / test-count change | **no durable docs update** |
+
+Never advertise unimplemented features as implemented; do not create new status/report
+documents (project state lives in Git/PRs/issues, not in the tree).
 
 ---
 

@@ -3,7 +3,7 @@
  *
  * Reads documentation-like text files from a GitHub repository through the
  * GitHub REST API and raw content endpoints. Design constraints (AGENTS.md
- * §12 web safety, GOAL.md):
+ * §12 web safety):
  * - github.com repository/tree URLs only; requests go to api.github.com and
  *   raw.githubusercontent.com (or its CDN) and nowhere else;
  * - no cloning, no git binary, no execution or installation of repository
