@@ -38,7 +38,7 @@ Every push runs the same four quality gates (typecheck, test, build, demo) in Gi
 
 **Local file safety:** paths must resolve inside the allowed root (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6; no code execution.
 
-**GitHub source limits:** `https://github.com/<owner>/<repo>` (or a `/tree/<ref>/<path>` URL) only; documentation-like files (`.md`, `.txt`, `.rst`, … — the same allowlist as local files) are read through the GitHub API and raw content endpoints; max 40 files / 800 KB per file / 1.4 MB total / depth 6; submodules are never followed; nothing is cloned, executed, or installed. Repos are read docs-first (root README, then `docs/`-like directories). Unauthenticated GitHub API access is rate-limited to 60 requests/hour per IP — set `SKILLFORGE_GITHUB_TOKEN` in `.env` to raise it (the token is sent to api.github.com only). Private repositories require such a token; without one they are reported as not found. Truncation is honest: skipped/omitted files are listed as notes in the generation log.
+**GitHub source limits:** `https://github.com/<owner>/<repo>` (or a `/tree/<ref>/<path>` URL) only; **public repositories only** — private repositories are deliberately not fetched. Documentation-like files (`.md`, `.txt`, `.rst`, … — the same allowlist as local files) are read through the GitHub API and raw content endpoints; max 40 files / 800 KB per file / 1.4 MB total / depth 6; overall ingestion deadline of 60 s; submodules are never followed; nothing is cloned, executed, or installed. Repos are read docs-first (root README, then `docs/`-like directories). Unauthenticated GitHub API access is rate-limited to 60 requests/hour per IP — `SKILLFORGE_GITHUB_TOKEN` in `.env` only raises that rate limit for public repositories (it is sent to api.github.com only and never grants private-repo access). Truncation is honest: skipped/omitted files are listed as notes in the generation log and the results panel.
 
 ## What it does
 
@@ -95,7 +95,7 @@ The URL source has been exercised against real pages during development: a raw G
 
 - URL ingestion is single-page: no crawling, no JS rendering (documented honest failure instead).
 - The grounding check is heuristic (token overlap), not proof of correctness; review generated skills.
-- GitHub source reads public repositories' documentation only (private repos need `SKILLFORGE_GITHUB_TOKEN`); refs with slashes in `/tree/` URLs take the first segment as the ref; API rate limits apply as described above.
+- GitHub source reads **public repositories' documentation only** (private repositories are deliberately unsupported); refs with slashes in `/tree/` URLs take the first segment as the ref; API rate limits apply as described above.
 - The `glm`/`openai` providers require you to supply a key and have not been run against live endpoints here.
 - Evals are generated as manual grounding checks; SkillForge does not execute them.
 - PDF ingestion is not implemented.

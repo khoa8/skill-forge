@@ -9,11 +9,12 @@
  * - no cloning, no git binary, no execution or installation of repository
  *   code — files are read as inert text and never written to disk;
  * - submodules are never followed; linked repositories are never traversed;
- * - hard bounds: file count, per-file bytes, total bytes, path depth, and a
- *   per-request timeout;
- * - unauthenticated GitHub API calls are rate-limited (60 req/h per IP); an
- *   optional SKILLFORGE_GITHUB_TOKEN raises that for api.github.com requests
- *   only — the token is never sent to raw content hosts;
+ * - hard bounds: file count, per-file bytes, total bytes, path depth, a
+ *   per-request timeout, and an overall ingestion deadline;
+ * - public repositories only: a token (SKILLFORGE_GITHUB_TOKEN) exists solely
+ *   to raise the api.github.com rate limit for public repositories — it is
+ *   never presented as enabling private-repo access, and is never sent to
+ *   raw content hosts;
  * - limits truncate honestly: skipped files are reported in notes, never
  *   silently dropped.
  *
@@ -204,7 +205,7 @@ function throwForApiStatus(res: Response, url: string): void {
     throw new GithubSourceError(
       url.includes("/git/trees/")
         ? "The branch, tag, or commit was not found in this repository."
-        : "Repository not found. Check the URL — private repositories need a SKILLFORGE_GITHUB_TOKEN with access.",
+        : "Repository not found. SkillForge reads public repositories only — private repositories are not supported (they appear as not found without credentials, and are deliberately not fetched).",
       url.includes("/git/trees/") ? "github_ref_not_found" : "github_not_found",
     );
   }

@@ -7,16 +7,16 @@ feature/production-readiness-remediation (based on feature/production-readiness 
 2026-09-07T06:00:00Z (bootstrap + audit triage)
 
 ## Current phase
-Phase 2 complete; starting Phase 3 — accurate public-repository-only GitHub policy
+Phase 3 complete; starting Phase 4 — GitHub total-size bound on actual fetched bytes
 
 ## Current status
 IN_PROGRESS
 
 ## Last known good commit
-fix(source): propagate ingestion notes end to end
+fix(github): make repository support claims accurate
 
 ## Last pushed commit
-32dc5d9 (Phase 1)
+8948b5d (Phase 2)
 
 ## Baseline verification (this remediation run)
 - npm ci: OK (installed cleanly)
@@ -45,6 +45,12 @@ fix(source): propagate ingestion notes end to end
   has a persisted "Source notes" box (safe textContent rendering, fetched from the skill API).
   tests/source-notes.test.ts (3 tests): GitHub file-count truncation (stream + persisted),
   GitHub tree truncation, local skipped subdirectory note; notes never fail validation.
+- Phase 3: GitHub ingestion is now explicitly **public repositories only**. The 404 error no
+  longer suggests a token grants private access (it states the public-only policy); UI hint,
+  README limits + limitations, and .env.example now describe SKILLFORGE_GITHUB_TOKEN purely
+  as a rate-limit raise for public repositories. Token confinement test already existed;
+  new test asserts the not-found error states "public repositories only" and never suggests
+  token-granted private access. Raw fetches remain unauthenticated by design.
 - Phase 6 (early): npm audit triage —
   - Advisories: GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g (moderate) in qs ≤ 6.15.3, transitive via body-parser 1.20.6 (pins qs 6.15.3 exactly) under express 4.22.2; also reachable via supertest (dev).
   - `npm audit fix` cannot fix (no compatible patched release within pinned range). Upgrading to express 5 would NOT fix it either (express 5.2.1 pins qs 6.13.0, inside the vulnerable range) and would add migration risk.
@@ -53,11 +59,9 @@ fix(source): propagate ingestion notes end to end
 - Dependency commit: `chore(deps): resolve production readiness audit findings`
 
 ## In progress
-- (committing Phase 2)
+- Phase 4: GitHub total-size bound on actual fetched bytes
 
 ## Remaining
-- Phase 3: accurate public-repository-only GitHub policy (docs + errors + UI)
-- Phase 4: GitHub total-size bound on actual fetched bytes
 - Phase 5: overall GitHub ingestion latency deadline
 - Phase 7: documentation reconciliation (README 148→actual count, limits, notes behavior)
 - Phase 8: full release audit + clean-state verification + browser verification + final verdict
@@ -70,7 +74,7 @@ fix(source): propagate ingestion notes end to end
 - package.json (overrides), package-lock.json (qs 6.16.0), docs/PRODUCTION_READINESS_STATUS.md
 
 ## Tests run in current phase
-- npm test: 174 passed (171 after Phase 1 + 3 source-notes tests), 0 failed
+- npm test: 175 passed (174 after Phase 2 + 1 public-only policy test), 0 failed
 - npm run typecheck / build / demo: pass
 
 ## Known failures / blockers

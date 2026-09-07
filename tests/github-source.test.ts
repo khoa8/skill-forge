@@ -350,6 +350,22 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(log.rawHeaders.authorization).toBeUndefined();
   });
 
+  it("never claims private-repository access in errors (public-only policy)", async () => {
+    // 404 on the repository metadata call is how private repos appear; the
+    // error must state the public-only policy, not suggest a token enables them.
+    try {
+      await fetchGithubSource("https://github.com/acme/private-widgets", {
+        fetchImpl: githubFetch({ repo: 404 }),
+      });
+      expect.fail("expected github_not_found");
+    } catch (err) {
+      const e = err as GithubSourceError;
+      expect(e.code).toBe("github_not_found");
+      expect(e.message).toContain("public repositories only");
+      expect(e.message.toLowerCase()).not.toMatch(/token with access|need a.*token/);
+    }
+  });
+
   it("treats repository file content as inert text (never executed)", async () => {
     const hostile = `${README}\n<script>alert("xss")</script>\n<!-- no execution -->`;
     const result = await fetchGithubSource("https://github.com/acme/widgets", {
