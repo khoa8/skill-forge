@@ -24,13 +24,16 @@ function maskKey(configured: boolean): string {
 
 async function main(): Promise<number> {
   // Same configuration contract as the server: documented .env file (process
-  // environment keeps precedence), validated before any generation runs.
-  loadDotEnv();
+  // environment keeps precedence), validated before any generation runs. A
+  // malformed/unreadable .env is a clean configuration failure, not a crash.
   let provider: ReturnType<typeof resolveRuntimeConfig>["provider"];
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
   let model: string | undefined;
   try {
+    loadDotEnv((err) => {
+      throw err;
+    });
     const runtime = resolveRuntimeConfig();
     provider = runtime.provider;
     apiKey = runtime.apiKey;
@@ -38,7 +41,7 @@ async function main(): Promise<number> {
     model = runtime.model;
   } catch (err) {
     if (err instanceof ConfigError) {
-      console.error(err.message);
+      console.error(`configuration error: ${err.message}`);
       return 2;
     }
     throw err;

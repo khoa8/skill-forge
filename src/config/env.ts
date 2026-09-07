@@ -85,7 +85,17 @@ export function loadEnvFile(
   path: string,
   target: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
-  const text = readFileSync(path, "utf8");
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    // Unreadable environment file is a clean configuration failure too —
+    // never a raw filesystem stack trace at startup.
+    throw new ConfigError(
+      `The environment file at "${path}" could not be read: ${err instanceof Error ? err.message : String(err)}.`,
+      "config_env_unreadable",
+    );
+  }
   if (Buffer.byteLength(text, "utf8") > MAX_ENV_FILE_BYTES) {
     throw new ConfigError(
       `Environment file at "${path}" exceeds the ${MAX_ENV_FILE_BYTES} byte limit.`,
@@ -120,12 +130,30 @@ export function findEnvFile(): string | null {
 
 /**
  * Load the documented `.env` file if one exists. No-op (returns null) when
- * absent. Returns the file path that was loaded.
+ * absent. Parse/size/read failures are configuration failures: by default
+ * they are rethrown (callers without a failure handler), but an entry point
+ * can pass `onError` to route them into its own clean startup-failure path.
+ * Never logs or echoes values. Returns the file path that was loaded.
  */
-export function loadDotEnv(): string | null {
+export function loadDotEnv(onError?: (err: ConfigError) => void): string | null {
   const path = findEnvFile();
   if (!path) return null;
-  loadEnvFile(path);
+  try {
+    loadEnvFile(path);
+  } catch (err) {
+    const configError =
+      err instanceof ConfigError
+        ? err
+        : new ConfigError(
+            `The environment file at "${path}" could not be loaded.`,
+            "config_env_unreadable",
+          );
+    if (onError) {
+      onError(configError);
+      return null;
+    }
+    throw configError;
+  }
   return path;
 }
 

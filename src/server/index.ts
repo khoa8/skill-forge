@@ -8,18 +8,28 @@
 import { loadDotEnv, resolveRuntimeConfig, resolveServerBind, ConfigError } from "../config/env.js";
 import { createApp, isLoopbackHost, type AppConfig } from "./app.js";
 
-loadDotEnv();
+/**
+ * Shared startup-failure path: every configuration problem (unreadable,
+ * malformed, or oversized .env; unsupported provider; missing API key; bad
+ * PORT) exits here — concise, actionable, no secret values, no stack trace,
+ * and nothing ever listens.
+ */
+function failStartup(err: unknown): never {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`SkillForge configuration error: ${message}`);
+  process.exit(1);
+}
 
 let runtime: ReturnType<typeof resolveRuntimeConfig>;
 let bind: ReturnType<typeof resolveServerBind>;
 try {
+  // .env loading is inside the same configuration-failure boundary: a
+  // malformed environment file must fail cleanly, not as an uncaught throw.
+  loadDotEnv((err) => failStartup(err));
   runtime = resolveRuntimeConfig();
   bind = resolveServerBind();
 } catch (err) {
-  if (err instanceof ConfigError) {
-    console.error(`SkillForge configuration error: ${err.message}`);
-    process.exit(1);
-  }
+  if (err instanceof ConfigError) failStartup(err);
   throw err;
 }
 
