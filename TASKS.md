@@ -109,3 +109,19 @@ Done items are checked. Priorities follow AGENTS.md/GOAL.md ordering.
   deployment model documented (local / trusted self-hosted; not a multi-user SaaS)
 - [x] CI strengthened: offline provider verification pinned to the mock provider, strict
   `npm audit` gate (fails on low-severity advisories or above)
+
+## Post-audit remediation run (feature/production-hardening-remediation)
+
+- [x] Provider response bodies byte-bounded: success bodies streamed under a 10 MB cap,
+  non-2xx diagnostics under 256 KB (shared `readBodyCapped` reader; missing/lying
+  `content-length` cannot bypass); typed `provider_response_too_large`; key never leaked
+- [x] Express 4 async routes wrapped so rejections reach the terminal error handler
+  (generic 500 JSON, no internals); real route-level regression test with injected
+  failing dependency
+- [x] End-to-end disconnect cancellation: disconnect → AbortController → pipeline →
+  provider fetch abort; in-flight remote request cancelled immediately, no result
+  persisted for aborted runs, offline/CLI path unchanged
+- [x] Docs truthfulness: current test counts (219/23), README CI wording matches actual
+  triggers, disconnect semantics documented as implemented
+- [x] CI actions bumped to checkout@v5 / setup-node@v5 (node24 action runtime; clears
+  Node 20 action-runtime deprecation warnings, no semantics change)

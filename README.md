@@ -19,10 +19,10 @@ Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 205 tests incl. end-to-end Source → Export
+npm test             # 219 tests incl. end-to-end Source → Export
 ```
 
-Every push runs the same six quality gates (typecheck, test, build, demo, offline provider verification, dependency audit) in GitHub Actions (`.github/workflows/ci.yml`); provider verification is pinned to the offline mock provider and dependency audit fails on any advisory at low severity or above.
+Every pull request and every push to `main` runs the same six quality gates (typecheck, test, build, demo, offline provider verification, dependency audit) in GitHub Actions (`.github/workflows/ci.yml`); provider verification is pinned to the offline mock provider and dependency audit fails on any advisory at low severity or above.
 
 ## Deployment scope (read before binding beyond loopback)
 

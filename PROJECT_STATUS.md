@@ -17,7 +17,7 @@
   - **UI:** five source tabs (Samples/Paste/URL/Local files/GitHub repo) with per-type validation and button states; browser-verified generation and real ZIP download.
   - **Link neutralization:** relative links inside verbatim excerpts render as paths, so exported packages never contain dangling internal references (found via live koa README; regression-tested).
 - **P1.5 shipped (merged to `main` via PR #1):**
-  - **CI quality gate** (`.github/workflows/ci.yml`): typecheck + test + build + demo on every push/PR, Node 20, `npm ci`, minimal permissions, concurrency cancellation.
+  - **CI quality gate** (`.github/workflows/ci.yml`): typecheck + test + build + demo + offline provider verification + dependency audit on every pull request and pushes to `main` (and the hardening branch), Node 20, `npm ci`, minimal permissions, concurrency cancellation.
   - **GitHub repository source** (`src/core/sources/github.ts`, `sourceType: "github"`): repo/tree URL parsing, default-branch resolution, one recursive-tree API call, docs-first ordering (README → docs/ → root → rest), extension allowlist, hard bounds (40 files / 800 KB per file / 1.4 MB total / depth 6 / 15 s per request), raw.githubusercontent.com content fetch with final-host validation, typed errors surfaced per code (invalid URL, unsupported host, not found, ref not found, no docs, rate limited 429, fetch failed 502, deadline exceeded), optional `SKILLFORGE_GITHUB_TOKEN` sent to api.github.com only (rate-limit raise for public repositories — **public repositories only**, private repos deliberately unsupported). No cloning, no code execution, submodules never followed; truncation and skipping are reported via notes that propagate to the stream, the persisted record, and the UI. Bounds are enforced on actual returned UTF-8 bytes, including the exact combined representation; overall ingestion deadline is 60 s and covers response-body reads.
   - **UI fix:** source tab bodies toggle generically. New **GitHub repo** tab with honest limits text.
   - **Provenance click-through** (`GET /api/skills/:id/provenance/excerpt`): provenance records open a dialog with the exact, line-numbered source excerpt; out-of-range requests are refused honestly (422).
@@ -27,7 +27,7 @@
 
 ## Verification evidence (current release, re-verified on the hardening branch)
 
-- `npm test` → **187/187 passing** across 19 test files.
+- `npm test` → **219/219 passing** across 23 test files.
 - `npm run typecheck` clean; `npm run build` emits working `dist/`.
 - `npm run demo` → 4 ZIPs verified non-empty with SKILL.md present.
 - `npm audit` → **0 vulnerabilities**.
@@ -42,7 +42,7 @@
 | --- | --- |
 | `npm run dev` | Dev server (tsx watch) at `127.0.0.1:8787` |
 | `npm start` | Dev server without watch |
-| `npm test` | Vitest suite (205 tests) |
+| `npm test` | Vitest suite (219 tests) |
 | `npm run verify:provider` | One bounded provider verification (offline mock by default) |
 | `npm run typecheck` / `npm run lint` | tsc --noEmit |
 | `npm run build` | tsc emit to `dist/` (server runs from dist with `node dist/src/server/index.js`) |
