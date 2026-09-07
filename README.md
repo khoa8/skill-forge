@@ -22,7 +22,7 @@ npm run demo         # generate → validate → export both samples, inspect th
 npm test             # 187 tests incl. end-to-end Source → Export
 ```
 
-Every push runs the same four quality gates (typecheck, test, build, demo) in GitHub Actions (`.github/workflows/ci.yml`).
+Every push runs the same six quality gates (typecheck, test, build, demo, offline provider verification, dependency audit) in GitHub Actions (`.github/workflows/ci.yml`); provider verification is pinned to the offline mock provider and dependency audit fails on any advisory at low severity or above.
 
 ## Sources
 
