@@ -19,7 +19,7 @@ Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 148 tests incl. end-to-end Source → Export
+npm test             # 179 tests incl. end-to-end Source → Export
 ```
 
 Every push runs the same four quality gates (typecheck, test, build, demo) in GitHub Actions (`.github/workflows/ci.yml`).
@@ -44,10 +44,10 @@ Every push runs the same four quality gates (typecheck, test, build, demo) in Gi
 
 | Stage | Behavior |
 | --- | --- |
-| **Source** | One of the five input types above. |
+| **Source** | One of the five input types above. Adapter notes — truncation, skipped files, followed redirects — are surfaced per-note in the generation log, in a "Source notes" panel, and persisted with the skill; skipping is never silent. |
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
-| **Validate** | 16 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
+| **Validate** | 17 deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
 | **Preview** | Inspect every generated file with its purpose and provenance before exporting. Provenance records are clickable and show the exact source lines (verbatim, never reconstructed). Generated files can be edited in place before export: edits are persisted, marked `user-edited` (their source provenance is dropped honestly), manifest hashes are resynchronized, and deterministic validation re-runs — failing edits block export. Generated skills persist on disk (`.data/skills/`) and survive server restarts. |
 | **Export** | Real ZIP downloads for **Claude Code** and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
 
@@ -70,7 +70,7 @@ Every file has a recorded purpose; ceremonial empty files are a validation error
 
 ## Validation behavior
 
-Validation is deterministic — same package in, same report out, no model calls. The 16 checks: required files; safe & unique paths (zip-slip/traversal); well-formed YAML front matter; valid `name` slug and `description`; no empty sections; resolving internal links; parseable JSON; manifest↔package consistency; no placeholder text (`TODO`, `FIXME`, …); no empty files; duplicate IDs; eval integrity (unique ids, usable prompt/expectation, known kinds); provenance integrity (every file traceable, valid line ranges); SKILL.md size; unsupported export targets; and command grounding (shell commands in generated files must trace back to the source — unverifiable grounding is reported as *not verified*, never as passed).
+Validation is deterministic — same package in, same report out, no model calls. The 17 checks: required files; safe & unique paths (zip-slip/traversal); well-formed YAML front matter; valid `name` slug and `description`; canonical metadata consistency (SKILL.md front matter `name` and the manifest's `name`/`displayName`/`description`/`version`/`generator` must equal the canonical metadata — body text is editable, package identity is not); no empty sections; resolving internal links; parseable JSON; manifest↔package consistency; no placeholder text (`TODO`, `FIXME`, …); no empty files; duplicate IDs; eval integrity (unique ids, usable prompt/expectation, known kinds); provenance integrity (every file traceable, valid line ranges; user-edited files are honestly reported as no longer source-derived); SKILL.md size; unsupported export targets; and command grounding (shell commands in generated files must trace back to the source — unverifiable grounding is reported as *not verified*, never as passed).
 
 The report states `passed`, `executed`, per-check status, file locations, and actionable messages. Warnings (e.g. placeholders, untraceable commands) do not block export; errors do — the export endpoint re-runs validation and refuses failing packages.
 
