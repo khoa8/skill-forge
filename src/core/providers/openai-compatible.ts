@@ -9,7 +9,7 @@
  */
 import { PlanSchema, type SkillPlan } from "../plan.js";
 import { ProviderError, type GenerationProvider, type GenerateInput } from "./types.js";
-import { slugify } from "../util.js";
+import { slugify, redactSecret } from "../util.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "../sources/body.js";
 
 export interface OpenAICompatibleOptions {
@@ -113,8 +113,11 @@ export class OpenAICompatibleProvider implements GenerationProvider {
         signal,
       });
     } catch (err) {
+      // Transport errors can embed request material (custom network stacks may
+      // include headers); sanitize before the text leaves the provider.
+      const raw = err instanceof Error ? err.message : String(err);
       throw new ProviderError(
-        `Provider request failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Provider request failed: ${redactSecret(raw, this.apiKey)}`,
         "provider_request_failed",
       );
     }
@@ -122,7 +125,9 @@ export class OpenAICompatibleProvider implements GenerationProvider {
     if (!response.ok) {
       // Non-2xx bodies are diagnostics: stream them under a small cap so a
       // misbehaving endpoint cannot push unbounded data into memory, and keep
-      // the bounded detail + remediation hints. The API key is never included.
+      // the bounded detail + remediation hints. A hostile or misconfigured
+      // endpoint may echo the API key — redact every occurrence before the
+      // body text is attached to the error.
       let body = "";
       try {
         body = decodeUtf8(await readBodyCapped(response, MAX_PROVIDER_ERROR_BYTES, signal));
@@ -136,7 +141,7 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       throw new ProviderError(
         `Provider returned HTTP ${response.status} ${response.statusText}. Check the API key, base URL, and model name.`,
         "provider_http_error",
-        body.slice(0, 500),
+        redactSecret(body, this.apiKey).slice(0, 500),
       );
     }
 
@@ -163,10 +168,12 @@ export class OpenAICompatibleProvider implements GenerationProvider {
 
     const content = extractMessageContent(payload);
     if (content === null) {
+      // Detail is remote-controlled data: serialize and redact before it can
+      // carry the configured key anywhere.
       throw new ProviderError(
         "Provider response did not contain a chat message with text content.",
         "provider_unexpected_shape",
-        payload,
+        redactSecret(JSON.stringify(payload), this.apiKey),
       );
     }
 
@@ -175,7 +182,7 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       throw new ProviderError(
         "Provider message did not contain a JSON object. Re-run generation or try a different model.",
         "provider_no_json",
-        content.slice(0, 500),
+        redactSecret(content, this.apiKey).slice(0, 500),
       );
     }
 
@@ -188,7 +195,7 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       throw new ProviderError(
         `Model output did not match the skill plan schema: ${issues}`,
         "provider_schema_mismatch",
-        rawJson,
+        redactSecret(JSON.stringify(rawJson), this.apiKey),
       );
     }
 

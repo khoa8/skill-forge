@@ -180,6 +180,53 @@ describe("OpenAICompatibleProvider response-body caps", () => {
     }
   });
 
+  it("redacts the configured API key echoed in a non-2xx response body", async () => {
+    const key = "sk-super-secret-test-key";
+    const provider = new OpenAICompatibleProvider({
+      id: "glm",
+      apiKey: key,
+      baseUrl: "https://example.invalid/v1",
+      model: "test-model",
+      fetchImpl: async () => new Response(`authentication rejected for ${key}; re-check credentials`, { status: 401 }),
+    });
+    const err = (await provider.generate(makeInput()).catch((e) => e)) as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    // The key must be absent from every error surface, while useful context survives.
+    expect(err.message).not.toContain(key);
+    expect(String(err.detail)).not.toContain(key);
+    expect(JSON.stringify(err)).not.toContain(key);
+    expect(String(err.detail)).toContain("[REDACTED]");
+    expect(String(err.detail)).toContain("re-check credentials");
+  });
+
+  it("redacts the configured API key embedded in transport error messages", async () => {
+    const key = "sk-super-secret-test-key";
+    const provider = new OpenAICompatibleProvider({
+      id: "glm",
+      apiKey: key,
+      baseUrl: "https://example.invalid/v1",
+      model: "test-model",
+      fetchImpl: (async () => {
+        throw new Error(`request failed using Bearer ${key}`);
+      }) as unknown as typeof fetch,
+    });
+    const err = (await provider.generate(makeInput()).catch((e) => e)) as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.code).toBe("provider_request_failed");
+    expect(err.message).not.toContain(key);
+    expect(JSON.stringify(err)).not.toContain(key);
+    expect(err.message).toContain("[REDACTED]");
+  });
+
+  it("redactSecret handles empty and missing inputs safely", async () => {
+    const { redactSecret } = await import("../src/core/util.js");
+    expect(redactSecret("", "key")).toBe("");
+    expect(redactSecret("text", "")).toBe("text");
+    expect(redactSecret("text", undefined)).toBe("text");
+    expect(redactSecret(undefined, "key")).toBe("");
+    expect(redactSecret("a key a", "key")).toBe("a [REDACTED] a");
+  });
+
   it("aborts an in-flight request when the caller's signal fires (not at the 60 s timeout)", async () => {
     let fetchSignal: AbortSignal | undefined | null;
     const provider = new OpenAICompatibleProvider({
