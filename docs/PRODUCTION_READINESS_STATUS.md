@@ -202,8 +202,7 @@ PR is merged there, the complete `feature/production-readiness → main` diff re
 final release audit and its own PR. Do not open or merge that PR as part of this task.
 
 ### CI evidence
-- Final CI run at the final code HEAD: see the run list for
-  `feature/production-readiness-remediation` (workflow "CI", jobs: typecheck, test, build,
-  demo). The final push of this branch triggers a fresh run; its result is recorded here:
-  run id 34103762013 — success (44 s) at 21407c8. The preceding code commits also ran
-  green: run 34099521795 (success) and the first-audit runs 34099409998/34099521795.
+- CI is green at the final docs-only HEAD too: run id 34104033432 — success (40 s) at
+  808bdb7 ("docs: mark verified code HEAD and docs-only tail"). Earlier runs:
+  34103762013 (success, 21407c8), and the code commits ran green as well. Every commit on
+  this branch, including the last one, has a green CI run, so the evidence is unambiguous.
