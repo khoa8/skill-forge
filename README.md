@@ -13,13 +13,13 @@ npm install
 npm run dev          # open http://127.0.0.1:8787
 ```
 
-Then: **pick a source (bundled sample, pasted Markdown, a URL, or local files) → Generate skill → inspect files → Download ZIP.** The bundled demo provider runs fully offline; no paid key is ever needed for the demo workflow.
+Then: **pick a source (bundled sample, pasted Markdown, a URL, local files, or a public GitHub repository) → Generate skill → inspect files → Download ZIP.** The bundled demo provider runs fully offline; no paid key is ever needed for the demo workflow.
 
 Verify the same flow headlessly:
 
 ```bash
 npm run demo         # generate → validate → export both samples, inspect the ZIPs
-npm test             # 179 tests incl. end-to-end Source → Export
+npm test             # 187 tests incl. end-to-end Source → Export
 ```
 
 Every push runs the same four quality gates (typecheck, test, build, demo) in GitHub Actions (`.github/workflows/ci.yml`).
