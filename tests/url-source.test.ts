@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { LookupAddress } from "node:dns";
 import {
   assertSafeUrl,
-  isPrivateHost,
-  isPrivateIp,
+  isRefusedHost,
   htmlToText,
   fetchUrlSource,
   UrlSourceError,
   MAX_URL_BYTES,
+  type LookupAllFn,
 } from "../src/core/sources/url.js";
+import { isAllowedUrlDestinationIp } from "../src/core/sources/ip-policy.js";
 
 type LookupFn = (hostname: string, options: { all: true; verbatim: true }) => Promise<LookupAddress[]>;
 
@@ -38,16 +39,16 @@ describe("URL safety guards", () => {
     expect(() => assertSafeUrl("https://user:pass@example.com/x")).toThrow(/credentials/);
   });
 
-  it("classifies private hosts and IPs", () => {
-    expect(isPrivateHost("localhost")).toBe(true);
-    expect(isPrivateHost("foo.localhost")).toBe(true);
-    expect(isPrivateHost("box.internal")).toBe(true);
-    expect(isPrivateHost("example.com")).toBe(false);
-    for (const ip of ["127.0.0.1", "10.0.0.5", "192.168.1.2", "172.16.0.9", "169.254.1.1", "0.0.0.0", "::1", "fe80::1", "fd00::5", "::ffff:127.0.0.1"]) {
-      expect(isPrivateIp(ip), ip).toBe(true);
+  it("classifies refused hosts and non-public IPs", () => {
+    expect(isRefusedHost("localhost")).toBe(true);
+    expect(isRefusedHost("foo.localhost")).toBe(true);
+    expect(isRefusedHost("box.internal")).toBe(true);
+    expect(isRefusedHost("example.com")).toBe(false);
+    for (const ip of ["127.0.0.1", "10.0.0.5", "192.168.1.2", "172.16.0.9", "169.254.1.1", "0.0.0.0", "192.0.2.1", "::1", "fe80::1", "fe90::1", "fd00::5", "::ffff:127.0.0.1", "::ffff:7f00:1"]) {
+      expect(isAllowedUrlDestinationIp(ip), ip).toBe(false);
     }
     for (const ip of ["8.8.8.8", "1.1.1.1", "2606:4700::1111"]) {
-      expect(isPrivateIp(ip), ip).toBe(false);
+      expect(isAllowedUrlDestinationIp(ip), ip).toBe(true);
     }
   });
 
@@ -56,6 +57,18 @@ describe("URL safety guards", () => {
       fetchUrlSource("https://evil.example.com/doc", {
         fetchImpl: (async () => htmlResponse("<p>x</p>")) as typeof fetch,
         lookupImpl: fakeLookupFn([{ address: "127.0.0.1", family: 4 }]),
+      }),
+    ).rejects.toMatchObject({ code: "url_private_host" });
+  });
+
+  it("refuses mixed record sets containing any private address", async () => {
+    await expect(
+      fetchUrlSource("https://sneaky.example.com/doc", {
+        fetchImpl: (async () => htmlResponse("<p>x</p>")) as typeof fetch,
+        lookupImpl: fakeLookupFn([
+          { address: "93.184.216.34", family: 4 },
+          { address: "10.0.0.7", family: 4 },
+        ]),
       }),
     ).rejects.toMatchObject({ code: "url_private_host" });
   });
@@ -104,6 +117,57 @@ describe("URL safety guards", () => {
         lookupImpl: lookup,
       }),
     ).rejects.toMatchObject({ code: "url_too_large" });
+  });
+});
+
+describe("URL ingestion end-to-end deadline", () => {
+  it("fails with url_deadline_exceeded when headers arrive but the body stalls", async () => {
+    // Stream that never ends: only the shared deadline can end the read.
+    const stalled = new ReadableStream<Uint8Array>({ start() {} });
+    const t0 = Date.now();
+    await expect(
+      fetchUrlSource("https://example.com/slow-body", {
+        fetchImpl: (async () =>
+          new Response(stalled, { status: 200, headers: { "content-type": "text/plain" } })) as unknown as typeof fetch,
+        lookupImpl: fakeLookupFn(PUBLIC),
+        timeoutMs: 200,
+      }),
+    ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("does not restart the deadline on every redirect hop", async () => {
+    // Each hop answers quickly but takes 80 ms; the 200 ms global budget must
+    // abort the CHAIN (old behavior restarted a fresh timeout per hop).
+    let hops = 0;
+    const slowRedirect = (async () => {
+      hops += 1;
+      await new Promise((r) => setTimeout(r, 80));
+      return new Response(null, { status: 302, headers: { location: `https://next${hops}.example.com/x` } });
+    }) as unknown as typeof fetch;
+    const t0 = Date.now();
+    await expect(
+      fetchUrlSource("https://start.example.com/x", {
+        fetchImpl: slowRedirect,
+        lookupImpl: fakeLookupFn(PUBLIC),
+        timeoutMs: 200,
+      }),
+    ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(hops).toBeGreaterThanOrEqual(2);
+    expect(hops).toBeLessThanOrEqual(4);
+  });
+
+  it("bounds stalled DNS validation with the same deadline", async () => {
+    const never = new Promise<LookupAddress[]>(() => {});
+    const t0 = Date.now();
+    await expect(
+      fetchUrlSource("https://slow-dns.example.com/x", {
+        lookupImpl: (async () => never) as unknown as LookupAllFn,
+        timeoutMs: 150,
+      }),
+    ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
 });
 

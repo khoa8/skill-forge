@@ -34,11 +34,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
-
+      # Build runs BEFORE test so the production smoke test in the suite can
+      # exercise the compiled output (dist/) as a hard gate.
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
 
       - name: Demo pipeline
         run: npm run demo
@@ -58,3 +60,32 @@ jobs:
         # Dependency-free check: relative Markdown links/images resolve and
         # no doc references removed status documents.
         run: npm run docs:check
+
+  production-smoke:
+    name: production smoke (pruned)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: quality-gate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # The whole point: prove the compiled runtime needs NO devDependency
+      # (tsx/TypeScript/Vitest removed) before this smoke runs.
+      - name: Prune dev dependencies
+        run: npm prune --omit=dev
+
+      - name: Production smoke (plain Node)
+        run: npm run smoke:production

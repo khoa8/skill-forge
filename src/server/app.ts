@@ -20,7 +20,7 @@ import { collectFiles, combineFiles, FileSourceError } from "../core/sources/fil
 import { fetchGithubSource, GithubSourceError } from "../core/sources/github.js";
 import {
   createStore,
-  defaultStore,
+  getDefaultStore,
   getSkill as loadSkill,
   EditError,
   toResponse,
@@ -137,7 +137,7 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 export function createApp(config: AppConfig, overrides: AppOverrides = {}): Express {
-  const store = overrides.storeRoot ? createStore(overrides.storeRoot) : defaultStore;
+  const store = overrides.storeRoot ? createStore(overrides.storeRoot) : getDefaultStore();
   const saveSkillImpl = store.saveSkill;
   const loadSkillImpl = overrides.loadSkill ?? store.getSkill;
   const listSkillsImpl = store.listSkills;
@@ -219,10 +219,11 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         sourceNotes = fetched.notes;
         adapterNotes = fetched.notes;
       } catch (err) {
-        const status = err instanceof UrlSourceError && err.code === "url_invalid" ? 400 : 502;
+        const code = err instanceof UrlSourceError ? err.code : "url_fetch_failed";
+        const status = code === "url_invalid" ? 400 : code === "url_deadline_exceeded" ? 504 : 502;
         res.status(status).json({
           error: err instanceof Error ? err.message : String(err),
-          code: err instanceof UrlSourceError ? err.code : "url_fetch_failed",
+          code,
         });
         return;
       }

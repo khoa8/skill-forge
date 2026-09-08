@@ -3,20 +3,35 @@
  *
  * Design constraints (AGENTS.md §12 web safety):
  * - http/https only; no other protocols;
- * - SSRF protection: block localhost, link-local, loopback, private, and
- *   unique-local addresses by name before any request (DNS re-resolution
- *   TOCTOU is accepted and documented — the fetch layer also re-checks);
- * - redirects followed at most 3 times, re-validated each hop;
- * - hard size limit and time limit;
+ * - SSRF protection: hosts that are private/loopback/link-local by NAME are
+ *   refused, and the connection can only use addresses that were resolved
+ *   and validated as public AT CONNECTION TIME (safe-fetch pins the socket
+ *   to the validated records — the DNS check/use / rebinding gap is closed
+ *   by construction, not by re-checking after an unvalidated resolution);
+ * - one END-TO-END deadline covers DNS, redirects, connection/headers, and
+ *   the full response-body stream (the deadline is NOT restarted per hop or
+ *   per phase);
+ * - redirects followed at most 3 times, re-validated (URL + DNS) each hop;
+ * - hard byte cap enforced while the body streams;
  * - single-page fetch only — no crawling by default;
  * - HTML is converted to markdown-ish text client-side (no JS execution).
  *
- * The fetcher is injectable for deterministic tests.
+ * The network layer is injectable for deterministic tests: `fetchImpl`
+ * (WHATWG fetch shape, existing tests) or `safeFetchImpl` (the production
+ * transport signature, used for deadline/rebinding regression tests). When
+ * neither is given the production safe-fetch transport is used.
  */
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
+import { safeFetch, type SafeResponse } from "./safe-fetch.js";
+import { isAllowedUrlDestinationIp } from "./ip-policy.js";
+
+/** DNS lookup shape used for SSRF validation and injection. */
+export interface LookupAllFn {
+  (hostname: string, options: { all: true; verbatim: true }): Promise<{ address: string; family: number }[]>;
+}
 
 export const MAX_URL_BYTES = 1_000_000; // 1 MB of payload
 export const URL_TIMEOUT_MS = 15_000;
@@ -33,71 +48,24 @@ export class UrlSourceError extends Error {
   }
 }
 
-/** Hosts and IP ranges refused to prevent SSRF. */
-export function isPrivateHost(host: string): boolean {
+/**
+ * Hosts refused as SSRF destinations: local naming patterns plus any
+ * literal IP that is not globally reachable (decision delegated to the one
+ * centralized IP policy (ip-policy.ts) — see isGloballyReachable).
+ */
+export function isRefusedHost(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, "");
   if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) {
     return true;
   }
   const ip = isIP(h) ? h : null;
-  if (ip) return isPrivateIp(ip);
+  if (ip) return !isAllowedUrlDestinationIp(ip);
   // IPv6 literal in brackets
   if (h.startsWith("[") && h.endsWith("]")) {
     const inner = h.slice(1, -1);
-    return isIP(inner) ? isPrivateIp(inner) : false;
+    return isIP(inner) ? !isAllowedUrlDestinationIp(inner) : false;
   }
   return false;
-}
-
-export function isPrivateIp(ip: string): boolean {
-  if (ip.includes(":")) {
-    const v6 = ip.toLowerCase();
-    if (v6 === "::1" || v6 === "::") return true;
-    if (v6.startsWith("fe80") || v6.startsWith("fc") || v6.startsWith("fd")) return true;
-    if (v6.startsWith("::ffff:")) {
-      const v4 = v6.slice(7);
-      return isIP(v4) === 4 ? isPrivateIp(v4) : false;
-    }
-    return false;
-  }
-  const parts = ip.split(".").map((p) => Number.parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return true;
-  const [a, b] = parts as [number, number, number, number];
-  if (a === 0 || a === 10 || a === 127) return true; // this-network, private, loopback
-  if (a === 169 && b === 254) return true; // link-local
-  if (a === 172 && b >= 16 && b <= 31) return true; // private
-  if (a === 192 && b === 168) return true; // private
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  if (a >= 224) return true; // multicast + reserved
-  return false;
-}
-
-/** Resolve a hostname and refuse private addresses (SSRF guard). */
-async function assertPublicHost(hostname: string, lookupImpl: LookupAllFn): Promise<void> {
-  if (isPrivateHost(hostname)) {
-    throw new UrlSourceError(
-      `Refusing to fetch "${hostname}": private, loopback, or local addresses are not allowed.`,
-      "url_private_host",
-    );
-  }
-  if (isIP(hostname)) return; // literal public IP already checked
-  let addresses: { address: string }[];
-  try {
-    addresses = await lookupImpl(hostname, { all: true, verbatim: true });
-  } catch {
-    throw new UrlSourceError(`DNS lookup failed for "${hostname}".`, "url_dns_failure");
-  }
-  if (addresses.length === 0) {
-    throw new UrlSourceError(`No DNS records for "${hostname}".`, "url_dns_failure");
-  }
-  for (const { address } of addresses) {
-    if (isPrivateIp(address)) {
-      throw new UrlSourceError(
-        `Refusing to fetch "${hostname}": it resolves to a private address (${address}).`,
-        "url_private_host",
-      );
-    }
-  }
 }
 
 export function assertSafeUrl(raw: string): URL {
@@ -164,12 +132,66 @@ function decodeEntities(text: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
-export interface LookupAllFn {
-  (hostname: string, options: { all: true; verbatim: true }): Promise<{ address: string; family: number }[]>;
+/** Typed error for the shared end-to-end deadline. */
+function deadlineError(timeoutMs: number): UrlSourceError {
+  return new UrlSourceError(
+    `The page did not finish loading within ${Math.round(timeoutMs / 1000)} s (overall deadline covering DNS, redirects, connection, and body streaming).`,
+    "url_deadline_exceeded",
+  );
+}
+
+/** Race a promise against the shared deadline so a stalled DNS resolution
+ * cannot outlive the overall ingestion budget. */
+function raceDeadline<T>(promise: Promise<T>, deadline: AbortSignal, timeoutMs: number): Promise<T> {
+  if (deadline.aborted) return Promise.reject(deadlineError(timeoutMs));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(deadlineError(timeoutMs));
+    deadline.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        deadline.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        deadline.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Uniform view over Response | SafeResponse for the fields the adapter uses. */
+interface FetchedResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  getHeader(name: string): string | null;
+  body: ReadableStream<Uint8Array> | null;
+  cancel(): void;
+}
+
+function adapt(res: Response | SafeResponse): FetchedResponse {
+  if ("getHeader" in res) {
+    const safe = res as SafeResponse;
+    return { ok: safe.ok, status: safe.status, statusText: safe.statusText, getHeader: safe.getHeader, body: safe.body, cancel: safe.cancel };
+  }
+  const r = res as Response;
+  return {
+    ok: r.ok,
+    status: r.status,
+    statusText: r.statusText,
+    getHeader: (name) => r.headers.get(name),
+    body: r.body,
+    cancel: () => void r.body?.cancel().catch(() => {}),
+  };
 }
 
 export interface FetchUrlOptions {
+  /** WHATWG-fetch-shaped transport (tests). DNS validation then relies on
+   * the injected lookup for the check, and the fetch for the use. */
   fetchImpl?: typeof fetch;
+  /** Production-transport-shaped injection (tests): used as-is. */
+  safeFetchImpl?: typeof safeFetch;
   lookupImpl?: LookupAllFn;
   maxBytes?: number;
   timeoutMs?: number;
@@ -178,30 +200,73 @@ export interface FetchUrlOptions {
 /**
  * Fetch a documentation URL and turn it into a SourceInput.
  * Single page only — deliberately not a crawler.
+ *
+ * The deadline is ONE AbortSignal.timer over the whole operation: DNS
+ * validation, every redirect hop, connection/headers, and the streamed body
+ * all share the same budget. A server that sends headers and then stalls
+ * cannot outlive it, and redirect chains cannot reset it.
  */
 export async function fetchUrlSource(
   rawUrl: string,
   opts: FetchUrlOptions = {},
 ): Promise<{ input: SourceInput; finalUrl: string; notes: string[] }> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
   const lookupImpl: LookupAllFn = (opts.lookupImpl ?? lookup) as LookupAllFn;
   const maxBytes = opts.maxBytes ?? MAX_URL_BYTES;
   const timeoutMs = opts.timeoutMs ?? URL_TIMEOUT_MS;
 
+  // ONE deadline for the entire ingestion (DNS + redirects + headers + body).
+  const deadline = AbortSignal.timeout(timeoutMs);
+
+  async function request(url: URL): Promise<Response | SafeResponse> {
+    const init = {
+      redirect: "manual" as const,
+      headers: { "user-agent": "SkillForge/0.1 (documentation-to-skill; +https://github.com/skillforge)" },
+      signal: deadline,
+    };
+    if (opts.fetchImpl) return opts.fetchImpl(url.toString(), init);
+    if (opts.safeFetchImpl) return opts.safeFetchImpl(url.toString(), init, lookupImpl);
+    return safeFetch(url.toString(), init, lookupImpl);
+  }
+
+  async function assertHopSafe(url: URL): Promise<void> {
+    if (isRefusedHost(url.hostname)) {
+      throw new UrlSourceError(
+        `Refusing to fetch "${url.hostname}": private, local, or otherwise non-public destinations are not allowed.`,
+        "url_private_host",
+      );
+    }
+    if (isIP(url.hostname)) return; // literal public IP already checked
+    let addresses: { address: string }[];
+    try {
+      addresses = await lookupImpl(url.hostname, { all: true, verbatim: true });
+    } catch {
+      throw new UrlSourceError(`DNS lookup failed for "${url.hostname}".`, "url_dns_failure");
+    }
+    if (addresses.length === 0) {
+      throw new UrlSourceError(`No DNS records for "${url.hostname}".`, "url_dns_failure");
+    }
+    for (const { address } of addresses) {
+      if (!isAllowedUrlDestinationIp(address)) {
+        throw new UrlSourceError(
+          `Refusing to fetch "${url.hostname}": it resolves to a non-public destination (${address}).`,
+          "url_private_host",
+        );
+      }
+    }
+  }
+
   let current = assertSafeUrl(rawUrl);
-  await assertPublicHost(current.hostname, lookupImpl);
+  await raceDeadline(assertHopSafe(current), deadline, timeoutMs);
 
   const notes: string[] = [];
-  let response: Response | null = null;
+  let response: FetchedResponse | null = null;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    let res: Response;
+    let res: FetchedResponse;
     try {
-      res = await fetchImpl(current, {
-        redirect: "manual",
-        headers: { "user-agent": "SkillForge/0.1 (documentation-to-skill; +https://github.com/skillforge)" },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      res = adapt(await request(current));
     } catch (err) {
+      if (err instanceof UrlSourceError) throw err;
+      if (deadline.aborted) throw deadlineError(timeoutMs);
       const cause = err instanceof Error ? err.message : String(err);
       throw new UrlSourceError(
         `Fetch failed for ${current}: ${cause}. The site may be unreachable or blocking automated requests.`,
@@ -209,13 +274,14 @@ export async function fetchUrlSource(
       );
     }
     if ([301, 302, 303, 307, 308].includes(res.status)) {
-      const location = res.headers.get("location");
+      const location = res.getHeader("location");
+      res.cancel();
       if (!location) {
         throw new UrlSourceError(`Redirect from ${current} has no Location header.`, "url_redirect_no_location");
       }
       const next = new URL(location, current);
       assertSafeUrl(next.toString());
-      await assertPublicHost(next.hostname, lookupImpl);
+      await raceDeadline(assertHopSafe(next), deadline, timeoutMs);
       current = next;
       continue;
     }
@@ -227,22 +293,25 @@ export async function fetchUrlSource(
   }
   if (current.toString() !== new URL(rawUrl).toString()) notes.push(`Followed redirect to ${current}.`);
   if (!response.ok) {
+    response.cancel();
     throw new UrlSourceError(
       `The server responded ${response.status} ${response.statusText} for ${current}.`,
       "url_http_error",
     );
   }
 
-  const contentType = response.headers.get("content-type") ?? "";
+  const contentType = response.getHeader("content-type") ?? "";
   if (!/text\/|html|markdown|json|xml/i.test(contentType)) {
+    response.cancel();
     throw new UrlSourceError(
       `Unsupported content type "${contentType}". SkillForge fetches text/HTML documentation pages.`,
       "url_bad_content_type",
     );
   }
 
-  const declaredLength = response.headers.get("content-length");
+  const declaredLength = response.getHeader("content-length");
   if (declaredLength && Number.parseInt(declaredLength, 10) > maxBytes) {
+    response.cancel();
     throw new UrlSourceError(
       `The page is ${declaredLength} bytes; the limit is ${maxBytes}. Fetch a more specific page.`,
       "url_too_large",
@@ -250,15 +319,25 @@ export async function fetchUrlSource(
   }
   // Enforce the byte cap WHILE streaming the body (content-length is
   // advisory); an oversized connection is torn down mid-read instead of being
-  // buffered to completion first.
+  // buffered to completion first. The same end-to-end deadline bounds the
+  // read: headers arriving quickly do not exempt a stalled body.
   let rawBody: Uint8Array;
   try {
-    rawBody = await readBodyCapped(response, maxBytes);
+    rawBody = response.body
+      ? await readBodyCapped({ body: response.body }, maxBytes, deadline)
+      : await readBodyCapped({ text: () => Promise.resolve("") }, maxBytes, deadline);
   } catch (err) {
+    response.cancel();
     if (err instanceof BodyTooLargeError) {
       throw new UrlSourceError(
         `The page exceeds ${maxBytes} bytes. Fetch a more specific page.`,
         "url_too_large",
+      );
+    }
+    if (deadline.aborted) {
+      throw new UrlSourceError(
+        `The page did not finish loading within ${Math.round(timeoutMs / 1000)} s (overall deadline). The server may have stalled mid-response.`,
+        "url_deadline_exceeded",
       );
     }
     throw new UrlSourceError(
