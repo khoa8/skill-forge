@@ -571,6 +571,41 @@ const canonicalMetadataConsistency = check(
   },
 );
 
+// Repository provenance (codebase mode): when a manifest declares a
+// source.repository block, it must be a well-formed codebase record with
+// inspected files. Absent blocks (every documentation-mode package) pass.
+const repositoryProvenance = check("repository-provenance", "Repository provenance is well-formed", ({ skill }) => {
+  const manifestFile = skill.files.find((f) => f.path === "manifest.json");
+  if (!manifestFile) return pass();
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(manifestFile.content);
+  } catch {
+    return pass(); // json-parse already failed; avoid duplicate noise
+  }
+  const repo = (manifest as { source?: { repository?: unknown } })?.source?.repository;
+  if (repo === undefined) return pass();
+  if (repo === null || typeof repo !== "object" || Array.isArray(repo)) {
+    return fail("manifest.json source.repository is present but malformed.", "manifest.json");
+  }
+  const r = repo as Record<string, unknown>;
+  const outcomes: CheckOutcome[] = [];
+  for (const field of ["url", "owner", "name", "ref", "mode"]) {
+    if (typeof r[field] !== "string" || (r[field] as string).length === 0) {
+      outcomes.push(fail(`manifest.json source.repository.${field} is missing or not a non-empty string.`, "manifest.json"));
+    }
+  }
+  if (typeof r.mode === "string" && r.mode !== "codebase") {
+    outcomes.push(fail(`manifest.json source.repository.mode must be "codebase" (got "${r.mode}").`, "manifest.json"));
+  }
+  if (!Array.isArray(r.inspectedFiles)) {
+    outcomes.push(fail("manifest.json source.repository.inspectedFiles must be an array of inspected file paths.", "manifest.json"));
+  } else if (r.inspectedFiles.length === 0) {
+    outcomes.push(warn("manifest.json source.repository.inspectedFiles is empty; no repository files were recorded as inspected.", "manifest.json"));
+  }
+  return outcomes.length === 0 ? pass() : outcomes;
+});
+
 export const CHECKS: Check[] = [
   exportTargetKnown,
   requiredFiles,
@@ -583,6 +618,7 @@ export const CHECKS: Check[] = [
   brokenLinks,
   jsonParses,
   manifestConsistency,
+  repositoryProvenance,
   placeholders,
   duplicateEvalIds,
   evalIntegrity,

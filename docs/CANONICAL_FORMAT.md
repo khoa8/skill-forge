@@ -56,6 +56,23 @@ Any section the source cannot answer renders an explicit gap note instead of inv
 
 `files` lists every file except the manifest itself. Exporters may add `exportNotes` when they change the package (e.g. the generic exporter adds `AGENTS.md` and re-lists it).
 
+### `source.repository` (codebase mode only)
+
+When the source was a GitHub repository in **codebase** mode, `source.repository` records the repository provenance:
+
+```json
+"repository": {
+  "url": "https://github.com/owner/repo",
+  "owner": "owner", "name": "repo", "ref": "main",
+  "mode": "codebase",
+  "inspectedFiles": ["package.json", "src/index.ts", "…"],
+  "treeBlobCount": 812, "candidateCount": 233, "selectedCount": 41,
+  "treeTruncated": false
+}
+```
+
+`inspectedFiles` lists exactly the files SkillForge read; every other tree entry existed but was **not** inspected (the counts make the boundedness explicit). Documentation-mode packages omit the block entirely. The full structured analysis (languages, evidenced commands, conventions, testing evidence, uncertainty) is carried by the canonical source record, not the manifest.
+
 ## Provenance
 
 Each generated file has a provenance record: `{ filePath, extraction, sourceLines: [start, end], sourceHeading? }` — `sourceLines` refers to the *normalized* source text (stable sha256 in the manifest). References/workflows/examples embed the same ranges inline so the exported package is self-describing.

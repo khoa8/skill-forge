@@ -17,6 +17,7 @@ import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill, manifestFor } from "../src/core/build.js";
 import { PlanSchema } from "../src/core/plan.js";
+import { validatePackage } from "../src/core/validate.js";
 import { createStore } from "../src/server/store.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -206,5 +207,39 @@ describe("repository provenance in build + manifest + store", () => {
       generator: "mock", generatedAt: new Date(0).toISOString(), gaps: [],
     }, info));
     expect(manifest.source.repository.treeTruncated).toBe(true);
+  });
+});
+
+describe("repository-provenance validation check", () => {
+  it("passes for codebase manifests and docs manifests alike", () => {
+    const input: SourceInput = {
+      type: "github-codebase",
+      name: "acme/widgets",
+      content: `# package.json\n\n${JSON.stringify({ name: "widgets", scripts: { test: "vitest run" } }, null, 2)}\n`,
+      repository: sampleRepositoryAnalysis(),
+    };
+    const normalized = normalizeSource(input);
+    const analysis = analyzeSource(normalized);
+    const skill = buildCanonicalSkill(normalized, analysis, PlanSchema.parse({ name: "widgets" }), "mock");
+    expect(validatePackage({ skill, sourceText: normalized.text }).passed).toBe(true);
+
+    const docsNormalized = normalizeSource({ type: "text", name: "plain", content: "# Plain\n\nA plain documentation source, long enough to normalize cleanly and without repository data." });
+    const docsSkill = buildCanonicalSkill(docsNormalized, analyzeSource(docsNormalized), PlanSchema.parse({}), "mock");
+    expect(validatePackage({ skill: docsSkill, sourceText: docsNormalized.text }).passed).toBe(true);
+  });
+
+  it("fails when the repository block is malformed (mode mismatch, missing fields)", () => {
+    const normalized = normalizeSource({ type: "text", name: "plain", content: "# Plain\n\nA plain documentation source, long enough to normalize cleanly and without repository data." });
+    const skill = buildCanonicalSkill(normalized, analyzeSource(normalized), PlanSchema.parse({}), "mock");
+    const manifestFile = skill.files.find((f) => f.path === "manifest.json")!;
+    const manifest = JSON.parse(manifestFile.content);
+    manifest.source.repository = { mode: "docs", owner: "acme" };
+    manifestFile.content = JSON.stringify(manifest, null, 2) + "\n";
+    const report = validatePackage({ skill, sourceText: normalized.text });
+    expect(report.passed).toBe(false);
+    const provenanceFindings = report.checks.filter((c) => c.id === "repository-provenance");
+    expect(provenanceFindings.length).toBeGreaterThan(0);
+    expect(provenanceFindings.some((c) => c.status === "fail" && c.message?.includes("mode"))).toBe(true);
+    expect(provenanceFindings.some((c) => c.status === "fail" && c.message?.includes("url"))).toBe(true);
   });
 });
