@@ -24,7 +24,7 @@ import http from "node:http";
 import https from "node:https";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { isGloballyReachable } from "./ip-policy.js";
+import { isAllowedUrlDestinationIp } from "./ip-policy.js";
 import type { LookupAllFn } from "./url.js";
 
 export class SafeFetchError extends Error {
@@ -73,9 +73,9 @@ export async function assertPublicDns(
   if (isIP(hostname) === 0 && hostname.startsWith("[") && hostname.endsWith("]")) {
     const literal = hostname.slice(1, -1);
     if (isIP(literal)) {
-      if (!isGloballyReachable(literal)) {
+      if (!isAllowedUrlDestinationIp(literal)) {
         throw new SafeFetchError(
-          `Refusing to fetch "${hostname}": private, loopback, or local addresses are not allowed.`,
+          `Refusing to fetch "${hostname}": not a permitted public destination.`,
           "url_private_host",
         );
       }
@@ -104,9 +104,9 @@ export async function assertPublicDns(
     throw new SafeFetchError(`DNS lookup failed for "${hostname}".`, "url_dns_failure");
   }
   for (const { address } of records) {
-    if (!isGloballyReachable(address)) {
+    if (!isAllowedUrlDestinationIp(address)) {
       throw new SafeFetchError(
-        `Refusing to fetch "${hostname}": it resolves to a non-globally-reachable address (${address}).`,
+        `Refusing to fetch "${hostname}": it resolves to a non-public destination (${address}).`,
         "url_private_host",
       );
     }

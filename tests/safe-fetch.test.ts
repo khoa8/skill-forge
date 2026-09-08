@@ -14,7 +14,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { safeFetch, pinnedLookup, assertPublicDns } from "../src/core/sources/safe-fetch.js";
-import { isGloballyReachable } from "../src/core/sources/ip-policy.js";
+import { isAllowedUrlDestinationIp } from "../src/core/sources/ip-policy.js";
 import type { LookupAllFn } from "../src/core/sources/url.js";
 
 /** TEST-NET-3 documentation address (public-range, never routed). */
@@ -175,13 +175,13 @@ describe("safeFetch end to end (local sockets, no external network)", () => {
   });
 });
 
-describe("isGloballyReachable invariants used by the transport", () => {
+describe("destination policy invariants used by the transport", () => {
   it("public addresses pass; private and special-purpose ranges fail closed", () => {
-    expect(isGloballyReachable(DOC_IP)).toBe(true);
-    expect(isGloballyReachable("127.0.0.1")).toBe(false);
-    expect(isGloballyReachable("169.254.169.254")).toBe(false);
-    expect(isGloballyReachable("192.0.2.1")).toBe(false); // TEST-NET-1
-    expect(isGloballyReachable("203.0.113.1")).toBe(false); // TEST-NET-3
-    expect(isGloballyReachable("100::1")).toBe(false); // discard-only
+    expect(isAllowedUrlDestinationIp(DOC_IP)).toBe(true);
+    expect(isAllowedUrlDestinationIp("127.0.0.1")).toBe(false);
+    expect(isAllowedUrlDestinationIp("169.254.169.254")).toBe(false);
+    expect(isAllowedUrlDestinationIp("192.0.2.1")).toBe(false); // TEST-NET-1
+    expect(isAllowedUrlDestinationIp("203.0.113.1")).toBe(false); // TEST-NET-3
+    expect(isAllowedUrlDestinationIp("100::1")).toBe(false); // discard-only
   });
 });

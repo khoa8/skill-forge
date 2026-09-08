@@ -9,7 +9,7 @@ import {
   MAX_URL_BYTES,
   type LookupAllFn,
 } from "../src/core/sources/url.js";
-import { isGloballyReachable } from "../src/core/sources/ip-policy.js";
+import { isAllowedUrlDestinationIp } from "../src/core/sources/ip-policy.js";
 
 type LookupFn = (hostname: string, options: { all: true; verbatim: true }) => Promise<LookupAddress[]>;
 
@@ -39,16 +39,16 @@ describe("URL safety guards", () => {
     expect(() => assertSafeUrl("https://user:pass@example.com/x")).toThrow(/credentials/);
   });
 
-  it("classifies refused hosts and non-global IPs", () => {
+  it("classifies refused hosts and non-public IPs", () => {
     expect(isRefusedHost("localhost")).toBe(true);
     expect(isRefusedHost("foo.localhost")).toBe(true);
     expect(isRefusedHost("box.internal")).toBe(true);
     expect(isRefusedHost("example.com")).toBe(false);
     for (const ip of ["127.0.0.1", "10.0.0.5", "192.168.1.2", "172.16.0.9", "169.254.1.1", "0.0.0.0", "192.0.2.1", "::1", "fe80::1", "fe90::1", "fd00::5", "::ffff:127.0.0.1", "::ffff:7f00:1"]) {
-      expect(isGloballyReachable(ip), ip).toBe(false);
+      expect(isAllowedUrlDestinationIp(ip), ip).toBe(false);
     }
     for (const ip of ["8.8.8.8", "1.1.1.1", "2606:4700::1111"]) {
-      expect(isGloballyReachable(ip), ip).toBe(true);
+      expect(isAllowedUrlDestinationIp(ip), ip).toBe(true);
     }
   });
 

@@ -26,7 +26,7 @@ import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
 import { safeFetch, type SafeResponse } from "./safe-fetch.js";
-import { isGloballyReachable } from "./ip-policy.js";
+import { isAllowedUrlDestinationIp } from "./ip-policy.js";
 
 /** DNS lookup shape used for SSRF validation and injection. */
 export interface LookupAllFn {
@@ -59,11 +59,11 @@ export function isRefusedHost(host: string): boolean {
     return true;
   }
   const ip = isIP(h) ? h : null;
-  if (ip) return !isGloballyReachable(ip);
+  if (ip) return !isAllowedUrlDestinationIp(ip);
   // IPv6 literal in brackets
   if (h.startsWith("[") && h.endsWith("]")) {
     const inner = h.slice(1, -1);
-    return isIP(inner) ? !isGloballyReachable(inner) : false;
+    return isIP(inner) ? !isAllowedUrlDestinationIp(inner) : false;
   }
   return false;
 }
@@ -231,7 +231,7 @@ export async function fetchUrlSource(
   async function assertHopSafe(url: URL): Promise<void> {
     if (isRefusedHost(url.hostname)) {
       throw new UrlSourceError(
-        `Refusing to fetch "${url.hostname}": private, loopback, or non-globally-reachable addresses are not allowed.`,
+        `Refusing to fetch "${url.hostname}": private, local, or otherwise non-public destinations are not allowed.`,
         "url_private_host",
       );
     }
@@ -246,9 +246,9 @@ export async function fetchUrlSource(
       throw new UrlSourceError(`No DNS records for "${url.hostname}".`, "url_dns_failure");
     }
     for (const { address } of addresses) {
-      if (!isGloballyReachable(address)) {
+      if (!isAllowedUrlDestinationIp(address)) {
         throw new UrlSourceError(
-          `Refusing to fetch "${url.hostname}": it resolves to a non-globally-reachable address (${address}).`,
+          `Refusing to fetch "${url.hostname}": it resolves to a non-public destination (${address}).`,
           "url_private_host",
         );
       }
