@@ -93,6 +93,9 @@ export function normalizeSource(input: SourceInput): NormalizedSource {
     // Adapter notes (truncation, redirects, skipped files) come first so the
     // normalization warnings read in ingestion order. Nothing is dropped.
     notes: [...(input.notes ?? []), ...notes],
+    // Codebase mode carries the structured repository analysis through the
+    // pipeline unchanged; every other source type has it absent.
+    repository: input.repository,
   };
 }
 

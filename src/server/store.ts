@@ -15,7 +15,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CanonicalSkill, SourceAnalysis, ValidationReport, SourceType } from "../core/types.js";
+import { CanonicalSkill, SourceAnalysis, ValidationReport, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { normalizeSource } from "../core/ingest.js";
 import { manifestFor } from "../core/build.js";
 
@@ -47,6 +47,9 @@ const StoredSkillSchema = z.object({
     /** Adapter ingestion notes (truncation, skipped files, redirects).
      * Optional for backwards compatibility with previously stored skills. */
     notes: z.array(z.string()).optional(),
+    /** Structured repository analysis for github-codebase sources.
+     * Optional for backwards compatibility with previously stored skills. */
+    repository: RepositoryAnalysis.optional(),
   }),
   validation: ValidationReport,
 });

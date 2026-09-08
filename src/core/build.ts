@@ -549,6 +549,22 @@ export function buildCanonicalSkill(
       sha256: source.sha256,
       lineCount: source.lineCount,
       notes: source.notes,
+      ...(source.repository
+        ? {
+            repository: {
+              url: source.repository.repository.url,
+              owner: source.repository.repository.owner,
+              name: source.repository.repository.name,
+              ref: source.repository.repository.ref,
+              mode: source.repository.mode,
+              inspectedFiles: source.repository.inspectedFiles,
+              treeBlobCount: source.repository.selection.treeBlobCount,
+              candidateCount: source.repository.selection.candidateCount,
+              selectedCount: source.repository.selection.selectedCount,
+              treeTruncated: source.repository.selection.treeTruncated,
+            },
+          }
+        : {}),
     }),
     purpose: "Machine-readable package manifest: source identity, gap list, file inventory with hashes.",
   });
@@ -581,6 +597,21 @@ export interface ManifestSourceInfo {
   sha256: string;
   lineCount: number;
   notes: string[];
+  /** Repository provenance for codebase-mode sources (manifest only — the
+   * full structured analysis lives in the persisted record, not the package). */
+  repository?: {
+    url: string;
+    owner: string;
+    name: string;
+    ref: string;
+    mode: "codebase";
+    inspectedFiles: string[];
+    /** Blob count in the tree vs how many were inspected. */
+    treeBlobCount: number;
+    candidateCount: number;
+    selectedCount: number;
+    treeTruncated: boolean;
+  };
 }
 
 /**
@@ -605,6 +636,7 @@ export function manifestFor(
       sha256: source.sha256,
       lineCount: source.lineCount,
       notes: source.notes,
+      ...(source.repository ? { repository: source.repository } : {}),
     },
     gaps: meta.gaps,
     files: files

@@ -159,6 +159,7 @@ export async function* runPipeline(
     const plan = await provider.generate({
       source: normalized,
       analysis,
+      repository: normalized.repository,
       requestedName: options.requestedName,
       signal: options.signal,
     });
