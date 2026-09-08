@@ -676,6 +676,31 @@ const repositoryProvenance = check("repository-provenance", "Repository provenan
       seen.add(p);
     }
   }
+  // Required count fields (re-audit P2-3): for a codebase manifest the
+  // boundedness record is mandatory, not optional — a missing field fails,
+  // it does not silently skip the consistency rules.
+  for (const [field, type] of [
+    ["treeBlobCount", "number"],
+    ["candidateCount", "number"],
+    ["selectedCount", "number"],
+  ] as const) {
+    const v = r[field];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+      outcomes.push(
+        fail(
+          `manifest.json source.repository.${field} is required and must be a non-negative integer (got ${JSON.stringify(v ?? null)}).`,
+          "manifest.json",
+        ),
+      );
+    }
+  }
+  if (typeof r.treeTruncated !== "boolean") {
+    outcomes.push(fail("manifest.json source.repository.treeTruncated is required and must be a boolean.", "manifest.json"));
+  }
+  if (!Array.isArray(r.inspectedFiles)) {
+    outcomes.push(fail("manifest.json source.repository.inspectedFiles is required and must be an array.", "manifest.json"));
+  }
+
   // Count consistency: selectedCount is the actually-inspected count.
   const numeric = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
   if (numeric(r.selectedCount) && Array.isArray(r.inspectedFiles) && r.selectedCount !== r.inspectedFiles.length) {
@@ -695,9 +720,6 @@ const repositoryProvenance = check("repository-provenance", "Repository provenan
     outcomes.push(
       fail(`manifest.json source.repository.treeBlobCount (${r.treeBlobCount}) is smaller than candidateCount (${r.candidateCount}).`, "manifest.json"),
     );
-  }
-  if (typeof r.treeTruncated !== "boolean") {
-    outcomes.push(fail("manifest.json source.repository.treeTruncated must be a boolean.", "manifest.json"));
   }
   return outcomes.length === 0 ? pass() : outcomes;
 });

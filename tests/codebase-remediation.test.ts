@@ -546,7 +546,7 @@ describe("P1-7: sensitive files are never ingested", () => {
 
 import { OpenAICompatibleProvider } from "../src/core/providers/openai-compatible.js";
 import { sampleRepositoryAnalysis } from "./codebase-model.test.js";
-import { repositoryContextJson, repositoryContextForProvider, REPOSITORY_CONTEXT_BUDGET } from "../src/core/codebase/provider-context.js";
+import { repositoryContextForProvider, REPOSITORY_CONTEXT_BUDGET } from "../src/core/codebase/provider-context.js";
 import type { RepositoryAnalysis } from "../src/core/types.js";
 import { PlanSchema } from "../src/core/plan.js";
 import { normalizeSource } from "../src/core/ingest.js";
@@ -1184,5 +1184,181 @@ describe("Re-audit P1-3: meta-instruction hardening", () => {
     ]) {
       expect(isMetaInstruction(hostile), hostile).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-audit P2-1 — scoped plan names its subtree explicitly
+// ---------------------------------------------------------------------------
+
+describe("Re-audit P2-1: scoped plans state their subtree; unscoped unchanged", () => {
+  it("scoped analysis produces subtree-explicit wording", () => {
+    const scoped: RepositoryAnalysis = {
+      ...buildRepositoryAnalysisFromCommandsFixture({
+        packageJson: JSON.stringify({ name: "web", scripts: { test: "vitest run" } }),
+        treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      }),
+      repository: {
+        url: "https://github.com/acme/monorepo",
+        owner: "acme",
+        name: "monorepo",
+        ref: "main",
+        scope: "packages/web",
+      },
+    };
+    const plan = PlanSchema.parse(deriveCodebasePlan(scoped));
+    expect(plan.whenToUse.join(" ")).toContain("`packages/web`");
+    expect(plan.whenToUse.join(" ")).toContain("must not be treated as whole-repository guidance");
+    expect(plan.description).toContain("`packages/web`");
+    expect(plan.pitfalls.join(" ")).toContain("`packages/web`");
+  });
+
+  it("unscoped plans keep their whole-repository wording", () => {
+    const unscoped = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "web", scripts: { test: "vitest run" } }),
+      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+    });
+    const plan = PlanSchema.parse(deriveCodebasePlan(unscoped));
+    expect(plan.whenToUse[0]).toContain("acme/fixture repository");
+    expect(plan.whenToUse.join(" ")).not.toContain("subtree");
+    expect(plan.description).not.toContain("subtree");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-audit P2-2 — provider repository context obeys a hard serialized bound
+// ---------------------------------------------------------------------------
+
+import { repositoryContextJson, MAX_REPOSITORY_CONTEXT_BYTES } from "../src/core/codebase/provider-context.js";
+
+function adversarialAnalysis(): RepositoryAnalysis {
+  const base = buildRepositoryAnalysisFromCommandsFixture({
+    packageJson: JSON.stringify({ name: "x", scripts: { test: "t" } }),
+    treeBaseNames: new Set(["package.json"]),
+  });
+  const long = (i: number, ch: string) => `${i}-${ch.repeat(400)}`;
+  return {
+    ...base,
+    repository: { url: "https://github.com/o/r", owner: "o", name: "r", ref: "r".repeat(400), scope: "s".repeat(400) },
+    commands: Array.from({ length: 40 }, (_, i) => ({ purpose: "other" as const, command: long(i, "c"), evidence: long(i, "e") })),
+    conventions: Array.from({ length: 40 }, (_, i) => ({ statement: long(i, "v"), evidence: [long(i, "f")] })),
+    entrypoints: Array.from({ length: 40 }, (_, i) => ({ path: long(i, "p"), reason: long(i, "r") })),
+    importantFiles: Array.from({ length: 40 }, (_, i) => ({ path: long(i, "p"), reason: long(i, "i") })),
+    languages: Array.from({ length: 40 }, (_, i) => ({ name: long(i, "l"), evidence: [long(i, "e")] })),
+    frameworks: Array.from({ length: 40 }, (_, i) => ({ name: long(i, "f"), evidence: [long(i, "e")] })),
+    manifests: Array.from({ length: 40 }, (_, i) => ({ path: long(i, "m"), kind: long(i, "k"), fetched: true })),
+    inspectedFiles: Array.from({ length: 200 }, (_, i) => long(i, "p")),
+    testing: { frameworks: [long(0, "t")], relevantFiles: Array.from({ length: 40 }, (_, i) => long(i, "t")) },
+    structure: { sourceRoots: [long(0, "r")], testRoots: [], exampleRoots: [], packages: Array.from({ length: 40 }, (_, i) => long(i, "p")) },
+    uncertainty: Array.from({ length: 12 }, (_, i) => `uncertainty ${i} — the analysis was bounded and parts were not inspected. ${"u".repeat(300)}`),
+  };
+}
+
+describe("Re-audit P2-2: provider context hard byte ceiling", () => {
+  it("adversarially long fields stay under the cap, valid, deterministic, boundedness preserved", () => {
+    const analysis = adversarialAnalysis();
+    const json = repositoryContextJson(analysis);
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(MAX_REPOSITORY_CONTEXT_BYTES);
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const bounded = parsed.boundedSelection as Record<string, unknown>;
+    expect(bounded.candidateCount).toBe(analysis.selection.candidateCount);
+    expect(bounded.treeTruncated).toBe(false);
+    expect((parsed.uncertainty as unknown[]).length).toBeGreaterThan(0);
+    expect((parsed.repository as Record<string, unknown>).ref).toBeDefined();
+    expect(repositoryContextJson(analysis)).toBe(json);
+  });
+
+  it("a normally-sized analysis is not reduced", () => {
+    const json = repositoryContextJson(buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
+      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+    }));
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(MAX_REPOSITORY_CONTEXT_BYTES);
+    expect((JSON.parse(json) as { boundedSelection: { inspectedFilesOmitted: number } }).boundedSelection.inspectedFilesOmitted).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-audit P2-3 — mandatory provenance count fields
+// ---------------------------------------------------------------------------
+
+import { RepositoryAnalysis as RASchema } from "../src/core/types.js";
+
+describe("Re-audit P2-3: provenance count fields are mandatory and consistency-checked", () => {
+  function skillWithManifestPatch(patch: (repo: Record<string, unknown>) => void) {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
+      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+    });
+    const normalized = normalizeSource({
+      type: "github-codebase",
+      name: "acme/fixture codebase",
+      content: `# package.json\n\n${JSON.stringify({ name: "x", scripts: { test: "vitest run" } }, null, 2)}\n`,
+      repository: analysis,
+    });
+    const skill = buildCanonicalSkill(normalized, analyzeSource(normalized), PlanSchema.parse({ name: "fixture" }), "mock");
+    const manifestFile = skill.files.find((f) => f.path === "manifest.json")!;
+    const manifest = JSON.parse(manifestFile.content) as { source: { repository: Record<string, unknown> } };
+    patch(manifest.source.repository);
+    manifestFile.content = JSON.stringify(manifest, null, 2) + "\n";
+    return validatePackage({ skill, sourceText: normalized.text, sourceType: "github-codebase" });
+  }
+
+  it("deleting each required field fails repository-provenance", () => {
+    for (const field of ["treeBlobCount", "candidateCount", "selectedCount", "treeTruncated", "inspectedFiles"]) {
+      const report = skillWithManifestPatch((repo) => {
+        delete repo[field];
+      });
+      expect(report.passed, `deleting ${field} must fail`).toBe(false);
+      expect(
+        report.checks.some((c) => c.id === "repository-provenance" && c.status === "fail" && c.message?.includes(field)),
+        `expected a repository-provenance failure naming ${field}`,
+      ).toBe(true);
+    }
+  });
+
+  it("wrong-typed count values fail", () => {
+    for (const [field, value] of [
+      ["treeBlobCount", -1],
+      ["candidateCount", 2.5],
+      ["selectedCount", "3"],
+      ["treeTruncated", "yes"],
+      ["inspectedFiles", "package.json"],
+    ] as const) {
+      const report = skillWithManifestPatch((repo) => {
+        (repo as Record<string, unknown>)[field] = value;
+      });
+      expect(report.passed, `${field}=${String(value)} must fail`).toBe(false);
+    }
+  });
+
+  it("inconsistent count relationships fail", () => {
+    // selectedCount != inspectedFiles.length
+    expect(skillWithManifestPatch((r) => { r.selectedCount = 99; }).passed).toBe(false);
+    // candidateCount < selectedCount
+    expect(skillWithManifestPatch((r) => { r.candidateCount = 0; }).passed).toBe(false);
+    // treeBlobCount < candidateCount
+    expect(skillWithManifestPatch((r) => { r.treeBlobCount = 0; }).passed).toBe(false);
+    // duplicate inspectedFiles
+    expect(
+      skillWithManifestPatch((r) => {
+        r.inspectedFiles = ["package.json", "package.json"];
+      }).passed,
+    ).toBe(false);
+  });
+
+  it("schema parse enforces array caps on real analyses (bounded model)", () => {
+    // A real, schema-valid fixture parses.
+    const real = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
+      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+    });
+    expect(RASchema.safeParse(real).success).toBe(true);
+    // Exceeding any schema cap (inspectedFiles > 200) is rejected at parse.
+    const overCaps = {
+      ...real,
+      inspectedFiles: Array.from({ length: 201 }, (_, i) => `f-${i}`),
+    };
+    expect(RASchema.safeParse(overCaps).success).toBe(false);
   });
 });

@@ -39,9 +39,16 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
     "unrecognized stack";
 
   // --- whenToUse
+  // Scope honesty (re-audit P2-1): a scoped request describes its subtree
+  // explicitly and must never read as whole-repository guidance.
+  const scopeLabel = repository.scope
+    ? ` This skill covers the \`${repository.scope}\` subtree only — it must not be treated as whole-repository guidance.`
+    : "";
   const whenToUse: string[] = [
-    `Working as a coding agent in the ${repository.owner}/${repository.name} repository (ref \`${repository.ref}\`) — ${stackLabel} project.`,
-    `Applies when modifying, debugging, reviewing, or testing this codebase; guidance below comes from a bounded, prioritized inspection of ${selection.selectedCount} of ${selection.candidateCount} eligible files (repository tree lists ${selection.treeBlobCount} files${selection.treeTruncated ? ", tree listing truncated" : ""}).`,
+    repository.scope
+      ? `Working as a coding agent in the \`${repository.scope}\` subtree of ${repository.owner}/${repository.name} (ref \`${repository.ref}\`) — ${stackLabel} project.${scopeLabel}`
+      : `Working as a coding agent in the ${repository.owner}/${repository.name} repository (ref \`${repository.ref}\`) — ${stackLabel} project.`,
+    `Applies when modifying, debugging, reviewing, or testing ${repository.scope ? `this subtree` : "this codebase"}; guidance below comes from a bounded, prioritized inspection of ${selection.selectedCount} of ${selection.candidateCount} eligible files (repository tree lists ${selection.treeBlobCount} files${selection.treeTruncated ? ", tree listing truncated" : ""}).`,
   ];
   if (entrypoints.length > 0) {
     whenToUse.push(`Main entrypoints: ${entrypoints.slice(0, 3).map((e) => `\`${e.path}\``).join(", ")}.`);
@@ -115,9 +122,12 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
   for (const u of repo.uncertainty.slice(0, 4)) {
     pitfalls.push(u.endsWith(".") ? u : `${u}.`);
   }
+  if (repository.scope) {
+    pitfalls.push(`This skill was generated from the \`${repository.scope}\` subtree only; repository areas outside that scope were not analyzed and may differ.`);
+  }
 
   const name = slugify(requestedName?.trim() || `${repository.owner}-${repository.name}`, 48);
-  const description = `Coding-agent guidance for ${repository.owner}/${repository.name}: ${stackLabel} project with ${commands.length} evidenced command(s) and ${conventions.length} convention(s), derived from a bounded inspection of ${selection.selectedCount} file(s).`.slice(0, 1024);
+  const description = `Coding-agent guidance for ${repository.scope ? `the \`${repository.scope}\` subtree of ` : ""}${repository.owner}/${repository.name}: ${stackLabel} project with ${commands.length} evidenced command(s) and ${conventions.length} convention(s), derived from a bounded inspection of ${selection.selectedCount} file(s)${repository.scope ? "; not whole-repository guidance" : ""}.`.slice(0, 1024);
 
   return {
     name,
