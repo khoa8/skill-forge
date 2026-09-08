@@ -86,7 +86,7 @@ export const CODEBASE_EXTENSIONS = new Set([
   ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
   // structured config / data
   ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-  ".xml", ".properties", ".env",
+  ".xml", ".properties",
   // docs / text
   ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc",
   // web & misc
@@ -99,9 +99,34 @@ export const CODEBASE_BASENAMES = new Set([
   "makefile", "dockerfile", "codeowners", "license", "notice", "contributing",
   "readme", "changelog", "cmakelists.txt",
   ".gitignore", ".dockerignore", ".editorconfig", ".gitattributes",
-  ".npmrc", ".nvmrc", ".node-version", ".python-version", ".ruby-version",
+  ".nvmrc", ".node-version", ".python-version", ".ruby-version",
   ".tool-versions", ".prettierrc", ".eslintrc", ".babelrc",
 ]);
+
+/**
+ * Known secret-bearing files: never fetched, never inspected (P1-7). Public
+ * repositories can accidentally contain committed credentials — a filename
+ * gate is deterministic and cheap, and presence stays tree-metadata-only.
+ * Keep this list conservative and exact (no wildcards beyond .env.*).
+ */
+const SENSITIVE_BASENAMES = new Set([
+  ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".yarnrc.yml",
+  "credentials.json", "service-account.json", "serviceaccountkey.json",
+  "secrets.yaml", "secrets.yml",
+]);
+const KEY_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"]);
+
+export function isSensitivePath(path: string): boolean {
+  const segments = path.split("/");
+  const base = (segments[segments.length - 1] ?? "").toLowerCase();
+  // Dotenv variants: .env, .env.local, .env.production, …
+  if (base === ".env" || base.startsWith(".env.")) return true;
+  if (SENSITIVE_BASENAMES.has(base)) return true;
+  const dot = base.lastIndexOf(".");
+  if (dot !== -1 && KEY_EXTENSIONS.has(base.slice(dot))) return true;
+  if (/^id_rsa|^id_dsa|^id_ed25519/.test(base)) return true;
+  return false;
+}
 
 /** Lockfiles and checksum files: useful as ecosystem evidence from tree
  * metadata, but never fetched — they would consume the deep-analysis budget
@@ -135,6 +160,7 @@ export type CodebaseExclusionReason =
   | "outside_path_scope"
   | "skip_dir"
   | "too_deep"
+  | "sensitive_file"
   | "extension_not_allowed"
   | "generated_or_minified"
   | "lockfile_metadata_only";
@@ -158,6 +184,7 @@ export function codebaseExclusionReason(
   const dot = base.lastIndexOf(".");
   const ext = dot === -1 ? "" : base.slice(dot).toLowerCase();
   const baseKey = base.toLowerCase();
+  if (isSensitivePath(entry.path)) return "sensitive_file";
   const allowed =
     (dot > 0 && CODEBASE_EXTENSIONS.has(ext)) || CODEBASE_BASENAMES.has(baseKey);
   if (!allowed) return "extension_not_allowed";
@@ -662,6 +689,7 @@ export async function fetchGithubCodebaseSource(
     const eligible: TreeEntryLike[] = [];
     let skippedUnsafe = 0;
     let skippedSubmodules = 0;
+    let skippedSensitive = 0;
     for (const entry of allEntries) {
       const reason = codebaseExclusionReason(entry, { maxDepth, pathScope: ref0.path });
       if (reason === null) {
@@ -670,10 +698,17 @@ export async function fetchGithubCodebaseSource(
         skippedSubmodules++;
       } else if (reason === "unsafe_path") {
         skippedUnsafe++;
+      } else if (reason === "sensitive_file") {
+        skippedSensitive++;
       }
     }
     if (skippedSubmodules > 0) {
       notes.push(`Skipped ${skippedSubmodules} submodule(s) — submodules are never followed.`);
+    }
+    if (skippedSensitive > 0) {
+      notes.push(
+        `Excluded ${skippedSensitive} sensitive file(s) (credential-bearing names such as .env, .npmrc) from ingestion — presence is tree metadata only, content is never fetched.`,
+      );
     }
 
     // 4. Deterministic ranked selection with a diversity cap.
@@ -797,6 +832,11 @@ export async function fetchGithubCodebaseSource(
         name: ref0.repo,
         ref,
         scope: ref0.path === "" ? undefined : ref0.path,
+        treeBaseNames: new Set(
+          allEntries
+            .filter((e) => e.type === "blob")
+            .map((e) => (e.path.split("/").pop() ?? "").toLowerCase()),
+        ),
         languages: detectLanguages(scopedEntries),
         ecosystems: detectEcosystems(scopedEntries),
         manifests: detectManifests(scopedEntries, inspectedSet),

@@ -327,11 +327,15 @@ describe("P1-3: RepositoryManifest.fetched reflects actual inspection", () => {
     });
     const plan = deriveCodebasePlan(r.analysis);
     const inputs = plan.inputs.join(" ");
+    // Only actually-inspected manifests appear as inspected inputs.
     expect(inputs).toContain("`package.json`");
     expect(inputs).toContain("`libs/core/package.json`");
-    expect(inputs).not.toContain("apps/web/package.json");
-    expect(inputs).not.toContain("apps/api/package.json");
-    expect(inputs).not.toContain("package-lock.json");
+    expect(inputs).not.toContain("`apps/web/package.json`");
+    expect(inputs).not.toContain("`apps/api/package.json`");
+    // The lockfile may only appear as package-manager EVIDENCE (it is real,
+    // deterministic tree metadata), never as an inspected manifest list entry.
+    const manifestList = inputs.match(/manifests: ([^.]+)\./)?.[1] ?? "";
+    expect(manifestList).not.toContain("package-lock.json");
   });
 });
 
@@ -386,5 +390,150 @@ describe("P2-1: inspection accounting is internally consistent", () => {
     expect(r.analysis.selection.selectedCount).toBe(2);
     expect(r.analysis.selection.candidateCount).toBe(6);
     expect(r.analysis.uncertainty.join(" ")).toContain("4 of 6 eligible files were not inspected");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-5 — package-manager evidence grounding
+// ---------------------------------------------------------------------------
+
+import { detectPackageManager, commandsFromPackageJson, installCommandFromPackageManager, type FetchedFile } from "../src/core/codebase/extract.js";
+
+const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}): FetchedFile => ({
+  path: "package.json",
+  content: JSON.stringify({ name: "x", scripts, ...extra }),
+});
+
+describe("P1-5: package-manager detection is evidence-only", () => {
+  it("detects npm / pnpm / yarn / bun from their respective evidence", () => {
+    // packageManager field.
+    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "pnpm@9.1.0" }))?.name).toBe("pnpm");
+    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "yarn@4.1.0" }))?.name).toBe("yarn");
+    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "bun@1.1.0" }))?.name).toBe("bun");
+    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "npm@10.0.0" }))?.name).toBe("npm");
+    // Lockfile presence.
+    expect(detectPackageManager(new Set(["package-lock.json"]), [], undefined)?.name).toBe("npm");
+    expect(detectPackageManager(new Set(["pnpm-lock.yaml"]), [], undefined)?.name).toBe("pnpm");
+    expect(detectPackageManager(new Set(["yarn.lock"]), [], undefined)?.name).toBe("yarn");
+    expect(detectPackageManager(new Set(["bun.lockb"]), [], undefined)?.name).toBe("bun");
+    // CI install commands.
+    expect(detectPackageManager(new Set(), ["pnpm install --frozen-lockfile"], undefined)?.name).toBe("pnpm");
+    expect(detectPackageManager(new Set(), ["yarn install --immutable"], undefined)?.name).toBe("yarn");
+    expect(detectPackageManager(new Set(), ["bun install"], undefined)?.name).toBe("bun");
+  });
+
+  it("invents no runner when evidence is absent or ambiguous", () => {
+    // No evidence at all.
+    expect(detectPackageManager(new Set(), [], undefined)).toBeNull();
+    // Conflicting lockfiles → ambiguous → null.
+    expect(detectPackageManager(new Set(["package-lock.json", "yarn.lock"]), [], undefined)).toBeNull();
+    // Conflicting CI commands → null.
+    expect(detectPackageManager(new Set(), ["npm ci", "pnpm i"], undefined)).toBeNull();
+  });
+
+  it("expresses scripts through the evidenced manager; npm test stays npm test", () => {
+    const { commands } = commandsFromPackageJson(
+      [pkg({ test: "vitest run", build: "tsc" })],
+      { name: "pnpm", evidence: "pnpm-lock.yaml in the repository tree (lockfile)" },
+    );
+    expect(commands.find((c) => c.purpose === "test")?.command).toBe("pnpm run test");
+    expect(commands.find((c) => c.purpose === "build")?.command).toBe("pnpm run build");
+    const npm = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "npm", evidence: "package-lock.json" });
+    expect(npm.commands.find((c) => c.purpose === "test")?.command).toBe("npm test");
+    const yarn = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "yarn", evidence: "yarn.lock" });
+    expect(yarn.commands.find((c) => c.purpose === "test")?.command).toBe("yarn run test");
+    const bun = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "bun", evidence: "bun.lockb" });
+    expect(bun.commands.find((c) => c.purpose === "test")?.command).toBe("bun run test");
+  });
+
+  it("lifecycle scripts never become dependency-install commands", () => {
+    const { commands } = commandsFromPackageJson(
+      [pkg({ prepare: "husky", postinstall: "echo done", install: "node scripts/setup.js", test: "vitest run" })],
+      { name: "npm", evidence: "package-lock.json" },
+    );
+    expect(commands.filter((c) => c.purpose === "install")).toEqual([]);
+    expect(commands.find((c) => c.evidence.includes("scripts.prepare"))).toBeUndefined();
+    expect(commands.find((c) => c.evidence.includes("scripts.postinstall"))).toBeUndefined();
+    // The only install command comes from the manager evidence itself.
+    const install = installCommandFromPackageManager({ name: "npm", evidence: "package-lock.json" });
+    expect(install).toMatchObject({ purpose: "install", command: "npm ci", evidence: "package-lock.json" });
+  });
+
+  it("with no evidence, no runner and no install command are produced", () => {
+    const { commands } = commandsFromPackageJson([pkg({ test: "vitest run" })], null);
+    // No invented `npm run test`; the script definition rides as evidence only.
+    expect(commands.find((c) => c.purpose === "test")?.command).toBe('package.json defines script "test"');
+    expect(installCommandFromPackageManager(null)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-7 — sensitive-file exclusion
+// ---------------------------------------------------------------------------
+
+import { isSensitivePath, codebaseExclusionReason } from "../src/core/sources/github-codebase.js";
+
+describe("P1-7: sensitive files are never ingested", () => {
+  it("identifies credential-bearing filenames deterministically", () => {
+    for (const p of [
+      ".env", ".env.local", ".env.production",
+      ".npmrc", ".pypirc", ".netrc", ".git-credentials",
+      "server.pem", "private.key", "keystore.p12", "cert.pfx", "app.jks",
+      "id_rsa", "id_ed25519", "config/service-account.json",
+    ]) {
+      expect(isSensitivePath(p), p).toBe(true);
+    }
+    for (const p of ["env.ts", ".envrc.example.md", "src/env.ts", "npmrc.md", "keys.ts"]) {
+      expect(isSensitivePath(p), p).toBe(false);
+    }
+  });
+
+  it("excludes them from eligibility with a distinct reason", () => {
+    expect(codebaseExclusionReason({ path: ".env", type: "blob" }, { maxDepth: 10, pathScope: "" })).toBe("sensitive_file");
+    expect(codebaseExclusionReason({ path: ".npmrc", type: "blob" }, { maxDepth: 10, pathScope: "" })).toBe("sensitive_file");
+    expect(codebaseExclusionReason({ path: "config/deploy.pem", type: "blob" }, { maxDepth: 10, pathScope: "" })).toBe("sensitive_file");
+  });
+
+  it("keeps them out of fetched content, inspectedFiles, and provider-visible source", async () => {
+    const tree: Record<string, unknown>[] = [
+      { path: "README.md", type: "blob", size: 60 },
+      { path: ".env", type: "blob", size: 90 },
+      { path: ".npmrc", type: "blob", size: 40 },
+      { path: "config/secrets.yaml", type: "blob", size: 50 },
+    ];
+    const raw: Record<string, string> = {
+      "README.md": "# Repo\n\nSensitive-exclusion fixture repository.\n",
+      ".env": "API_KEY=supersecret-do-not-leak\nDATABASE_URL=postgres://user:pass@host/db\n",
+      ".npmrc": "//registry.npmjs.org/:_authToken=npm_secrettoken\n",
+      "config/secrets.yaml": "password: hunter2-secret\n",
+    };
+    const impl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+        return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("/git/trees/")) {
+        return new Response(JSON.stringify({ sha: "x", truncated: false, tree }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+        const body = raw[p];
+        const res = new Response(body ?? "not found", { status: body !== undefined ? 200 : 404, headers: { "content-type": "text/plain" } });
+        Object.defineProperty(res, "url", { value: url });
+        return res;
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/secrets-leak", { fetchImpl: impl });
+    const all = `${r.input.content} ${r.analysis.inspectedFiles.join(" ")}`;
+    expect(all).not.toContain("supersecret-do-not-leak");
+    expect(all).not.toContain("npm_secrettoken");
+    expect(all).not.toContain("hunter2-secret");
+    expect(r.analysis.inspectedFiles).not.toContain(".env");
+    expect(r.analysis.inspectedFiles).not.toContain(".npmrc");
+    expect(r.notes.join(" ")).toContain("sensitive file(s)");
+    // No raw fetches for sensitive paths.
+    expect(r.notes.join(" ")).not.toContain('".env"');
   });
 });

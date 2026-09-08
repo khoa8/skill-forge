@@ -100,9 +100,75 @@ export function scriptPurpose(name: string): RepositoryCommand["purpose"] {
   return "other";
 }
 
-/** Commands from package.json scripts (root and workspaces). */
+/**
+ * Package-manager evidence, in priority order (P1-5): an explicit
+ * `packageManager` field, the repository's lockfile(s), or the install
+ * commands observed in CI run steps. Returns null when nothing evidences a
+ * runner — callers must then NOT invent one.
+ */
+export function detectPackageManager(
+  treeBaseNames: Set<string>,
+  ciInstallCommands: string[],
+  packageJson?: FetchedFile,
+): { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string } | null {
+  // 1. Explicit packageManager field (strongest evidence).
+  if (packageJson) {
+    try {
+      const raw = JSON.parse(packageJson.content) as Record<string, unknown>;
+      const pm = typeof raw.packageManager === "string" ? raw.packageManager : "";
+      const m = pm.match(/^(npm|pnpm|yarn|bun)@/);
+      if (m) {
+        return { name: m[1] as "npm" | "pnpm" | "yarn" | "bun", evidence: `${packageJson.path} packageManager: ${pm.slice(0, 80)}` };
+      }
+    } catch {
+      // malformed manifest — fall through to weaker evidence
+    }
+  }
+  // 2. Lockfile presence (mutually exclusive lockfiles name the manager).
+  const lockfiles: Array<[string, "npm" | "pnpm" | "yarn" | "bun"]> = [
+    ["package-lock.json", "npm"],
+    ["pnpm-lock.yaml", "pnpm"],
+    ["yarn.lock", "yarn"],
+    ["bun.lockb", "bun"],
+    ["bun.lock", "bun"],
+  ];
+  const present = lockfiles.filter(([lock]) => treeBaseNames.has(lock));
+  if (present.length === 1) {
+    return { name: present[0]![1], evidence: `${present[0]![0]} in the repository tree (lockfile)` };
+  }
+  // 3. CI install commands (only when unambiguous).
+  const ciMatches = ciInstallCommands
+    .map((c) => c.match(/^(npm ci|npm install|pnpm install|pnpm i( |$)|yarn install|yarn( |$)|bun install|bun i( |$))/)?.[0])
+    .filter((x): x is string => x !== undefined);
+  const pmNames = new Set(
+    ciMatches.map((c) => (c.startsWith("npm") ? "npm" : c.startsWith("pnpm") ? "pnpm" : c.startsWith("yarn") ? "yarn" : "bun")),
+  );
+  if (pmNames.size === 1) {
+    const name = [...pmNames][0] as "npm" | "pnpm" | "yarn" | "bun";
+    return { name, evidence: `CI install step "${ciMatches[0]}"` };
+  }
+  return null;
+}
+
+/** Lifecycle scripts run automatically on install events — never presented as
+ * dependency-install commands the agent should run (P1-5). */
+const LIFECYCLE_SCRIPTS = new Set(["prepare", "postinstall", "preinstall", "install", "prepublish", "prepublishOnly"]);
+
+/** The install command form for an evidenced package manager. */
+const INSTALL_FORM: Record<"npm" | "pnpm" | "yarn" | "bun", string> = {
+  npm: "npm ci",
+  pnpm: "pnpm install --frozen-lockfile",
+  yarn: "yarn install --immutable",
+  bun: "bun install",
+};
+
+/** Commands from package.json scripts (root and workspaces). Scripts are
+ * expressed through the evidenced package manager only; lifecycle scripts are
+ * never converted into dependency-install commands; with no package-manager
+ * evidence, scripts are recorded only by their raw definition (runner absent). */
 export function commandsFromPackageJson(
   files: FetchedFile[],
+  packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string } | null,
 ): { commands: RepositoryCommand[]; frameworks: RepositoryClaim[]; testing: string[] } {
   const commands: RepositoryCommand[] = [];
   const frameworkClaims: RepositoryClaim[] = [];
@@ -122,9 +188,23 @@ export function commandsFromPackageJson(
       for (const [key, value] of Object.entries(scripts as Record<string, unknown>)) {
         if (typeof value !== "string" || value.trim().length === 0) continue;
         if (commands.length >= 30) break;
+        const purpose = scriptPurpose(key);
+        if (LIFECYCLE_SCRIPTS.has(key)) {
+          // Lifecycle scripts run automatically during install; the only
+          // honest install command is the package manager's own install form
+          // (added separately from explicit evidence). Record nothing here.
+          continue;
+        }
         commands.push({
-          purpose: scriptPurpose(key),
-          command: key === "test" ? "npm test" : `npm run ${key}`,
+          purpose,
+          // Without runner evidence the script is still real, but the runner
+          // is not: keep the definition as evidence rather than inventing
+          // `npm run`. Callers render it as the script name with evidence.
+          command: packageManager
+            ? key === "test" && packageManager.name === "npm"
+              ? "npm test"
+              : `${packageManager.name} run ${key}`
+            : `${file.path} defines script "${key}"`,
           evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"`,
         });
       }
@@ -153,6 +233,21 @@ export function commandsFromPackageJson(
   }
   frameworkClaims.sort((a, b) => a.name.localeCompare(b.name));
   return { commands: commands.slice(0, 30), frameworks: frameworkClaims.slice(0, 16), testing: [...testingFrameworks].sort() };
+}
+
+/** The evidenced dependency-install command, when a package manager is known.
+ * Conservative: only the manager's deterministic frozen/immutable install
+ * form, citing the evidence that named the manager. Without evidence this
+ * returns nothing — no runner is invented (P1-5). */
+export function installCommandFromPackageManager(
+  packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string } | null,
+): RepositoryCommand | null {
+  if (!packageManager) return null;
+  return {
+    purpose: "install",
+    command: INSTALL_FORM[packageManager.name],
+    evidence: packageManager.evidence,
+  };
 }
 
 /**
@@ -370,6 +465,9 @@ export interface AnalysisFromFilesInput {
   ref: string;
   /** Subpath scope the analysis covers; undefined = whole repository. */
   scope?: string;
+  /** Lowercased basenames present in the repository tree — used for
+   * package-manager lockfile evidence (never for content claims). */
+  treeBaseNames?: Set<string>;
   /** Reconnaissance results from the tree (already computed). */
   languages: RepositoryAnalysis["languages"];
   ecosystems: string[];
@@ -393,7 +491,19 @@ export function buildRepositoryAnalysisFromFiles(
   input: AnalysisFromFilesInput,
   uncertainty: string[],
 ): RepositoryAnalysis {
-  const { commands, frameworks: depFrameworks, testing: depTesting } = commandsFromPackageJson(input.fetched);
+  // Package-manager evidence: CI install steps first (they may name the
+  // runner), then the tree lockfiles via input.treeBaseNames + the root
+  // package.json's packageManager field.
+  const ciCommandsRaw = commandsFromCiWorkflows(input.fetched);
+  const ciInstallCommands = ciCommandsRaw
+    .filter((c) => c.purpose === "install")
+    .map((c) => c.command);
+  const rootPackageJson = input.fetched.find(
+    (f) => (f.path.split("/").pop() ?? "").toLowerCase() === "package.json",
+  );
+  const packageManager = detectPackageManager(input.treeBaseNames ?? new Set(), ciInstallCommands, rootPackageJson);
+  const { commands, frameworks: depFrameworks, testing: depTesting } = commandsFromPackageJson(input.fetched, packageManager);
+
   // Python ecosystem evidence (pyproject.toml has no scripts; frameworks only).
   let pyFrameworks: RepositoryClaim[] = [];
   for (const file of input.fetched) {
@@ -402,11 +512,19 @@ export function buildRepositoryAnalysisFromFiles(
     pyFrameworks = py.frameworks;
     depTesting.push(...py.testing);
   }
-  const ciCommands = commandsFromCiWorkflows(input.fetched);
-  // Manifest commands first (authoritative), CI commands as corroboration.
+  // The evidenced install command replaces raw CI install steps (a CI
+  // `npm ci` is corroboration, not a distinct command worth listing twice).
+  const installCommand = installCommandFromPackageManager(packageManager);
+  const ciCommands = packageManager
+    ? ciCommandsRaw.filter((c) => c.purpose !== "install")
+    : ciCommandsRaw;
+  // Manifest commands first (authoritative), then the evidenced install
+  // command, then CI commands as corroboration.
   const seenCommands = new Set<string>();
   const commandsOut: RepositoryCommand[] = [];
-  for (const c of [...commands, ...ciCommands]) {
+  for (const c of [installCommand, ...commands, ...ciCommands].filter(
+    (c): c is RepositoryCommand => c !== null,
+  )) {
     const key = `${c.purpose}::${c.command}`;
     if (seenCommands.has(key)) continue;
     seenCommands.add(key);

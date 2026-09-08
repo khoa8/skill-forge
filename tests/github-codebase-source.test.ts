@@ -201,15 +201,18 @@ describe("fetchGithubCodebaseSource (Fixture A — TypeScript service)", () => {
       kind: "lockfile",
       fetched: false,
     });
-    // Commands come from package.json scripts + CI (never invented).
+    // Commands come from package.json scripts + CI (never invented). Scripts
+    // run through the evidenced package manager (lockfile present → npm).
     const commands = analysis.commands;
     expect(commands.find((c) => c.purpose === "test" && c.command === "npm test")).toMatchObject({
       evidence: expect.stringContaining("package.json scripts.test"),
     });
     expect(commands.find((c) => c.purpose === "typecheck")).toBeTruthy();
-    expect(commands.find((c) => c.purpose === "install" && c.command === "npm ci")).toMatchObject({
-      evidence: expect.stringContaining(".github/workflows/ci.yml"),
-    });
+    const install = commands.find((c) => c.purpose === "install" && c.command === "npm ci");
+    expect(install).toBeTruthy();
+    // Install evidence names the manager, not a lifecycle script.
+    expect(install!.evidence).toMatch(/package-lock\.json|\.github\/workflows\/ci\.yml/);
+    expect(analysis.commands.every((c) => !c.evidence.includes("scripts.prepare"))).toBe(true);
     // Framework claims carry dependency evidence.
     expect(analysis.frameworks.find((f) => f.name === "Fastify")?.evidence[0]).toContain("package.json dependencies: fastify");
     // Testing evidence.
