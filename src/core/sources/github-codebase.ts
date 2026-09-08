@@ -23,7 +23,7 @@
  * without any live GitHub traffic.
  */
 import type { RepositoryAnalysis } from "../types.js";
-import { isSafeRepoPath } from "./github.js";
+import { isSafeRepoPath, parseGithubRepoUrl, GithubSourceError } from "./github.js";
 
 // ---------------------------------------------------------------------------
 // Hard limits (independent of documentation mode; exported for tests)
@@ -506,4 +506,266 @@ export function detectEntrypointCandidates(entries: TreeEntryLike[]): { path: st
           ? "entrypoint-named file under a source root"
           : "entrypoint-named file",
     }));
+}
+
+// ---------------------------------------------------------------------------
+// Networked ingestion (Phase 5 — bounded fetching + full codebase pipeline)
+// ---------------------------------------------------------------------------
+
+import {
+  API_HOST,
+  apiFetch,
+  readBodyWithDeadline,
+  fetchRawFile,
+  combinedChunkBytes,
+  combinedFileChunk,
+} from "./github.js";
+import { buildRepositoryAnalysisFromFiles } from "../codebase/extract.js";
+
+export interface FetchGithubCodebaseOptions {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  /** Hard budget for the whole ingestion. Default 90 s; when exceeded a typed
+   * codebase_deadline_exceeded error is thrown and in-flight fetches abort. */
+  overallTimeoutMs?: number;
+  maxFiles?: number;
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
+  maxDepth?: number;
+  /** Optional GitHub API token; sent only to api.github.com. */
+  token?: string;
+}
+
+export interface GithubCodebaseSourceResult {
+  /** Combined inert text of the selected files (same `# path` header
+   * convention as the other adapters) — the SourceInput.content. */
+  input: {
+    type: "github-codebase";
+    name: string;
+    content: string;
+    repository: RepositoryAnalysis;
+  };
+  repo: { owner: string; repo: string; ref: string; defaultBranchUsed: boolean };
+  files: { path: string; content: string }[];
+  notes: string[];
+  analysis: RepositoryAnalysis;
+}
+
+interface GithubTreePayload {
+  tree?: TreeEntryLike[];
+  truncated?: boolean;
+}
+
+/**
+ * Ingest a public GitHub repository as a codebase:
+ * repo metadata → recursive tree (bounded) → eligibility/safety filtering →
+ * deterministic ranked selection (diversity-capped) → bounded raw-content
+ * fetches → structured RepositoryAnalysis + combined inert text.
+ */
+export async function fetchGithubCodebaseSource(
+  rawUrl: string,
+  opts: FetchGithubCodebaseOptions = {},
+): Promise<GithubCodebaseSourceResult> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? CODEBASE_TIMEOUT_MS;
+  const overallTimeoutMs = opts.overallTimeoutMs ?? CODEBASE_OVERALL_TIMEOUT_MS;
+  const deadline = AbortSignal.timeout(overallTimeoutMs);
+  const maxFiles = opts.maxFiles ?? MAX_CODEBASE_FILES;
+  const maxFileBytes = opts.maxFileBytes ?? MAX_CODEBASE_FILE_BYTES;
+  const maxTotalBytes = opts.maxTotalBytes ?? MAX_CODEBASE_TOTAL_BYTES;
+  const maxDepth = opts.maxDepth ?? MAX_CODEBASE_DEPTH;
+  const token = opts.token ?? (process.env.SKILLFORGE_GITHUB_TOKEN?.trim() || undefined);
+
+  // Reuse the documentation adapter's URL parsing — same URL grammar.
+  const ref0 = parseGithubRepoUrl(rawUrl);
+  const apiBase = `https://${API_HOST}/repos/${ref0.owner}/${ref0.repo}`;
+  const notes: string[] = [];
+
+  // 1. Repository metadata (default-branch resolution).
+  let ref = ref0.ref;
+  let defaultBranchUsed = false;
+  try {
+    if (ref === undefined) {
+      const res = await apiFetch(fetchImpl, apiBase, { timeoutMs, token, signal: deadline });
+      const meta = (await readBodyWithDeadline(res, deadline, "json", MAX_CODEBASE_TREE_BYTES)) as {
+        default_branch?: string;
+      };
+      if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
+        throw new GithubCodebaseError(
+          `GitHub did not report a default branch for ${ref0.owner}/${ref0.repo}.`,
+          "codebase_fetch_failed",
+        );
+      }
+      ref = meta.default_branch;
+      defaultBranchUsed = true;
+    }
+
+    // 2. One bounded recursive tree request.
+    const treeRes = await apiFetch(
+      fetchImpl,
+      `${apiBase}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+      { timeoutMs, token, signal: deadline },
+    );
+    const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_CODEBASE_TREE_BYTES)) as GithubTreePayload;
+    const allEntries = (Array.isArray(treePayload.tree) ? treePayload.tree : []).filter(
+      (e): e is TreeEntryLike & { path: string } => typeof e.path === "string",
+    );
+    const treeBlobCount = allEntries.filter((e) => e.type === "blob").length;
+    if (treePayload.truncated === true) {
+      notes.push(
+        "GitHub truncated the repository tree listing (very large repository); some files may not have been considered.",
+      );
+    }
+
+    // 3. Eligibility + safety filtering (deterministic, local).
+    const eligible: TreeEntryLike[] = [];
+    let skippedUnsafe = 0;
+    let skippedSubmodules = 0;
+    for (const entry of allEntries) {
+      const reason = codebaseExclusionReason(entry, { maxDepth, pathScope: ref0.path });
+      if (reason === null) {
+        eligible.push(entry);
+      } else if (reason === "submodule") {
+        skippedSubmodules++;
+      } else if (reason === "unsafe_path") {
+        skippedUnsafe++;
+      }
+    }
+    if (skippedSubmodules > 0) {
+      notes.push(`Skipped ${skippedSubmodules} submodule(s) — submodules are never followed.`);
+    }
+
+    // 4. Deterministic ranked selection with a diversity cap.
+    const selected = selectCodebaseCandidates(eligible, maxFiles);
+    const candidateCount = eligible.length;
+    if (candidateCount === 0) {
+      throw new GithubCodebaseError(
+        `No analyzable source, config, test, or instruction files were found in ${ref0.owner}/${ref0.repo}@${ref}${ref0.path ? ` under "${ref0.path}"` : ""}. The repository may be empty, docs-only, or composed entirely of unsupported/binary content.`,
+        "codebase_no_candidates",
+      );
+    }
+    const notSelected = candidateCount - selected.length;
+    const skippedGenerated = allEntries.filter(
+      (e) => e.type === "blob" && codebaseExclusionReason(e, { maxDepth, pathScope: ref0.path }) === "generated_or_minified",
+    ).length;
+
+    // 5. Bounded raw-content fetches with exact total-byte accounting
+    // (identical projection discipline to the docs adapter).
+    const files: { path: string; content: string }[] = [];
+    let totalBytes = 0;
+    for (const entry of selected) {
+      if (files.length >= maxFiles) {
+        notes.push(`Stopped at the file limit (${maxFiles} files); ${notSelected + (selected.length - files.length)} candidate(s) were not fetched.`);
+        break;
+      }
+      if (typeof entry.size === "number" && entry.size > maxFileBytes) {
+        notes.push(`Skipped "${entry.path}": too large (${(entry.size / 1000).toFixed(0)} KB, limit ${(maxFileBytes / 1000).toFixed(0)} KB).`);
+        continue;
+      }
+      const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
+      const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
+      const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline);
+      if (fetched.kind === "deadline_exceeded") {
+        throw new GithubCodebaseError(
+          `Codebase ingestion exceeded its overall time budget (${Math.round(overallTimeoutMs / 1000)} s) after ${files.length} file(s). Scope the URL (e.g. …/tree/main/packages/app) or retry later.`,
+          "codebase_deadline_exceeded",
+        );
+      }
+      if (fetched.kind === "unreachable") {
+        notes.push(`Skipped "${entry.path}": could not be fetched (missing or unreachable).`);
+        continue;
+      }
+      if (fetched.kind === "too_large") {
+        notes.push(`Skipped "${entry.path}": actual content exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit.`);
+        continue;
+      }
+      const actualBytes = Buffer.byteLength(fetched.content, "utf8");
+      if (actualBytes > maxFileBytes) {
+        notes.push(`Skipped "${entry.path}": actual content ${(actualBytes / 1000).toFixed(0)} KB exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit (metadata underreported the size).`);
+        continue;
+      }
+      const projected = combinedChunkBytes(entry.path, fetched.content, files.length === 0);
+      if (totalBytes + projected > maxTotalBytes) {
+        notes.push(`Stopped at the total size limit (${(maxTotalBytes / 1_000_000).toFixed(1)} MB) after ${files.length} file(s); "${entry.path}" (${(actualBytes / 1000).toFixed(0)} KB) would exceed it.`);
+        break;
+      }
+      totalBytes += projected;
+      files.push({ path: entry.path, content: fetched.content });
+    }
+    if (files.length === 0) {
+      throw new GithubCodebaseError(
+        `Candidate files were listed in ${ref0.owner}/${ref0.repo}@${ref} but none could be fetched within the limits (see the size-limit notes).`,
+        "codebase_no_candidates",
+      );
+    }
+    if (notSelected > 0) {
+      notes.push(
+        `Selected a bounded, prioritized ${files.length} of ${candidateCount} eligible file(s); ${notSelected} eligible candidate(s) were not inspected${skippedGenerated > 0 ? ` (${skippedGenerated} generated/minified file(s) excluded outright)` : ""}.`,
+      );
+    } else {
+      notes.push(`Inspected all ${files.length} eligible file(s) in ${ref0.owner}/${ref0.repo}@${ref}.`);
+    }
+
+    // 6. Structured analysis: tree reconnaissance + extraction from fetched files.
+    const instructions = detectInstructionFiles(allEntries).filter((p) =>
+      files.some((f) => f.path === p),
+    );
+    const analysis = buildRepositoryAnalysisFromFiles(
+      {
+        url: `https://github.com/${ref0.owner}/${ref0.repo}`,
+        owner: ref0.owner,
+        name: ref0.repo,
+        ref,
+        languages: detectLanguages(allEntries),
+        ecosystems: detectEcosystems(allEntries),
+        manifests: detectManifests(allEntries),
+        structure: {
+          ...detectRoots(allEntries),
+          packages: detectWorkspacePackages(allEntries),
+        },
+        entrypoints: detectEntrypointCandidates(allEntries),
+        importantFiles: [],
+        instructions,
+        ciWorkflows: detectCiWorkflows(allEntries),
+        fetched: files,
+        selection: {
+          candidateCount,
+          selectedCount: files.length,
+          treeBlobCount,
+          treeTruncated: treePayload.truncated === true,
+        },
+      },
+      [
+        ...(treePayload.truncated === true
+          ? ["The GitHub tree listing was truncated; parts of the repository were never enumerated."]
+          : []),
+        ...(notSelected > 0
+          ? [`${notSelected} of ${candidateCount} eligible files were not inspected (bounded selection budget).`]
+          : []),
+        ...(skippedUnsafe > 0 ? [`${skippedUnsafe} unsafe tree path(s) were rejected.`] : []),
+        "Repository analysis covers only the inspected selection; the generated skill must not claim whole-repository completeness.",
+      ],
+    );
+
+    const content = files.map((f) => combinedFileChunk(f.path, f.content)).join("\n\n");
+    const label = `${ref0.owner}/${ref0.repo}`;
+    return {
+      input: {
+        type: "github-codebase",
+        name: ref0.path ? `${label} codebase (${ref0.path})` : `${label} codebase`,
+        content,
+        repository: analysis,
+      },
+      repo: { owner: ref0.owner, repo: ref0.repo, ref, defaultBranchUsed },
+      files,
+      notes,
+      analysis,
+    };
+  } catch (err) {
+    if (err instanceof GithubCodebaseError) throw err;
+    if (err instanceof GithubSourceError) {
+      throw new GithubCodebaseError(err.message, err.code.replace(/^github_/, "codebase_"));
+    }
+    throw err;
+  }
 }
