@@ -1,0 +1,509 @@
+/**
+ * GitHub codebase source adapter — bounded repository reconnaissance.
+ *
+ * Turns a public GitHub repository into a skill for coding agents working on
+ * that codebase. This is deliberately distinct from the documentation mode
+ * (github.ts): the repository is analyzed as a software project.
+ *
+ * Security model (AGENTS.md §12/§21 — identical to documentation mode):
+ * - repository contents are untrusted inert text; nothing is cloned, executed,
+ *   installed, or built; submodules are never followed;
+ * - requests go to api.github.com and GitHub raw content hosts and nowhere
+ *   else; a token (SKILLFORGE_GITHUB_TOKEN) only raises the api.github.com
+ *   rate limit and is never sent to raw content hosts;
+ * - hard bounds everywhere: tree response bytes, selected file count, per-file
+ *   bytes, total bytes, path depth, per-request timeout, overall deadline;
+ * - the local deterministic pipeline — never a model — owns eligibility,
+ *   ranking, and selection;
+ * - truncation and skipping are surfaced honestly.
+ *
+ * This module holds the pure, deterministic half (eligibility filtering,
+ * tree reconnaissance, ranking); the networked ingestion entry point is
+ * fetchGithubCodebaseSource. Everything here is injectable-fetch testable
+ * without any live GitHub traffic.
+ */
+import type { RepositoryAnalysis } from "../types.js";
+import { isSafeRepoPath } from "./github.js";
+
+// ---------------------------------------------------------------------------
+// Hard limits (independent of documentation mode; exported for tests)
+// ---------------------------------------------------------------------------
+
+export const MAX_CODEBASE_FILES = 60;
+export const MAX_CODEBASE_FILE_BYTES = 200_000; // per file
+export const MAX_CODEBASE_TOTAL_BYTES = 1_400_000; // combined (under ingest's 1.5 MB cap)
+export const MAX_CODEBASE_DEPTH = 10; // path segment depth (source trees are deeper than docs trees)
+export const CODEBASE_TIMEOUT_MS = 15_000; // per request
+export const CODEBASE_OVERALL_TIMEOUT_MS = 90_000; // whole ingestion budget
+/** Cap for api.github.com JSON payloads (repo metadata, tree listings). */
+export const MAX_CODEBASE_TREE_BYTES = 10_000_000;
+
+export class GithubCodebaseError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "GithubCodebaseError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tree entries
+// ---------------------------------------------------------------------------
+
+export interface TreeEntryLike {
+  path: string;
+  type: string;
+  size?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Eligibility / safety filtering (deterministic; the allowlist decides —
+// binaries and unknown formats are excluded by construction)
+// ---------------------------------------------------------------------------
+
+/** Directories that never carry analysis-worthy source content. */
+export const CODEBASE_SKIP_DIRS = new Set([
+  ".git", "node_modules", "vendor", "dist", "build", "out", "coverage",
+  ".next", ".nuxt", ".output", ".svelte-kit", ".angular", "target", "bin", "obj",
+  ".cache", "tmp", "temp", "__pycache__", ".venv", "venv", ".tox",
+  ".pytest_cache", ".mypy_cache", ".ruff_cache", "bower_components",
+  "jspm_packages", ".terraform", "Pods", ".idea", ".vscode", ".gradle",
+  "__snapshots__", "testdata", ".turbo", ".parcel-cache", ".nyc_output",
+]);
+
+/** Extensions eligible for codebase analysis: source, config, build, and
+ * instruction text. Everything else (binaries, media, archives, unknown
+ * formats) is excluded by construction. */
+export const CODEBASE_EXTENSIONS = new Set([
+  // code
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".pyi", ".go", ".rs",
+  ".java", ".kt", ".kts", ".rb", ".php", ".c", ".h", ".cpp", ".cc", ".cxx",
+  ".hpp", ".hh", ".cs", ".swift", ".m", ".mm", ".scala", ".vue", ".svelte",
+  ".astro", ".zig", ".ex", ".exs", ".erl", ".hs", ".lua", ".pl", ".r",
+  // shell / ops
+  ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+  // structured config / data
+  ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+  ".xml", ".properties", ".env",
+  // docs / text
+  ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc",
+  // web & misc
+  ".css", ".scss", ".sass", ".less", ".html", ".htm", ".graphql", ".gql",
+  ".proto", ".tf", ".hcl", ".sql", ".ipynb",
+]);
+
+/** Extension-less files eligible by basename (tooling convention files). */
+export const CODEBASE_BASENAMES = new Set([
+  "makefile", "dockerfile", "codeowners", "license", "notice", "contributing",
+  "readme", "changelog", "cmakelists.txt",
+  ".gitignore", ".dockerignore", ".editorconfig", ".gitattributes",
+  ".npmrc", ".nvmrc", ".node-version", ".python-version", ".ruby-version",
+  ".tool-versions", ".prettierrc", ".eslintrc", ".babelrc",
+]);
+
+/** Lockfiles and checksum files: useful as ecosystem evidence from tree
+ * metadata, but never fetched — they would consume the deep-analysis budget
+ * without informing an agent. */
+export const METADATA_ONLY_BASENAMES = new Set([
+  "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+  "cargo.lock", "poetry.lock", "pipfile.lock", "composer.lock",
+  "gemfile.lock", "go.sum", "packages.lock.json",
+]);
+
+/** Deterministic generated/minified heuristics (basename-level). */
+export function isGeneratedOrMinified(path: string): boolean {
+  const base = (path.split("/").pop() ?? "").toLowerCase();
+  if (/\.min\.[cm]?[jt]sx?$/.test(base) || /\.min\.css$/.test(base)) return true;
+  if (base.endsWith(".map") || base.endsWith(".snap")) return true; // source maps, jest snapshots
+  if (base.endsWith(".pb.go") || base.endsWith("_pb2.py") || base.endsWith("_pb2_grpc.py")) return true; // generated protobuf
+  if (base.includes(".generated.")) return true;
+  if (/\.d\.ts$/.test(base)) return false; // declaration files describe public interfaces — keep
+  return false;
+}
+
+export interface CodebaseEligibilityContext {
+  maxDepth: number;
+  /** "" = whole repository; otherwise blobs must live under this path. */
+  pathScope: string;
+}
+
+export type CodebaseExclusionReason =
+  | "submodule"
+  | "unsafe_path"
+  | "outside_path_scope"
+  | "skip_dir"
+  | "too_deep"
+  | "extension_not_allowed"
+  | "generated_or_minified"
+  | "lockfile_metadata_only";
+
+/** Why a tree entry is not an eligible deep-analysis candidate; null when
+ * eligible. Pure and deterministic. */
+export function codebaseExclusionReason(
+  entry: TreeEntryLike,
+  ctx: CodebaseEligibilityContext,
+): CodebaseExclusionReason | null {
+  if (entry.type === "commit") return "submodule";
+  if (entry.type !== "blob") return "extension_not_allowed"; // directories are not candidates
+  if (!isSafeRepoPath(entry.path)) return "unsafe_path";
+  if (ctx.pathScope !== "" && entry.path !== ctx.pathScope && !entry.path.startsWith(`${ctx.pathScope}/`)) {
+    return "outside_path_scope";
+  }
+  const segments = entry.path.split("/");
+  if (segments.slice(0, -1).some((seg) => CODEBASE_SKIP_DIRS.has(seg.toLowerCase()))) return "skip_dir";
+  if (segments.length > ctx.maxDepth) return "too_deep";
+  const base = segments[segments.length - 1]!;
+  const dot = base.lastIndexOf(".");
+  const ext = dot === -1 ? "" : base.slice(dot).toLowerCase();
+  const baseKey = base.toLowerCase();
+  const allowed =
+    (dot > 0 && CODEBASE_EXTENSIONS.has(ext)) || CODEBASE_BASENAMES.has(baseKey);
+  if (!allowed) return "extension_not_allowed";
+  if (isGeneratedOrMinified(entry.path)) return "generated_or_minified";
+  if (METADATA_ONLY_BASENAMES.has(baseKey)) return "lockfile_metadata_only";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Reconnaissance detection categories (pure functions over tree entries)
+// ---------------------------------------------------------------------------
+
+const EXTENSION_LANGUAGE: Record<string, string> = {
+  ".ts": "TypeScript", ".tsx": "TypeScript",
+  ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
+  ".py": "Python", ".pyi": "Python",
+  ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin",
+  ".rb": "Ruby", ".php": "PHP",
+  ".c": "C", ".h": "C", ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".hpp": "C++", ".hh": "C++",
+  ".cs": "C#", ".swift": "Swift", ".m": "Objective-C", ".mm": "Objective-C",
+  ".scala": "Scala", ".zig": "Zig", ".ex": "Elixir", ".erl": "Erlang",
+  ".hs": "Haskell", ".lua": "Lua", ".pl": "Perl", ".r": "R",
+  ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
+};
+
+const MANIFEST_ECOSYSTEM: Array<[string, string]> = [
+  ["package.json", "node"],
+  ["pnpm-workspace.yaml", "node"],
+  ["package-lock.json", "node"],
+  ["pnpm-lock.yaml", "node"],
+  ["yarn.lock", "node"],
+  ["pyproject.toml", "python"],
+  ["requirements.txt", "python"],
+  ["pipfile", "python"],
+  ["poetry.lock", "python"],
+  ["setup.py", "python"],
+  ["setup.cfg", "python"],
+  ["go.mod", "go"],
+  ["go.work", "go"],
+  ["cargo.toml", "rust"],
+  ["pom.xml", "jvm"],
+  ["build.gradle", "jvm"],
+  ["build.gradle.kts", "jvm"],
+  ["settings.gradle", "jvm"],
+  ["settings.gradle.kts", "jvm"],
+  ["gemfile", "ruby"],
+  ["composer.json", "php"],
+  ["makefile", "make"],
+  ["cmakelists.txt", "cmake"],
+  ["dockerfile", "docker"],
+  ["docker-compose.yml", "docker"],
+  ["docker-compose.yaml", "docker"],
+  ["compose.yml", "docker"],
+  ["compose.yaml", "docker"],
+];
+
+const SOURCE_ROOT_NAMES = new Set([
+  "src", "app", "lib", "packages", "apps", "services", "cmd", "internal",
+  "pkg", "server", "client", "web", "api", "core",
+]);
+const TEST_ROOT_NAMES = new Set(["test", "tests", "__tests__", "spec", "e2e", "integration"]);
+const EXAMPLE_ROOT_NAMES = new Set(["examples", "example", "samples", "demo"]);
+
+const INSTRUCTION_BASENAMES = new Set([
+  "agents.md", "claude.md", "contributing.md", "development.md", "security.md", "codeowners",
+]);
+const WORKSPACE_MANIFEST_BASENAMES = new Set([
+  "package.json", "pyproject.toml", "cargo.toml", "go.mod",
+]);
+
+export function extensionOf(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  return dot === -1 || dot === 0 ? "" : base.slice(dot).toLowerCase();
+}
+
+/** Language claims from tree file-extension counts, strongest first. */
+export function detectLanguages(entries: TreeEntryLike[]): RepositoryAnalysis["languages"] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    const lang = EXTENSION_LANGUAGE[extensionOf(e.path)];
+    if (lang) counts.set(lang, (counts.get(lang) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 12)
+    .map(([name, count]) => ({
+      name,
+      evidence: [`${count} ${name.toLowerCase()} file(s) in the repository tree`],
+    }));
+}
+
+/** Ecosystems evidenced by manifests present in the tree. */
+export function detectEcosystems(entries: TreeEntryLike[]): string[] {
+  const out = new Set<string>();
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    const base = (e.path.split("/").pop() ?? "").toLowerCase();
+    if (base.endsWith(".csproj") || base.endsWith(".sln")) {
+      out.add("dotnet");
+      continue;
+    }
+    for (const [manifest, ecosystem] of MANIFEST_ECOSYSTEM) {
+      if (base === manifest) out.add(ecosystem);
+    }
+  }
+  return [...out].sort((a, b) => a.localeCompare(b));
+}
+
+/** Manifests (including lockfiles — recorded as metadata-only). */
+export function detectManifests(entries: TreeEntryLike[]): RepositoryAnalysis["manifests"] {
+  const out: RepositoryAnalysis["manifests"] = [];
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    const base = (e.path.split("/").pop() ?? "").toLowerCase();
+    const isCsproj = base.endsWith(".csproj") || base.endsWith(".sln");
+    const known = MANIFEST_ECOSYSTEM.some(([m]) => m === base);
+    if (!known && !isCsproj) continue;
+    const metadataOnly = METADATA_ONLY_BASENAMES.has(base);
+    out.push({
+      path: e.path,
+      kind: metadataOnly ? "lockfile" : base,
+      fetched: !metadataOnly,
+    });
+  }
+  return out
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .slice(0, 24);
+}
+
+export interface DetectedRoots {
+  sourceRoots: string[];
+  testRoots: string[];
+  exampleRoots: string[];
+}
+
+/** Top-level source/test/example roots actually present in the tree. */
+export function detectRoots(entries: TreeEntryLike[]): DetectedRoots {
+  const tops = new Set<string>();
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    tops.add(e.path.split("/")[0]!.toLowerCase());
+  }
+  const pick = (names: Set<string>) =>
+    [...names].filter((n) => tops.has(n)).sort((a, b) => a.localeCompare(b)).map((n) => `${n}/`);
+  return {
+    sourceRoots: pick(SOURCE_ROOT_NAMES),
+    testRoots: pick(TEST_ROOT_NAMES),
+    exampleRoots: pick(EXAMPLE_ROOT_NAMES),
+  };
+}
+
+/** Repository instruction files: root-level high-priority files plus nested
+ * AGENTS.md/CLAUDE.md files that affect subtrees. Root files first. */
+export function detectInstructionFiles(entries: TreeEntryLike[]): string[] {
+  const out: { path: string; depth: number }[] = [];
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    const base = (e.path.split("/").pop() ?? "").toLowerCase();
+    const isReadme = /^readme(\.[a-z0-9]+)?$/.test(base);
+    if (!INSTRUCTION_BASENAMES.has(base) && !isReadme) continue;
+    out.push({ path: e.path, depth: e.path.split("/").length });
+  }
+  return out
+    .sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path))
+    .slice(0, 16)
+    .map((x) => x.path);
+}
+
+/** Workspace/package directories: directories (depth ≥ 1) containing their
+ * own package manifest — monorepo boundaries. */
+export function detectWorkspacePackages(entries: TreeEntryLike[]): string[] {
+  const out = new Set<string>();
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    const segments = e.path.split("/");
+    if (segments.length < 2 || segments.length > 4) continue;
+    const base = segments[segments.length - 1]!.toLowerCase();
+    if (!WORKSPACE_MANIFEST_BASENAMES.has(base)) continue;
+    out.add(segments.slice(0, -1).join("/"));
+  }
+  return [...out].sort((a, b) => a.localeCompare(b)).slice(0, 24);
+}
+
+/** CI workflow files under .github/workflows/ (inert text; a rich source of
+ * canonical commands). */
+export function detectCiWorkflows(entries: TreeEntryLike[]): string[] {
+  return entries
+    .filter((e) => e.type === "blob")
+    .map((e) => e.path)
+    .filter(
+      (p) =>
+        p.startsWith(".github/workflows/") &&
+        (p.toLowerCase().endsWith(".yml") || p.toLowerCase().endsWith(".yaml")),
+    )
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 12);
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic candidate ranking (Phase 4 — the selection core)
+// ---------------------------------------------------------------------------
+
+const ENTRYPOINT_BASENAME_RE =
+  /^(index|main|server|app|__main__|lib|mod|program|application|bootstrap|wsgi|asgi|manage)\.[a-z0-9]+$/i;
+
+const INSTRUCTION_PRIORITY = new Map([
+  ["agents.md", 0], ["claude.md", 1],
+]);
+const ROOT_DOC_PRIORITY = new Map([
+  ["readme", 2], ["contributing.md", 3], ["development.md", 4],
+  ["security.md", 5], ["changelog", 9], ["codeowners", 10],
+]);
+const BUILD_CONFIG_PRIORITY = new Map([
+  ["package.json", 3], ["pyproject.toml", 3], ["cargo.toml", 3], ["go.mod", 3],
+  ["makefile", 4], ["dockerfile", 6], ["cmakelists.txt", 6],
+]);
+
+/**
+ * Priority score for a codebase candidate: lower sorts first. Ties break by
+ * path, so the ordering is fully deterministic given the same tree.
+ *
+ * Priority order (from the task's strong-priority list):
+ * 0–5  repository instructions + root README + primary manifests
+ * 8    root build/test/lint config
+ * 12   CI workflows
+ * 14   entrypoint-named files
+ * 18   top-level source-root files (shallow-first within the root)
+ * 22   representative tests
+ * 24   examples/samples
+ * 26   deeper implementation files
+ * 34   everything else
+ */
+export function codebasePriority(path: string): number {
+  const segments = path.split("/");
+  const base = segments[segments.length - 1]!.toLowerCase();
+  const depth = segments.length;
+  const top = segments.length > 1 ? segments[0]!.toLowerCase() : "";
+  const stem = base.replace(/\.[a-z0-9]+$/i, "");
+
+  // 0. Repository instruction files (root first, then nested).
+  const instr = INSTRUCTION_PRIORITY.get(base);
+  if (instr !== undefined) return depth === 1 ? instr : instr + 0.5;
+  if (/^readme(\.[a-z0-9]+)?$/.test(base) && depth === 1) return 2;
+  const rootDoc = ROOT_DOC_PRIORITY.get(base);
+  if (rootDoc !== undefined) return depth === 1 ? rootDoc : rootDoc + 0.5;
+
+  // 3. Manifests.
+  if (depth === 1 && BUILD_CONFIG_PRIORITY.has(base)) return BUILD_CONFIG_PRIORITY.get(base)!;
+  if (depth === 1) {
+    // 8. Root build/test/lint configuration files.
+    if (/\.(json|ya?ml|toml|ini|cfg)$/.test(base) || base === ".prettierrc" || base === ".eslintrc") return 8;
+    if (/^(vite|webpack|rollup|jest|vitest|tsup|esbuild|turbo|nx|webpack)\.config\./.test(base)) return 8;
+    if (/^tsconfig/.test(base) || /^jest\.config/.test(base) || /^vitest\.config/.test(base)) return 8;
+    if (/^(pytest|tox|setup\.cfg|\.flake8|ruff)/.test(base)) return 8;
+    if (/^\.github\/workflows\//.test(path)) return 12;
+  }
+  if (path.startsWith(".github/workflows/")) return 12;
+
+  // Tests.
+  if (top && TEST_ROOT_NAMES.has(top)) return 22;
+  if (/\.test\.|\.spec\.|_test\.go$/.test(base)) return 22;
+
+  // Examples.
+  if (top && EXAMPLE_ROOT_NAMES.has(top)) return 24;
+
+  // Entrypoint-named files.
+  if (ENTRYPOINT_BASENAME_RE.test(base) || stem === "main") return 14;
+
+  // Source-root files: shallow first so public interfaces outrank deep guts.
+  if (top && SOURCE_ROOT_NAMES.has(top)) {
+    return 18 + Math.min(depth - 1, 8) * 0.5;
+  }
+
+  return 26 + Math.min(depth, 8) * 0.5;
+}
+
+/**
+ * Deterministically select a bounded, diverse candidate set from an eligible
+ * list (already filtered by codebaseExclusionReason). Selection proceeds in
+ * priority order, but no single top-level directory may consume more than
+ * `maxPerTopDir` slots — one huge directory cannot crowd out the rest of the
+ * repository. Input order never matters: output is fully determined by paths.
+ */
+export function selectCodebaseCandidates(
+  eligible: TreeEntryLike[],
+  maxFiles: number,
+  maxPerTopDir = Math.max(4, Math.ceil(maxFiles / 4)),
+): TreeEntryLike[] {
+  const ranked = eligible
+    .map((e) => ({ entry: e, priority: codebasePriority(e.path) }))
+    .sort((a, b) => a.priority - b.priority || a.entry.path.localeCompare(b.entry.path));
+
+  const perTop = new Map<string, number>();
+  const picked: TreeEntryLike[] = [];
+  const deferred: typeof ranked = [];
+  for (const r of ranked) {
+    if (picked.length >= maxFiles) break;
+    const top = r.entry.path.split("/")[0]!;
+    const used = perTop.get(top) ?? 0;
+    if (used >= maxPerTopDir) {
+      deferred.push(r);
+      continue;
+    }
+    perTop.set(top, used + 1);
+    picked.push(r.entry);
+  }
+  // Fill remaining slots from deferred candidates (still in priority order) —
+  // a repository dominated by one directory still fills the budget.
+  for (const r of deferred) {
+    if (picked.length >= maxFiles) break;
+    picked.push(r.entry);
+  }
+  return picked;
+}
+
+/** Likely entrypoints from tree structure: entrypoint-name files at shallow
+ * depth, preferring source roots. Deterministic (score desc, then path). */
+export function detectEntrypointCandidates(entries: TreeEntryLike[]): { path: string; reason: string }[] {
+  const candidates: { path: string; score: number }[] = [];
+  for (const e of entries) {
+    if (e.type !== "blob") continue;
+    const segments = e.path.split("/");
+    if (segments.length > 3) continue;
+    const base = segments[segments.length - 1]!;
+    const dot = base.lastIndexOf(".");
+    const stem = (dot === -1 ? base : base.slice(0, dot)).toLowerCase();
+    // Go entrypoints live in cmd/<name>/main.go; Python in src/<pkg>/__main__.py.
+    const stemOk = ENTRYPOINT_BASENAME_RE.test(base) || stem === "main";
+    if (!stemOk) continue;
+    const top = segments.length > 1 ? segments[0]!.toLowerCase() : "";
+    let score = 40; // root-level entrypoints
+    if (SOURCE_ROOT_NAMES.has(top)) score = 45;
+    if (top === "cmd") score = 44;
+    if (/\.test\.|\.spec\./.test(base)) continue; // test files are not entrypoints
+    candidates.push({ path: e.path, score });
+  }
+  return candidates
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+    .slice(0, 12)
+    .map((c) => ({
+      path: c.path,
+      reason:
+        c.score >= 45
+          ? "entrypoint-named file under a source root"
+          : "entrypoint-named file",
+    }));
+}
