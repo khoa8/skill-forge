@@ -486,6 +486,10 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       skill: stored.skill,
       sourceText: stored.source.text,
       target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
+      sourceType: stored.source.type,
+      repositoryCommands: stored.source.repository?.commands
+        .map((c) => c.command)
+        .filter((c) => c.length > 0),
     });
     await updateValidationImpl(stored.id, report);
     res.json({ validation: report });
@@ -505,8 +509,12 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       return;
     }
     try {
-      const stored = await updateFileContentImpl(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText, sourceType) =>
-        validatePackage({ skill, sourceText, target: undefined, sourceType }),
+      const stored = await updateFileContentImpl(
+        req.params.id!,
+        parsed.data.path,
+        parsed.data.content,
+        (skill, sourceText, sourceType, repositoryCommands) =>
+          validatePackage({ skill, sourceText, target: undefined, sourceType, repositoryCommands }),
       );
       res.json(toResponse(stored));
     } catch (err) {

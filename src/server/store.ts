@@ -77,7 +77,12 @@ export interface SkillStore {
     id: string,
     path: string,
     content: string,
-    revalidate: (skill: StoredSkill["skill"], sourceText: string, sourceType: SourceType) => ValidationReport,
+    revalidate: (
+      skill: StoredSkill["skill"],
+      sourceText: string,
+      sourceType: SourceType,
+      repositoryCommands: readonly string[] | undefined,
+    ) => ValidationReport,
   ): Promise<StoredSkill>;
 }
 
@@ -190,7 +195,12 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     id: string,
     path: string,
     content: string,
-    revalidate: (skill: StoredSkill["skill"], sourceText: string, sourceType: SourceType) => ValidationReport,
+    revalidate: (
+      skill: StoredSkill["skill"],
+      sourceText: string,
+      sourceType: SourceType,
+      repositoryCommands: readonly string[] | undefined,
+    ) => ValidationReport,
   ): Promise<StoredSkill> {
     const existing = await getSkill(id);
     if (!existing) throw new EditError(`No skill with id "${id}".`, "skill_not_found");
@@ -247,7 +257,12 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     // Validation reflects the edited content before anything is served; the
     // source type rides along so codebase packages cannot lose their
     // repository provenance silently.
-    existing.validation = revalidate(existing.skill, existing.source.text, existing.source.type);
+    existing.validation = revalidate(
+      existing.skill,
+      existing.source.text,
+      existing.source.type,
+      existing.source.repository?.commands.map((c) => c.command).filter((c) => c.length > 0),
+    );
 
     const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);
     await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");

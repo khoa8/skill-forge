@@ -246,6 +246,8 @@ export const NormalizedSource = z.object({
   /** sha256 of the normalized text; recorded in the manifest. */
   sha256: z.string(),
   originalName: z.string(),
+  /** Canonical source type carried through for validation context. */
+  sourceType: SourceType,
   /** Non-fatal problems found while normalizing (e.g. stripped HTML). */
   notes: z.array(z.string()),
   /** Structured repository analysis (codebase mode); otherwise undefined. */

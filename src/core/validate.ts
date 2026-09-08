@@ -33,6 +33,11 @@ export interface ValidateContext {
    * "github-codebase", repository provenance in manifest.json is REQUIRED —
    * edits must not silently strip it (P1-4). */
   sourceType?: SourceType;
+  /** The evidenced runnable commands from the structured repository analysis
+   * (codebase mode). When present, every runnable command rendered into the
+   * generated package must belong to this set — inline `Run \`x\`` spans and
+   * SKILL.md fences are checked against it deterministically. */
+  repositoryCommands?: readonly string[];
 }
 
 type OutcomeStatus = "pass" | "fail" | "warn";
@@ -495,6 +500,44 @@ const groundingCheck: Check = {
   },
 };
 
+/**
+ * Codebase inline command grounding (re-audit P1-4): codebase planning renders
+ * runnable commands as inline backticks ("Run `npm test` — defined in …"),
+ * which the generic fence-based heuristic cannot see. When structured
+ * repository command evidence is available, every command rendered with "Run"
+ * in SKILL.md / AGENTS.md / workflows must be an evidenced command. This is
+ * deterministic set membership — no token-overlap guessing.
+ */
+const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase commands match repository evidence", ({ skill, repositoryCommands }) => {
+  if (!repositoryCommands || repositoryCommands.length === 0) return pass();
+  const evidenced = new Set(repositoryCommands.map((c) => c.trim()));
+  const outcomes: CheckOutcome[] = [];
+  for (const file of skill.files) {
+    // Planner-synthesized instruction files only: SKILL.md (plan steps and
+    // verification) and the generic exporter's AGENTS.md. references/ and
+    // workflows/ are verbatim source excerpts — their "Run …" lines quote the
+    // original documentation and stay under the source-text grounding check.
+    if (file.path !== "SKILL.md" && file.path !== "AGENTS.md") continue;
+    const lines = file.content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      // Inline form rendered by the planner: "…Run `command` …" (list items).
+      for (const m of line.matchAll(/\bRun\s+`([^`]+)`/g)) {
+        const command = m[1]!.trim();
+        if (!evidenced.has(command)) {
+          outcomes.push(
+            fail(
+              `Command "${command}" at ${file.path}:${i + 1} is rendered as runnable but is not in the repository's evidenced command set. Ground it in inspected evidence (e.g. package.json scripts, CI steps) or remove it.`,
+              file.path,
+            ),
+          );
+        }
+      }
+    }
+  }
+  return outcomes.length === 0 ? pass() : outcomes;
+});
+
 const exportTargetKnown = check("export-target", "Export target is supported", ({ target }) => {
   if (target === undefined) return pass();
   const supported: ExportTarget[] = ["claude-code", "generic"];
@@ -672,6 +715,7 @@ export const CHECKS: Check[] = [
   jsonParses,
   manifestConsistency,
   repositoryProvenance,
+  codebaseCommandGrounding,
   placeholders,
   duplicateEvalIds,
   evalIntegrity,
