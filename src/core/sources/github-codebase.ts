@@ -268,8 +268,15 @@ export function detectEcosystems(entries: TreeEntryLike[]): string[] {
   return [...out].sort((a, b) => a.localeCompare(b));
 }
 
-/** Manifests (including lockfiles — recorded as metadata-only). */
-export function detectManifests(entries: TreeEntryLike[]): RepositoryAnalysis["manifests"] {
+/**
+ * Manifests (including lockfiles — recorded as metadata-only). `fetched`
+ * means exactly "content was actually fetched and included in the inspected
+ * file set": the caller passes the post-fetch inspected-path set. Before
+ * fetches complete, detection is only tree presence; the ingestion entry
+ * point recomputes `fetched` afterwards, so never consume pre-fetch results
+ * for evidence claims.
+ */
+export function detectManifests(entries: TreeEntryLike[], inspected: Set<string>): RepositoryAnalysis["manifests"] {
   const out: RepositoryAnalysis["manifests"] = [];
   for (const e of entries) {
     if (e.type !== "blob") continue;
@@ -281,7 +288,7 @@ export function detectManifests(entries: TreeEntryLike[]): RepositoryAnalysis["m
     out.push({
       path: e.path,
       kind: metadataOnly ? "lockfile" : base,
-      fetched: !metadataOnly,
+      fetched: !metadataOnly && inspected.has(e.path),
     });
   }
   return out
@@ -685,14 +692,19 @@ export async function fetchGithubCodebaseSource(
 
     // 5. Bounded raw-content fetches with exact total-byte accounting
     // (identical projection discipline to the docs adapter).
+    //
+    // Outcome accounting (each selected candidate lands in exactly one
+    // bucket); every user-facing summary and the selection stats derive from
+    // these actuals — "selected before fetch" is never conflated with
+    // "inspected after fetch".
     const files: { path: string; content: string }[] = [];
     let totalBytes = 0;
+    let skippedUnreachable = 0;
+    let skippedTooLarge = 0;
+    let stoppedByTotalBudget = 0;
     for (const entry of selected) {
-      if (files.length >= maxFiles) {
-        notes.push(`Stopped at the file limit (${maxFiles} files); ${notSelected + (selected.length - files.length)} candidate(s) were not fetched.`);
-        break;
-      }
       if (typeof entry.size === "number" && entry.size > maxFileBytes) {
+        skippedTooLarge++;
         notes.push(`Skipped "${entry.path}": too large (${(entry.size / 1000).toFixed(0)} KB, limit ${(maxFileBytes / 1000).toFixed(0)} KB).`);
         continue;
       }
@@ -706,20 +718,24 @@ export async function fetchGithubCodebaseSource(
         );
       }
       if (fetched.kind === "unreachable") {
+        skippedUnreachable++;
         notes.push(`Skipped "${entry.path}": could not be fetched (missing or unreachable).`);
         continue;
       }
       if (fetched.kind === "too_large") {
+        skippedTooLarge++;
         notes.push(`Skipped "${entry.path}": actual content exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit.`);
         continue;
       }
       const actualBytes = Buffer.byteLength(fetched.content, "utf8");
       if (actualBytes > maxFileBytes) {
+        skippedTooLarge++;
         notes.push(`Skipped "${entry.path}": actual content ${(actualBytes / 1000).toFixed(0)} KB exceeds the ${(maxFileBytes / 1000).toFixed(0)} KB per-file limit (metadata underreported the size).`);
         continue;
       }
       const projected = combinedChunkBytes(entry.path, fetched.content, files.length === 0);
       if (totalBytes + projected > maxTotalBytes) {
+        stoppedByTotalBudget++;
         notes.push(`Stopped at the total size limit (${(maxTotalBytes / 1_000_000).toFixed(1)} MB) after ${files.length} file(s); "${entry.path}" (${(actualBytes / 1000).toFixed(0)} KB) would exceed it.`);
         break;
       }
@@ -732,25 +748,48 @@ export async function fetchGithubCodebaseSource(
         "codebase_no_candidates",
       );
     }
-    if (notSelected > 0) {
+    // All summaries derive from the actual outcome buckets.
+    const inspectedCount = files.length;
+    const selectedCount = selected.length;
+    const notSelectedCount = candidateCount - selectedCount;
+    const notFetchedCount = selectedCount - inspectedCount;
+    if (notFetchedCount === 0 && notSelectedCount === 0) {
+      notes.push(`Inspected all ${inspectedCount} eligible file(s) in ${ref0.owner}/${ref0.repo}@${ref}${ref0.path ? ` under "${ref0.path}"` : ""}.`);
+    } else if (notFetchedCount === 0) {
       notes.push(
-        `Selected a bounded, prioritized ${files.length} of ${candidateCount} eligible file(s); ${notSelected} eligible candidate(s) were not inspected${skippedGenerated > 0 ? ` (${skippedGenerated} generated/minified file(s) excluded outright)` : ""}.`,
+        `Inspected ${inspectedCount} of ${candidateCount} eligible file(s) (bounded, prioritized selection); ${notSelectedCount} eligible candidate(s) were not selected.`,
       );
     } else {
-      notes.push(`Inspected all ${files.length} eligible file(s) in ${ref0.owner}/${ref0.repo}@${ref}.`);
+      // The breakdown must account for EVERY unfetched selected file.
+      const neverAttempted = Math.max(
+        0,
+        notFetchedCount - skippedUnreachable - skippedTooLarge - stoppedByTotalBudget,
+      );
+      const breakdown = [
+        skippedUnreachable > 0 ? `${skippedUnreachable} could not be fetched` : null,
+        skippedTooLarge > 0 ? `${skippedTooLarge} exceeded the per-file limit` : null,
+        stoppedByTotalBudget > 0 ? `${stoppedByTotalBudget} would have exceeded the total size limit` : null,
+        neverAttempted > 0 ? `${neverAttempted} not fetched after the size limit stopped ingestion` : null,
+      ].filter((x): x is string => x !== null);
+      notes.push(
+        `Inspected ${inspectedCount} of ${selectedCount} selected file(s) (${breakdown.join(", ")})` +
+          (notSelectedCount > 0 ? `; ${notSelectedCount} of ${candidateCount} eligible candidate(s) were not selected` : "") +
+          `.`,
+      );
     }
 
     // 6. Structured analysis: SCOPED reconnaissance + extraction from fetched
     // files. Every repository fact describing the requested scope comes from
     // entries inside that scope; whole-tree listing metadata is kept separate
     // (selection.treeBlobCount, labeled as the GitHub tree listing).
+    // `selectedCount` means "actually inspected": manifest `fetched` flags and
+    // the inspected-file set derive from the post-fetch outcome.
     const scopedEntries =
       ref0.path === ""
         ? allEntries
         : allEntries.filter((e) => e.path === ref0.path || e.path.startsWith(`${ref0.path}/`));
-    const instructions = detectInstructionFiles(scopedEntries, ref0.path).filter((p) =>
-      files.some((f) => f.path === p),
-    );
+    const inspectedSet = new Set(files.map((f) => f.path));
+    const instructions = detectInstructionFiles(scopedEntries, ref0.path).filter((p) => inspectedSet.has(p));
     const analysis = buildRepositoryAnalysisFromFiles(
       {
         url: `https://github.com/${ref0.owner}/${ref0.repo}`,
@@ -760,7 +799,7 @@ export async function fetchGithubCodebaseSource(
         scope: ref0.path === "" ? undefined : ref0.path,
         languages: detectLanguages(scopedEntries),
         ecosystems: detectEcosystems(scopedEntries),
-        manifests: detectManifests(scopedEntries),
+        manifests: detectManifests(scopedEntries, inspectedSet),
         structure: {
           ...detectRoots(scopedEntries, ref0.path),
           packages: detectWorkspacePackages(scopedEntries, ref0.path),
@@ -772,7 +811,7 @@ export async function fetchGithubCodebaseSource(
         fetched: files,
         selection: {
           candidateCount,
-          selectedCount: files.length,
+          selectedCount: inspectedCount,
           treeBlobCount,
           treeTruncated: treePayload.truncated === true,
         },
@@ -781,8 +820,11 @@ export async function fetchGithubCodebaseSource(
         ...(treePayload.truncated === true
           ? ["The GitHub tree listing was truncated; parts of the repository were never enumerated."]
           : []),
-        ...(notSelected > 0
-          ? [`${notSelected} of ${candidateCount} eligible files were not inspected (bounded selection budget).`]
+        ...(notSelectedCount > 0
+          ? [`${notSelectedCount} of ${candidateCount} eligible files were not inspected (bounded selection budget).`]
+          : []),
+        ...(notFetchedCount > 0
+          ? [`${notFetchedCount} selected file(s) could not be inspected (unreachable or over size limits).`]
           : []),
         ...(skippedUnsafe > 0 ? [`${skippedUnsafe} unsafe tree path(s) were rejected.`] : []),
         "Repository analysis covers only the inspected selection; the generated skill must not claim whole-repository completeness.",

@@ -249,3 +249,142 @@ describe("P1-2: scoped /tree/ analysis contains no out-of-scope facts", () => {
     expect(instructions[0]).toBe("packages/a/AGENTS.md");
   });
 });
+
+// ---------------------------------------------------------------------------
+// P1-3 + P2-1 — manifest fetched state + inspection accounting
+// ---------------------------------------------------------------------------
+
+import { deriveCodebasePlan } from "../src/core/codebase/plan.js";
+
+function accountingHarness(o: {
+  rawMissing?: string[];
+  oversize?: string[];
+  maxTotalBytes?: number;
+}) {
+  const tree: Record<string, unknown>[] = [
+    { path: "README.md", type: "blob", size: 60 },
+    { path: "package.json", type: "blob", size: 120 },
+    { path: "package-lock.json", type: "blob", size: 400_000 },
+    { path: "apps/web/package.json", type: "blob", size: (o.oversize?.includes("apps/web/package.json") ? 900_000 : 120) },
+    { path: "apps/api/package.json", type: "blob", size: 120 },
+    { path: "libs/core/package.json", type: "blob", size: 120 },
+    { path: "libs/core/index.ts", type: "blob", size: 40 },
+  ];
+  const bodies: Record<string, string> = {
+    "README.md": "# Repo\n\nInspection accounting fixture.\n",
+    "package.json": JSON.stringify({ name: "root", scripts: { test: "vitest run" } }),
+    "apps/web/package.json": JSON.stringify({ name: "web", scripts: { test: "web-test" } }),
+    "apps/api/package.json": JSON.stringify({ name: "api", scripts: { test: "api-test" } }),
+    "libs/core/package.json": JSON.stringify({ name: "core", scripts: { test: "core-test" } }),
+    "libs/core/index.ts": "export {};\n",
+  };
+  return (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ sha: "x", truncated: false, tree }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.startsWith("https://raw.githubusercontent.com/")) {
+      const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+      const missing = o.rawMissing?.includes(p) ?? false;
+      const body = bodies[p];
+      const status = !missing && body !== undefined ? 200 : 404;
+      const res = new Response(!missing && body !== undefined ? body : "not found", { status, headers: { "content-type": "text/plain" } });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    }
+    return new Response("unexpected", { status: 500 });
+  }) as unknown as typeof fetch;
+}
+
+describe("P1-3: RepositoryManifest.fetched reflects actual inspection", () => {
+  it("marks manifests fetched only when their content was actually inspected", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/accounting", {
+      fetchImpl: accountingHarness({ rawMissing: ["apps/api/package.json"], oversize: ["apps/web/package.json"] }),
+    });
+    const m = Object.fromEntries(r.analysis.manifests.map((x) => [x.path, x.fetched]));
+    // Fetched.
+    expect(m["package.json"]).toBe(true);
+    expect(m["libs/core/package.json"]).toBe(true);
+    // Lockfile: metadata-only, never fetched.
+    expect(m["package-lock.json"]).toBe(false);
+    // Selected but over per-file limit.
+    expect(m["apps/web/package.json"]).toBe(false);
+    // Selected but unreachable.
+    expect(m["apps/api/package.json"]).toBe(false);
+    // Consistency: every fetched manifest is in the inspected set.
+    for (const manifest of r.analysis.manifests) {
+      if (manifest.fetched) expect(r.analysis.inspectedFiles).toContain(manifest.path);
+      else expect(r.analysis.inspectedFiles).not.toContain(manifest.path);
+    }
+  });
+
+  it("planning never presents an uninspected manifest as inspected input", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/accounting", {
+      fetchImpl: accountingHarness({ rawMissing: ["apps/api/package.json"], oversize: ["apps/web/package.json"] }),
+    });
+    const plan = deriveCodebasePlan(r.analysis);
+    const inputs = plan.inputs.join(" ");
+    expect(inputs).toContain("`package.json`");
+    expect(inputs).toContain("`libs/core/package.json`");
+    expect(inputs).not.toContain("apps/web/package.json");
+    expect(inputs).not.toContain("apps/api/package.json");
+    expect(inputs).not.toContain("package-lock.json");
+  });
+});
+
+describe("P2-1: inspection accounting is internally consistent", () => {
+  it("all fetched: notes, selection, and inspectedFiles agree", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/accounting", {
+      fetchImpl: accountingHarness({}),
+    });
+    // 7 blobs; lockfile excluded from eligibility → 6 candidates, all fetched.
+    expect(r.analysis.selection.candidateCount).toBe(6);
+    expect(r.analysis.selection.selectedCount).toBe(6);
+    expect(r.analysis.inspectedFiles.length).toBe(6);
+    expect(r.notes.some((n) => n.startsWith("Inspected all 6 eligible file(s)"))).toBe(true);
+  });
+
+  it("oversized + unreachable skips produce an accurate breakdown and uncertainty", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/accounting", {
+      fetchImpl: accountingHarness({ rawMissing: ["apps/api/package.json"], oversize: ["apps/web/package.json"] }),
+    });
+    expect(r.analysis.selection.selectedCount).toBe(4);
+    expect(r.analysis.inspectedFiles.length).toBe(4);
+    const note = r.notes.find((n) => n.startsWith("Inspected 4 of 6 selected"));
+    expect(note).toBeTruthy();
+    expect(note).toContain("1 could not be fetched");
+    expect(note).toContain("1 exceeded the per-file limit");
+    // All 6 eligible candidates WERE selected — the two skips happened at
+    // fetch time, so no "not selected" clause may appear.
+    expect(note).not.toContain("not selected");
+    expect(r.analysis.uncertainty.join(" ")).toContain("2 selected file(s) could not be inspected");
+  });
+
+  it("total-byte budget stop is counted and reported consistently", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/accounting", {
+      fetchImpl: accountingHarness({}),
+      maxTotalBytes: 200,
+    });
+    // selectedCount means "actually inspected" (P2-1); the budget stop shows
+    // up as fewer inspected than eligible candidates plus an explicit note.
+    expect(r.analysis.selection.selectedCount).toBe(3);
+    expect(r.notes.some((n) => n.includes("would have exceeded the total size limit"))).toBe(true);
+    expect(r.notes.some((n) => n.includes("Inspected 3 of 6 selected file(s)") && n.includes("would have exceeded the total size limit") && n.includes("2 not fetched after the size limit stopped ingestion"))).toBe(true);
+    expect(r.analysis.uncertainty.join(" ")).toContain("selected file(s) could not be inspected");
+    // Hard bound holds on the combined text.
+    expect(Buffer.byteLength(r.input.content, "utf8")).toBeLessThanOrEqual(200);
+  });
+
+  it("candidate count exceeding the selection budget is reflected in uncertainty", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/accounting", {
+      fetchImpl: accountingHarness({}),
+      maxFiles: 2,
+    });
+    expect(r.analysis.selection.selectedCount).toBe(2);
+    expect(r.analysis.selection.candidateCount).toBe(6);
+    expect(r.analysis.uncertainty.join(" ")).toContain("4 of 6 eligible files were not inspected");
+  });
+});

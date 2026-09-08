@@ -127,7 +127,7 @@ describe("stack detection from tree reconnaissance", () => {
     ];
     expect(detectLanguages(entries)[0]!.name).toBe("TypeScript");
     expect(detectEcosystems(entries)).toEqual(["node"]);
-    const manifests = detectManifests(entries);
+    const manifests = detectManifests(entries, new Set(["package.json"]));
     expect(manifests.find((m) => m.path === "package.json")).toMatchObject({ kind: "package.json", fetched: true });
     expect(manifests.find((m) => m.path === "package-lock.json")).toMatchObject({ kind: "lockfile", fetched: false });
     expect(detectRoots(entries)).toEqual({ sourceRoots: ["packages/", "src/"], testRoots: ["tests/"], exampleRoots: [] });

@@ -322,8 +322,9 @@ describe("codebase ingestion limits", () => {
       maxFiles: 4,
     });
     expect(result.files.length).toBe(4);
-    // The bounded-selection note names what was and was not inspected.
-    expect(result.notes.some((n) => n.includes("bounded, prioritized") && n.includes("9 eligible candidate(s) were not inspected"))).toBe(true);
+    // The outcome-derived note names what was and was not inspected.
+    expect(result.notes.some((n) => n.includes("Inspected 4 of 13 eligible file(s)") && n.includes("9 eligible candidate(s) were not selected"))).toBe(true);
+    expect(result.analysis.uncertainty.join(" ")).toContain("9 of 13 eligible files were not inspected");
     expect(result.analysis.selection.selectedCount).toBe(4);
     expect(result.analysis.selection.candidateCount).toBe(13);
     expect(result.analysis.uncertainty.join(" ")).toContain("not inspected");
