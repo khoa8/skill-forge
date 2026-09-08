@@ -110,16 +110,12 @@ export function loadEnvFile(
 }
 
 /**
- * Locate the environment file for this process: `SKILLFORGE_ENV_FILE` (an
- * explicit path, honored verbatim) first, then the working directory, then
+ * Locate the documented `.env` file: the working directory first, then
  * walking up from this module (so `node dist/server/index.js` and `npm start`
- * resolve the same file as `tsx src/server/index.ts`). Returns null when
- * discovery finds nothing (an explicit path is always returned, even if it
- * does not exist — loadDotEnv fails cleanly on it).
+ * resolve the same file as `tsx src/server/index.ts`). Returns null when no
+ * `.env` exists anywhere along the way.
  */
 export function findEnvFile(): string | null {
-  const explicit = process.env.SKILLFORGE_ENV_FILE?.trim();
-  if (explicit) return explicit;
   if (existsSync(join(process.cwd(), ".env"))) return join(process.cwd(), ".env");
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 6; i++) {
@@ -133,17 +129,11 @@ export function findEnvFile(): string | null {
 }
 
 /**
- * Load the environment file for this process. Resolution order:
- * 1. `SKILLFORGE_ENV_FILE` — an explicit path; ONLY that file is loaded and
- *    discovery is skipped entirely. This gives harnesses (production smoke,
- *    tests) a deterministic configuration context: the spawned `npm start`
- *    child cannot accidentally pick up the developer's repository `.env`.
- * 2. Otherwise the documented discovery (cwd, then module walk-up).
- *
- * Parse/size/read failures are configuration failures: by default they are
- * rethrown, but an entry point can pass `onError` to route them into its own
- * clean startup-failure path. Never logs or echoes values. Returns the file
- * path that was loaded, or null when discovery found nothing.
+ * Load the documented `.env` file if one exists. No-op (returns null) when
+ * absent. Parse/size/read failures are configuration failures: by default
+ * they are rethrown, but an entry point can pass `onError` to route them
+ * into its own clean startup-failure path. Never logs or echoes values.
+ * Returns the file path that was loaded.
  */
 export function loadDotEnv(onError?: (err: ConfigError) => void): string | null {
   const path = findEnvFile();

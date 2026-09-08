@@ -15,15 +15,12 @@
  *   4. bundled sample assets are present and readable;
  *   5. one full sample generation → export ZIP round-trip works.
  *
- * Configuration isolation: `npm start` must run with cwd = repoRoot, so the
- * child would otherwise discover the developer's repository `.env`. The
- * smoke writes a temp `.env` and passes it via SKILLFORGE_ENV_FILE (the
- * documented explicit-file override, which skips discovery entirely), so
- * the runtime configuration context is deterministic on local machines and
- * CI alike, regardless of whether a repository `.env` exists. PORT is
- * pinned INSIDE that file: if the child were not reading it, nothing would
- * listen on the expected port and the smoke would fail. Process-environment
- * values still take precedence over file values.
+ * Environment control: the child is spawned with cwd = repoRoot (npm needs
+ * the package manifest). All inherited runtime variables that could
+ * interfere are scrubbed and the ones the smoke cares about are pinned
+ * explicitly, so the check is deterministic on local machines and CI alike.
+ * A repository `.env` is never modified; if it is malformed, startup fails
+ * exactly as a real `npm start` would — which is the honest result.
  *
  * Failure handling: `fail()` throws a SmokeFailure; cleanup (process-tree
  * teardown + temp dir removal) always runs first, and the diagnostic prints
@@ -32,7 +29,7 @@
  * Usage: npm run build && npm prune --omit=dev && npm run smoke:production
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -80,22 +77,34 @@ async function run() {
 
   const port = await ephemeralPort();
   const workDir = mkdtempSync(join(tmpdir(), "skillforge-smoke-"));
-  // The explicit env file is the ONLY file the child loads (discovery is
-  // skipped when SKILLFORGE_ENV_FILE is set), so the developer's repository
-  // .env can never leak into this check. PORT is pinned inside that file to
-  // prove the child really consumes it.
-  writeFileSync(join(workDir, ".env"), `PORT=${port}\n`, "utf8");
+  const dataRoot = join(workDir, ".data-store");
+  // Scrub every inherited runtime variable that could interfere, then pin
+  // exactly what the smoke needs. The developer's repository .env is never
+  // touched — if it is malformed, startup fails as a real npm start would.
+  const childEnv = { ...process.env };
+  for (const key of [
+    "PORT",
+    "HOST",
+    "SKILLFORGE_PROVIDER",
+    "SKILLFORGE_API_KEY",
+    "SKILLFORGE_BASE_URL",
+    "SKILLFORGE_MODEL",
+    "SKILLFORGE_DATA_ROOT",
+    "SKILLFORGE_ACKNOWLEDGE_EXPOSURE",
+  ]) {
+    delete childEnv[key];
+  }
+  Object.assign(childEnv, {
+    PORT: String(port),
+    HOST: "127.0.0.1",
+    SKILLFORGE_PROVIDER: "mock",
+    SKILLFORGE_DATA_ROOT: dataRoot,
+    SKILLFORGE_ACKNOWLEDGE_EXPOSURE: "1",
+  });
   const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
   const child = spawn(npmBin, ["start"], {
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      SKILLFORGE_PROVIDER: "mock",
-      HOST: "127.0.0.1",
-      SKILLFORGE_ENV_FILE: join(workDir, ".env"),
-      SKILLFORGE_DATA_ROOT: join(workDir, ".data-store"),
-      SKILLFORGE_ACKNOWLEDGE_EXPOSURE: "1",
-    },
+    env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -139,7 +148,6 @@ async function run() {
     const health = await waitHealthy();
     check("npm start (package start script) launches the compiled server", true);
     check("start script points at the compiled entry", pkg.scripts.start.includes("dist/server/index.js"), pkg.scripts.start);
-    check("isolated env file consumed by the child (PORT from SKILLFORGE_ENV_FILE)", health.ok === true);
     check("/api/health ok with mock provider", health.ok === true && health.provider === "mock" && health.offlineDemo === true, JSON.stringify(health));
 
     const ui = await fetch(`http://127.0.0.1:${port}/`);
@@ -216,7 +224,7 @@ async function stopServer(child) {
 
 try {
   await run();
-  console.log("production smoke OK (npm start with isolated env file → health, UI, bundled samples, generate → export)");
+  console.log("production smoke OK (npm start with scrubbed/pinned env → health, UI, bundled samples, generate → export)");
 } catch (err) {
   // One clean diagnostic — cleanup already completed in run()'s finally.
   if (err instanceof SmokeFailure) {

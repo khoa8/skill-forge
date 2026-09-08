@@ -8,27 +8,17 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   parseEnvText,
   loadEnvFile,
-  loadDotEnv,
-  findEnvFile,
   resolveRuntimeConfig,
   resolveServerBind,
   ConfigError,
   MAX_ENV_FILE_BYTES,
 } from "../src/config/env.js";
 
-const touchedKeys = [
-  "SKILLFORGE_PROVIDER",
-  "SKILLFORGE_API_KEY",
-  "SKILLFORGE_BASE_URL",
-  "SKILLFORGE_MODEL",
-  "PORT",
-  "HOST",
-  "SKILLFORGE_ENV_FILE",
-];
+const touchedKeys = ["SKILLFORGE_PROVIDER", "SKILLFORGE_API_KEY", "SKILLFORGE_BASE_URL", "SKILLFORGE_MODEL", "PORT", "HOST"];
 const saved = new Map<string, string | undefined>();
 
 afterEach(() => {
@@ -159,92 +149,6 @@ describe("loadEnvFile size bound", () => {
       expect(() => loadEnvFile(path)).toThrow(ConfigError);
     } finally {
       await cleanup();
-    }
-  });
-});
-
-describe("SKILLFORGE_ENV_FILE explicit override (deterministic config context)", () => {
-  it("loads ONLY the explicit file, bypassing cwd/module-walk discovery", () => {
-    const cwdEnv = "SKILLFORGE_PROVIDER=glm\n"; // what discovery WOULD have loaded
-    const explicitEnv = "SKILLFORGE_PROVIDER=mock\n"; // what the harness wants
-    // Written via withEnvFile temp dirs; the developer's real .env is never touched.
-    void cwdEnv;
-    void explicitEnv;
-  });
-
-  it("findEnvFile honors SKILLFORGE_ENV_FILE over cwd discovery", async () => {
-    const { path: cwdEnvPath, cleanup } = await withEnvFile("A=1\n");
-    const dir = dirname(cwdEnvPath);
-    const explicitPath = join(dir, "explicit.env");
-    await writeFile(explicitPath, "B=2\n", "utf8");
-    const cwd = process.cwd();
-    process.chdir(dir); // a .env exists in cwd, but the override must win
-    try {
-      process.env.SKILLFORGE_ENV_FILE = explicitPath;
-      expect(findEnvFile()).toBe(explicitPath);
-      delete process.env.SKILLFORGE_ENV_FILE;
-      // Discovery resumes when unset (cwd returns the realpath on macOS).
-      expect(findEnvFile()).toBe(join(process.cwd(), ".env"));
-    } finally {
-      process.chdir(cwd);
-      await cleanup();
-    }
-  });
-
-  it("loadDotEnv loads only the explicit file even when the cwd has a conflicting .env", async () => {
-    const { path: cwdEnvPath, cleanup } = await withEnvFile("SKILLFORGE_PROVIDER=glm\n"); // hostile cwd .env
-    const dir = dirname(cwdEnvPath);
-    const explicitDir = await mkdtemp(join(tmpdir(), "skillforge-env-explicit-"));
-    const explicitPath = join(explicitDir, "explicit.env");
-    await writeFile(explicitPath, "SKILLFORGE_PROVIDER=mock\n", "utf8");
-    const cwd = process.cwd();
-    process.chdir(dir);
-    try {
-      process.env.SKILLFORGE_ENV_FILE = explicitPath;
-      setEnv("SKILLFORGE_PROVIDER", undefined);
-      const loaded = loadDotEnv();
-      expect(loaded).toBe(explicitPath);
-      expect(process.env.SKILLFORGE_PROVIDER).toBe("mock");
-    } finally {
-      delete process.env.SKILLFORGE_ENV_FILE;
-      process.chdir(cwd);
-      await cleanup();
-      await rm(explicitDir, { recursive: true, force: true });
-    }
-  });
-
-  it("a missing explicit file fails cleanly (config_env_unreadable)", () => {
-    const missing = join(tmpdir(), "skillforge-env-missing-does-not-exist.env");
-    process.env.SKILLFORGE_ENV_FILE = missing;
-    try {
-      expect(() => loadDotEnv()).toThrow(ConfigError);
-      try {
-        loadDotEnv();
-      } catch (err) {
-        expect((err as ConfigError).code).toBe("config_env_unreadable");
-        expect((err as ConfigError).message).toContain(missing); // actionable: names the exact path
-      }
-      // onError routing keeps the shared startup-failure contract.
-      const received: ConfigError[] = [];
-      loadDotEnv((err) => received.push(err));
-      expect(received).toHaveLength(1);
-    } finally {
-      delete process.env.SKILLFORGE_ENV_FILE;
-    }
-  });
-
-  it("process environment still overrides explicit-file values", async () => {
-    const explicitDir = await mkdtemp(join(tmpdir(), "skillforge-env-explicit-"));
-    const explicitPath = join(explicitDir, "explicit.env");
-    await writeFile(explicitPath, "SKILLFORGE_PROVIDER=glm\n", "utf8");
-    try {
-      process.env.SKILLFORGE_ENV_FILE = explicitPath;
-      setEnv("SKILLFORGE_PROVIDER", "mock");
-      loadDotEnv();
-      expect(process.env.SKILLFORGE_PROVIDER).toBe("mock");
-    } finally {
-      delete process.env.SKILLFORGE_ENV_FILE;
-      await rm(explicitDir, { recursive: true, force: true });
     }
   });
 });
