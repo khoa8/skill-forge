@@ -9,7 +9,7 @@ import {
   MAX_URL_BYTES,
   type LookupAllFn,
 } from "../src/core/sources/url.js";
-import { isGloballyReachable } from "../src/core/sources/safe-fetch.js";
+import { isGloballyReachable } from "../src/core/sources/ip-policy.js";
 
 type LookupFn = (hostname: string, options: { all: true; verbatim: true }) => Promise<LookupAddress[]>;
 

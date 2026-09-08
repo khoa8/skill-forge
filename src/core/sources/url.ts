@@ -25,7 +25,8 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
-import { safeFetch, isGloballyReachable, type SafeResponse } from "./safe-fetch.js";
+import { safeFetch, type SafeResponse } from "./safe-fetch.js";
+import { isGloballyReachable } from "./ip-policy.js";
 
 /** DNS lookup shape used for SSRF validation and injection. */
 export interface LookupAllFn {
@@ -50,7 +51,7 @@ export class UrlSourceError extends Error {
 /**
  * Hosts refused as SSRF destinations: local naming patterns plus any
  * literal IP that is not globally reachable (decision delegated to the one
- * centralized classifier in safe-fetch.ts — see isGloballyReachable).
+ * centralized IP policy (ip-policy.ts) — see isGloballyReachable).
  */
 export function isRefusedHost(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, "");

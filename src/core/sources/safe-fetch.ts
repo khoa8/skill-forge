@@ -24,6 +24,7 @@ import http from "node:http";
 import https from "node:https";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { isGloballyReachable } from "./ip-policy.js";
 import type { LookupAllFn } from "./url.js";
 
 export class SafeFetchError extends Error {
@@ -34,173 +35,6 @@ export class SafeFetchError extends Error {
     super(message);
     this.name = "SafeFetchError";
   }
-}
-
-/**
- * The SSRF security decision, in ONE place (shared by literal-host checks,
- * DNS record validation, redirect revalidation, and the pinned connection):
- *
- * > URL ingestion may connect only to addresses that are actually globally
- * > reachable for ordinary public Internet traffic.
- *
- * This is an ALLOWLIST, not a denylist — "not currently blocklisted" is not
- * "safe". An address is connectable only when it classifies as globally
- * reachable; anything unrecognized, special-purpose, or malformed fails
- * closed. Both IPv4 and IPv6 parse to binary form (no string prefixes).
- *
- * IPv4 (IANA special-purpose registry — all refused): 0.0.0.0/8, 10/8,
- * 100.64/10 (CGNAT), 127/8, 169.254/16, 172.16/12, 192.0.0.0/24, 192.0.2/24
- * (TEST-NET-1), 192.88.99/24 (6to4 relay anycast), 192.168/16, 198.18/15
- * (benchmarking), 198.51.100/24 (TEST-NET-2), 203.0.113/24 (TEST-NET-3),
- * 224/4 (multicast), 240/4 (reserved incl. broadcast).
- *
- * IPv6: global unicast 2000::/3 is the allowlist core, minus non-routable
- * exceptions inside it (2001:db8::/32 documentation, 2001:2::/48
- * benchmarking, ORCHID 2001:10::/28 + 2001:30::/28). Everything outside
- * 2000::/3 fails closed — which covers :: (unspecified), ::1 (loopback),
- * 100::/64 (discard-only), 64:ff9b:1::/48 (local-use NAT64), fe80::/10
- * link-local, fec0::/10 site-local, fc00::/7 unique-local, ff00::/8
- * multicast, and any future special allocation. Embedded-IPv4 forms are
- * re-classified as IPv4 before anything else: IPv4-mapped ::ffff:0:0/96
- * (BOTH textual forms — the WHATWG URL canonicalizer emits the hex form),
- * NAT64 64:ff9b::/96, 6to4 2002::/16, and Teredo 2001::/32 — so a private
- * or special-purpose embedded address can never tunnel through.
- */
-export function isGloballyReachable(ip: string): boolean {
-  if (ip.includes(":")) {
-    const hextets = parseIPv6Hextets(ip);
-    return hextets === null ? false : isGloballyReachableIPv6(hextets);
-  }
-  const v4 = parseIPv4(ip);
-  return v4 === null ? false : isGloballyReachableIPv4(v4);
-}
-
-/** Globally reachable IPv4: not in any special-purpose range. */
-function isGloballyReachableIPv4(v4: number): boolean {
-  const first = v4 >>> 24; // /8 prefix value
-  const firstTwo = v4 >>> 16; // /16 prefix value
-  const firstThree = v4 >>> 8; // /24 prefix value
-  if (first === 0) return false; // 0.0.0.0/8 this-network
-  if (first === 10) return false; // 10.0.0.0/8 private
-  if (firstTwo >= 0x6440 && firstTwo <= 0x647f) return false; // 100.64.0.0/10 CGNAT
-  if (first === 127) return false; // 127.0.0.0/8 loopback
-  if (firstTwo === 0xa9fe) return false; // 169.254.0.0/16 link-local
-  if (firstTwo >= 0xac10 && firstTwo <= 0xac1f) return false; // 172.16.0.0/12 private
-  if (firstThree === 0xc00000) return false; // 192.0.0.0/24 IETF protocol assignments
-  if (firstThree === 0xc00002) return false; // 192.0.2.0/24 TEST-NET-1
-  if (firstThree === 0xc05863) return false; // 192.88.99.0/24 6to4 relay anycast (deprecated)
-  if (firstTwo === 0xc0a8) return false; // 192.168.0.0/16 private
-  if (firstTwo >= 0xc612 && firstTwo <= 0xc613) return false; // 198.18.0.0/15 benchmarking
-  if (firstThree === 0xc63364) return false; // 198.51.100.0/24 TEST-NET-2
-  if (firstThree === 0xcb0071) return false; // 203.0.113.0/24 TEST-NET-3
-  if (first >= 224) return false; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved (incl. broadcast)
-  return true;
-}
-
-/** Globally reachable IPv6: allowlist of global unicast, with embedded-IPv4 reclassification. */
-function isGloballyReachableIPv6(h: number[]): boolean {
-  // Embedded-IPv4 forms first — the embedded address decides.
-  // IPv4-mapped ::ffff:0:0/96 (covers dotted AND hex textual forms).
-  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
-    return isGloballyReachableIPv4(((h[6]! << 16) | h[7]!) >>> 0);
-  }
-  // NAT64 well-known prefix 64:ff9b::/96.
-  if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
-    return isGloballyReachableIPv4(((h[6]! << 16) | h[7]!) >>> 0);
-  }
-  // 6to4 2002::/16 — embedded IPv4 rides in hextets 1-2.
-  if (h[0] === 0x2002) {
-    return isGloballyReachableIPv4(((h[1]! << 16) | h[2]!) >>> 0);
-  }
-  // Teredo 2001::/32 — client IPv4 is the obfuscated last 32 bits.
-  if (h[0] === 0x2001 && h[1] === 0) {
-    return isGloballyReachableIPv4((((h[6]! ^ 0xffff) << 16) | (h[7]! ^ 0xffff)) >>> 0);
-  }
-  // Global unicast 2000::/3 is the allowlist core; everything outside it
-  // fails closed (unspecified, loopback, discard-only 100::/64, local-use
-  // NAT64 64:ff9b:1::/48, link-local, site-local, unique-local, multicast, …).
-  if (h[0]! < 0x2000 || h[0]! > 0x3fff) return false;
-  // Non-routable exceptions inside 2000::/3:
-  if (h[0] === 0x2001 && h[1] === 0x0db8) return false; // 2001:db8::/32 documentation
-  if (h[0] === 0x2001 && h[1] === 0x0002 && h[2] === 0) return false; // 2001:2::/48 benchmarking
-  if (h[0] === 0x2001 && h[1]! >= 0x0010 && h[1]! <= 0x001f) return false; // 2001:10::/28 ORCHID (deprecated)
-  if (h[0] === 0x2001 && h[1]! >= 0x0030 && h[1]! <= 0x003f) return false; // 2001:30::/28 ORCHIDv2
-  return true;
-}
-
-/** Parse a dotted-quad IPv4 address to a 32-bit number; null when invalid. */
-function parseIPv4(ip: string): number | null {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return null;
-  let out = 0;
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const n = Number(part);
-    if (n > 255) return null;
-    out = (out << 8) | n;
-  }
-  return out >>> 0;
-}
-
-/**
- * Parse an IPv6 address into its 8 hextets; null when invalid (including
- * zone IDs). Handles :: compression and a trailing embedded dotted-quad IPv4
- * (::ffff:192.168.1.1 style). Head groups anchor the start, tail groups
- * anchor the end; :: fills the middle with zeros.
- */
-function parseIPv6Hextets(input: string): number[] | null {
-  if (input.includes("%")) return null; // zone IDs never appear on our dials; fail closed
-  let text = input;
-  let embeddedTail: number[] | null = null;
-  const lastColon = text.lastIndexOf(":");
-  if (lastColon !== -1 && text.slice(lastColon + 1).includes(".")) {
-    const v4 = parseIPv4(text.slice(lastColon + 1));
-    if (v4 === null) return null;
-    embeddedTail = [(v4 >>> 16) & 0xffff, v4 & 0xffff];
-    text = text.slice(0, lastColon);
-    if (text.endsWith(":")) text = text.slice(0, -1);
-  }
-  const parseGroup = (raw: string): number | null =>
-    /^[0-9a-f]{1,4}$/.test(raw) ? Number.parseInt(raw, 16) : null;
-  const headGroups: number[] = [];
-  const tailGroups: number[] = [];
-  const doubleColon = text.indexOf("::");
-  if (doubleColon !== -1) {
-    if (text.indexOf("::", doubleColon + 1) !== -1) return null; // more than one "::"
-    const headText = text.slice(0, doubleColon);
-    const tailText = text.slice(doubleColon + 2);
-    if (headText.length > 0) {
-      for (const raw of headText.split(":")) {
-        const g = parseGroup(raw);
-        if (g === null) return null;
-        headGroups.push(g);
-      }
-    }
-    if (tailText.length > 0) {
-      for (const raw of tailText.split(":")) {
-        const g = parseGroup(raw);
-        if (g === null) return null;
-        tailGroups.push(g);
-      }
-    }
-  } else {
-    for (const raw of text.split(":")) {
-      const g = parseGroup(raw);
-      if (g === null) return null;
-      tailGroups.push(g);
-    }
-  }
-  if (embeddedTail) tailGroups.push(...embeddedTail);
-  const explicit = headGroups.length + tailGroups.length;
-  if (explicit > 8) return null;
-  if (doubleColon !== -1) {
-    // :: must replace at least one group and the total must fit 8.
-    const fill = 8 - explicit;
-    if (fill < 1) return null;
-    return [...headGroups, ...new Array<number>(fill).fill(0), ...tailGroups];
-  }
-  if (explicit !== 8) return null;
-  return [...headGroups, ...tailGroups];
 }
 
 export interface SafeResponse {
@@ -222,13 +56,14 @@ export interface PinnedAddress {
 }
 
 /**
- * Resolve `hostname` and refuse ANY private/loopback/link-local record.
- * Returns the validated public records — the ONLY addresses the connection
- * may use. Bracketed IPv6 literals ([…]) are validated directly; names are
- * resolved through `lookupImpl`. When `signal` is provided, a stalled DNS
- * resolution is aborted by it (one end-to-end deadline covers DNS too).
- * Throws SafeFetchError with `url_dns_failure`, `url_private_host`, or
- * `url_deadline_exceeded`.
+ * Resolve `hostname` and connect ONLY to addresses the centralized IP
+ * policy (ip-policy.ts) classifies as globally reachable — for the whole
+ * record set, at connection time. Returns the validated records — the ONLY
+ * addresses the connection may use. Bracketed IPv6 literals ([…]) are
+ * validated directly; names are resolved through `lookupImpl`. When
+ * `signal` is provided, a stalled DNS resolution is aborted by it (one
+ * end-to-end deadline covers DNS too). Throws SafeFetchError with
+ * `url_dns_failure`, `url_private_host`, or `url_deadline_exceeded`.
  */
 export async function assertPublicDns(
   hostname: string,

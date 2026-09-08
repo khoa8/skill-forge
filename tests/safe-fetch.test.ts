@@ -13,7 +13,8 @@
  */
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { safeFetch, pinnedLookup, assertPublicDns, isGloballyReachable } from "../src/core/sources/safe-fetch.js";
+import { safeFetch, pinnedLookup, assertPublicDns } from "../src/core/sources/safe-fetch.js";
+import { isGloballyReachable } from "../src/core/sources/ip-policy.js";
 import type { LookupAllFn } from "../src/core/sources/url.js";
 
 /** TEST-NET-3 documentation address (public-range, never routed). */
