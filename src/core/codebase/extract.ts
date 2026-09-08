@@ -368,6 +368,8 @@ export interface AnalysisFromFilesInput {
   owner: string;
   name: string;
   ref: string;
+  /** Subpath scope the analysis covers; undefined = whole repository. */
+  scope?: string;
   /** Reconnaissance results from the tree (already computed). */
   languages: RepositoryAnalysis["languages"];
   ecosystems: string[];
@@ -415,7 +417,9 @@ export function buildRepositoryAnalysisFromFiles(
   const publicInterfaces = publicInterfacesFromFiles(input.fetched);
   const testing = testingEvidence(input.fetched, depTesting);
 
-  // Entry-point evidence from package.json main/types fields. When tree
+  // Entry-point evidence from package.json main/types fields. Manifest field
+  // values are manifest-relative and are resolved against the manifest's own
+  // directory (correct for scoped monorepo packages). When tree
   // reconnaissance already named the same file, the manifest evidence is
   // merged into that entry's reason instead of duplicating it.
   const entrypoints = [...input.entrypoints];
@@ -424,11 +428,13 @@ export function buildRepositoryAnalysisFromFiles(
     const info = parsePackageJson(file);
     if (!info) continue;
     if (info.main) {
-      const existing = entrypoints.find((e) => e.path === info.main);
+      const manifestDir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+      const resolved = `${manifestDir === "" ? "" : `${manifestDir}/`}${info.main.replace(/^\.\//, "")}`;
+      const existing = entrypoints.find((e) => e.path === resolved);
       if (existing) {
         existing.reason = `${existing.reason} + package.json main field (${file.path})`;
       } else {
-        entrypoints.push({ path: info.main, reason: `package.json main field (${file.path})` });
+        entrypoints.push({ path: resolved, reason: `package.json main field (${file.path})` });
       }
     }
   }
@@ -446,7 +452,13 @@ export function buildRepositoryAnalysisFromFiles(
   }
 
   return {
-    repository: { url: input.url, owner: input.owner, name: input.name, ref: input.ref },
+    repository: {
+      url: input.url,
+      owner: input.owner,
+      name: input.name,
+      ref: input.ref,
+      ...(input.scope ? { scope: input.scope } : {}),
+    },
     mode: "codebase",
     languages: input.languages,
     ecosystems: input.ecosystems,

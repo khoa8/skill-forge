@@ -295,12 +295,24 @@ export interface DetectedRoots {
   exampleRoots: string[];
 }
 
-/** Top-level source/test/example roots actually present in the tree. */
-export function detectRoots(entries: TreeEntryLike[]): DetectedRoots {
+/** Path relative to a reconnaissance scope: "" keeps the path unchanged;
+ * a scope strips its own prefix so scope-rooted structure looks like root
+ * structure. Output paths elsewhere stay in full repository form. */
+export function pathRelativeTo(path: string, basePath: string): string {
+  if (basePath === "") return path;
+  if (path === basePath) return "";
+  return path.startsWith(`${basePath}/`) ? path.slice(basePath.length + 1) : path;
+}
+
+/** Top-level source/test/example roots actually present in the tree. When
+ * `basePath` is set, roots are computed relative to that scope. */
+export function detectRoots(entries: TreeEntryLike[], basePath = ""): DetectedRoots {
   const tops = new Set<string>();
   for (const e of entries) {
     if (e.type !== "blob") continue;
-    tops.add(e.path.split("/")[0]!.toLowerCase());
+    const rel = pathRelativeTo(e.path, basePath);
+    if (rel === "") continue;
+    tops.add(rel.split("/")[0]!.toLowerCase());
   }
   const pick = (names: Set<string>) =>
     [...names].filter((n) => tops.has(n)).sort((a, b) => a.localeCompare(b)).map((n) => `${n}/`);
@@ -313,14 +325,14 @@ export function detectRoots(entries: TreeEntryLike[]): DetectedRoots {
 
 /** Repository instruction files: root-level high-priority files plus nested
  * AGENTS.md/CLAUDE.md files that affect subtrees. Root files first. */
-export function detectInstructionFiles(entries: TreeEntryLike[]): string[] {
+export function detectInstructionFiles(entries: TreeEntryLike[], basePath = ""): string[] {
   const out: { path: string; depth: number }[] = [];
   for (const e of entries) {
     if (e.type !== "blob") continue;
     const base = (e.path.split("/").pop() ?? "").toLowerCase();
     const isReadme = /^readme(\.[a-z0-9]+)?$/.test(base);
     if (!INSTRUCTION_BASENAMES.has(base) && !isReadme) continue;
-    out.push({ path: e.path, depth: e.path.split("/").length });
+    out.push({ path: e.path, depth: pathRelativeTo(e.path, basePath).split("/").length });
   }
   return out
     .sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path))
@@ -330,15 +342,16 @@ export function detectInstructionFiles(entries: TreeEntryLike[]): string[] {
 
 /** Workspace/package directories: directories (depth ≥ 1) containing their
  * own package manifest — monorepo boundaries. */
-export function detectWorkspacePackages(entries: TreeEntryLike[]): string[] {
+export function detectWorkspacePackages(entries: TreeEntryLike[], basePath = ""): string[] {
   const out = new Set<string>();
   for (const e of entries) {
     if (e.type !== "blob") continue;
-    const segments = e.path.split("/");
+    const segments = pathRelativeTo(e.path, basePath).split("/");
     if (segments.length < 2 || segments.length > 4) continue;
     const base = segments[segments.length - 1]!.toLowerCase();
     if (!WORKSPACE_MANIFEST_BASENAMES.has(base)) continue;
-    out.add(segments.slice(0, -1).join("/"));
+    // Full repository path of the package directory.
+    out.add(e.path.split("/").slice(0, -1).join("/"));
   }
   return [...out].sort((a, b) => a.localeCompare(b)).slice(0, 24);
 }
@@ -488,15 +501,20 @@ export function selectCodebaseCandidates(
 }
 
 /** Likely entrypoints from tree structure: entrypoint-name files at shallow
- * depth, preferring source roots. Deterministic (score desc, then path). */
-export function detectEntrypointCandidates(entries: TreeEntryLike[]): { path: string; reason: string }[] {
+ * depth, preferring source roots. When `basePath` is set, location checks are
+ * relative to that scope. Deterministic (score desc, then path). */
+export function detectEntrypointCandidates(
+  entries: TreeEntryLike[],
+  basePath = "",
+): { path: string; reason: string }[] {
   const candidates: { path: string; score: number }[] = [];
   for (const e of entries) {
     if (e.type !== "blob") continue;
-    const segments = e.path.split("/");
+    const rel = pathRelativeTo(e.path, basePath);
+    const segments = rel.split("/");
     if (segments.length > 3) continue;
     const top = segments.length > 1 ? segments[0]!.toLowerCase() : "";
-    // Entrypoints live at the repository root, under a source root, or in
+    // Entrypoints live at the scope root, under a source root, or in
     // Go-style cmd/<name>/. CI workflows, docs, tests, and examples are
     // never entrypoints even when they carry entrypoint-shaped names.
     const locationOk = segments.length === 1 || SOURCE_ROOT_NAMES.has(top) || top === "cmd";
@@ -722,8 +740,15 @@ export async function fetchGithubCodebaseSource(
       notes.push(`Inspected all ${files.length} eligible file(s) in ${ref0.owner}/${ref0.repo}@${ref}.`);
     }
 
-    // 6. Structured analysis: tree reconnaissance + extraction from fetched files.
-    const instructions = detectInstructionFiles(allEntries).filter((p) =>
+    // 6. Structured analysis: SCOPED reconnaissance + extraction from fetched
+    // files. Every repository fact describing the requested scope comes from
+    // entries inside that scope; whole-tree listing metadata is kept separate
+    // (selection.treeBlobCount, labeled as the GitHub tree listing).
+    const scopedEntries =
+      ref0.path === ""
+        ? allEntries
+        : allEntries.filter((e) => e.path === ref0.path || e.path.startsWith(`${ref0.path}/`));
+    const instructions = detectInstructionFiles(scopedEntries, ref0.path).filter((p) =>
       files.some((f) => f.path === p),
     );
     const analysis = buildRepositoryAnalysisFromFiles(
@@ -732,17 +757,18 @@ export async function fetchGithubCodebaseSource(
         owner: ref0.owner,
         name: ref0.repo,
         ref,
-        languages: detectLanguages(allEntries),
-        ecosystems: detectEcosystems(allEntries),
-        manifests: detectManifests(allEntries),
+        scope: ref0.path === "" ? undefined : ref0.path,
+        languages: detectLanguages(scopedEntries),
+        ecosystems: detectEcosystems(scopedEntries),
+        manifests: detectManifests(scopedEntries),
         structure: {
-          ...detectRoots(allEntries),
-          packages: detectWorkspacePackages(allEntries),
+          ...detectRoots(scopedEntries, ref0.path),
+          packages: detectWorkspacePackages(scopedEntries, ref0.path),
         },
-        entrypoints: detectEntrypointCandidates(allEntries),
+        entrypoints: detectEntrypointCandidates(scopedEntries, ref0.path),
         importantFiles: [],
         instructions,
-        ciWorkflows: detectCiWorkflows(allEntries),
+        ciWorkflows: detectCiWorkflows(scopedEntries),
         fetched: files,
         selection: {
           candidateCount,

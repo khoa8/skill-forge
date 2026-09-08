@@ -184,6 +184,9 @@ export const RepositoryAnalysis = z.object({
     owner: z.string().min(1).max(120),
     name: z.string().min(1).max(120),
     ref: z.string().min(1).max(200),
+    /** Subpath scope the analysis covers (e.g. "packages/a"); absent = whole
+     * repository. All structured facts come from entries inside this scope. */
+    scope: z.string().max(300).optional(),
   }),
   mode: z.literal("codebase"),
   languages: z.array(RepositoryClaim).max(12),

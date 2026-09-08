@@ -62,20 +62,32 @@ export function normalizeSource(input: SourceInput): NormalizedSource {
     );
   }
 
+  // Codebase mode ingests source code whose characters ARE the evidence:
+  // markup, tags, and entities must survive untouched (inert text means
+  // "do not execute", not "rewrite before analysis"). Only line endings are
+  // normalized so provenance line numbers stay stable across platforms.
+  const isCodebase = input.type === "github-codebase";
+
   const notes: string[] = [];
   let text = input.content.replace(/\r\n?/g, "\n");
-  const html = stripHtml(text);
-  text = html.text;
-  if (html.hadHtml) notes.push("HTML markup was detected and stripped from the source.");
-  text = decodeBasicEntities(text);
-  // Drop trailing whitespace per line, collapse >2 blank lines to keep line
-  // numbers stable while making headings detection reliable.
-  text = text
-    .split("\n")
-    .map((l) => (l.trim().length === 0 ? "" : l.replace(/[ \t]+$/g, "")))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
-  text = text.replace(/\s+$/g, "") + "\n";
+  if (isCodebase) {
+    // Preserve every interior character; only the very end is trimmed so the
+    // trailing-newline convention (and lineCount) matches the docs path.
+    text = text.replace(/\s+$/g, "") + "\n";
+  } else {
+    const html = stripHtml(text);
+    text = html.text;
+    if (html.hadHtml) notes.push("HTML markup was detected and stripped from the source.");
+    text = decodeBasicEntities(text);
+    // Drop trailing whitespace per line, collapse >2 blank lines to keep line
+    // numbers stable while making headings detection reliable.
+    text = text
+      .split("\n")
+      .map((l) => (l.trim().length === 0 ? "" : l.replace(/[ \t]+$/g, "")))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n");
+    text = text.replace(/\s+$/g, "") + "\n";
+  }
 
   const lines = text.split("\n");
   if (lines.length === 0 || text.trim().length === 0) {
