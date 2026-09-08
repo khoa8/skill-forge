@@ -37,73 +37,95 @@ export class SafeFetchError extends Error {
 }
 
 /**
- * IP ranges refused to prevent SSRF. Binary/CIDR classification (no string
- * prefixes): IPv4 is checked as a 32-bit number against the refused ranges;
- * IPv6 is parsed into its 8 hextets and checked by prefix bits, including
- * IPv4-mapped (::ffff:0:0/96, in BOTH dotted and hex textual forms — the URL
- * canonicalizer emits the hex form), NAT64 (64:ff9b::/96), deprecated
- * IPv4-compatible (::/96), 6to4 (2002::/16), and Teredo (2001::/32) embedded
- * IPv4 addresses, which are re-classified as IPv4. Refused IPv6 ranges:
- * loopback (::1), unspecified (::), link-local fe80::/10, unique-local
- * fc00::/7, multicast ff00::/8, documentation 2001:db8::/32. Globally
- * routable unicast (2000::/3 outside the refused ranges) stays usable.
- * Unparseable input fails CLOSED (refused).
+ * The SSRF security decision, in ONE place (shared by literal-host checks,
+ * DNS record validation, redirect revalidation, and the pinned connection):
+ *
+ * > URL ingestion may connect only to addresses that are actually globally
+ * > reachable for ordinary public Internet traffic.
+ *
+ * This is an ALLOWLIST, not a denylist — "not currently blocklisted" is not
+ * "safe". An address is connectable only when it classifies as globally
+ * reachable; anything unrecognized, special-purpose, or malformed fails
+ * closed. Both IPv4 and IPv6 parse to binary form (no string prefixes).
+ *
+ * IPv4 (IANA special-purpose registry — all refused): 0.0.0.0/8, 10/8,
+ * 100.64/10 (CGNAT), 127/8, 169.254/16, 172.16/12, 192.0.0.0/24, 192.0.2/24
+ * (TEST-NET-1), 192.88.99/24 (6to4 relay anycast), 192.168/16, 198.18/15
+ * (benchmarking), 198.51.100/24 (TEST-NET-2), 203.0.113/24 (TEST-NET-3),
+ * 224/4 (multicast), 240/4 (reserved incl. broadcast).
+ *
+ * IPv6: global unicast 2000::/3 is the allowlist core, minus non-routable
+ * exceptions inside it (2001:db8::/32 documentation, 2001:2::/48
+ * benchmarking, ORCHID 2001:10::/28 + 2001:30::/28). Everything outside
+ * 2000::/3 fails closed — which covers :: (unspecified), ::1 (loopback),
+ * 100::/64 (discard-only), 64:ff9b:1::/48 (local-use NAT64), fe80::/10
+ * link-local, fec0::/10 site-local, fc00::/7 unique-local, ff00::/8
+ * multicast, and any future special allocation. Embedded-IPv4 forms are
+ * re-classified as IPv4 before anything else: IPv4-mapped ::ffff:0:0/96
+ * (BOTH textual forms — the WHATWG URL canonicalizer emits the hex form),
+ * NAT64 64:ff9b::/96, 6to4 2002::/16, and Teredo 2001::/32 — so a private
+ * or special-purpose embedded address can never tunnel through.
  */
-export function isPrivateIp(ip: string): boolean {
+export function isGloballyReachable(ip: string): boolean {
   if (ip.includes(":")) {
     const hextets = parseIPv6Hextets(ip);
-    return hextets === null ? true : isPrivateIPv6(hextets);
+    return hextets === null ? false : isGloballyReachableIPv6(hextets);
   }
   const v4 = parseIPv4(ip);
-  return v4 === null ? true : isPrivateIPv4(v4);
+  return v4 === null ? false : isGloballyReachableIPv4(v4);
 }
 
-/** Refused IPv4 ranges, as bit checks. */
-function isPrivateIPv4(v4: number): boolean {
-  const first = v4 >>> 24; // /8 prefix
+/** Globally reachable IPv4: not in any special-purpose range. */
+function isGloballyReachableIPv4(v4: number): boolean {
+  const first = v4 >>> 24; // /8 prefix value
   const firstTwo = v4 >>> 16; // /16 prefix value
-  if (first === 0 || first === 10 || first === 127) return true; // this-network, private, loopback
-  if (firstTwo === 0xa9fe) return true; // 169.254.0.0/16 link-local
-  if (firstTwo >= 0xac10 && firstTwo <= 0xac1f) return true; // 172.16.0.0/12 private
-  if (firstTwo === 0xc0a8) return true; // 192.168.0.0/16 private
-  if (firstTwo >= 0x6440 && firstTwo <= 0x647f) return true; // 100.64.0.0/10 CGNAT
-  if (first >= 224) return true; // multicast (224/4) + reserved/broadcast (240/4, 255.255.255.255)
-  return false;
+  const firstThree = v4 >>> 8; // /24 prefix value
+  if (first === 0) return false; // 0.0.0.0/8 this-network
+  if (first === 10) return false; // 10.0.0.0/8 private
+  if (firstTwo >= 0x6440 && firstTwo <= 0x647f) return false; // 100.64.0.0/10 CGNAT
+  if (first === 127) return false; // 127.0.0.0/8 loopback
+  if (firstTwo === 0xa9fe) return false; // 169.254.0.0/16 link-local
+  if (firstTwo >= 0xac10 && firstTwo <= 0xac1f) return false; // 172.16.0.0/12 private
+  if (firstThree === 0xc00000) return false; // 192.0.0.0/24 IETF protocol assignments
+  if (firstThree === 0xc00002) return false; // 192.0.2.0/24 TEST-NET-1
+  if (firstThree === 0xc05863) return false; // 192.88.99.0/24 6to4 relay anycast (deprecated)
+  if (firstTwo === 0xc0a8) return false; // 192.168.0.0/16 private
+  if (firstTwo >= 0xc612 && firstTwo <= 0xc613) return false; // 198.18.0.0/15 benchmarking
+  if (firstThree === 0xc63364) return false; // 198.51.100.0/24 TEST-NET-2
+  if (firstThree === 0xcb0071) return false; // 203.0.113.0/24 TEST-NET-3
+  if (first >= 224) return false; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved (incl. broadcast)
+  return true;
 }
 
-/** Refused IPv6 ranges, as hextet-prefix checks. */
-function isPrivateIPv6(h: number[]): boolean {
-  // IPv4-mapped ::ffff:0:0/96 — re-classify the embedded IPv4 (covers both
-  // textual forms: the URL canonicalizer emits hex, resolvers may emit either).
+/** Globally reachable IPv6: allowlist of global unicast, with embedded-IPv4 reclassification. */
+function isGloballyReachableIPv6(h: number[]): boolean {
+  // Embedded-IPv4 forms first — the embedded address decides.
+  // IPv4-mapped ::ffff:0:0/96 (covers dotted AND hex textual forms).
   if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
-    return isPrivateIPv4(((h[6]! << 16) | h[7]!) >>> 0);
+    return isGloballyReachableIPv4(((h[6]! << 16) | h[7]!) >>> 0);
   }
-  // NAT64 well-known prefix 64:ff9b::/96 — same embedded-IPv4 treatment.
+  // NAT64 well-known prefix 64:ff9b::/96.
   if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
-    return isPrivateIPv4(((h[6]! << 16) | h[7]!) >>> 0);
+    return isGloballyReachableIPv4(((h[6]! << 16) | h[7]!) >>> 0);
   }
   // 6to4 2002::/16 — embedded IPv4 rides in hextets 1-2.
   if (h[0] === 0x2002) {
-    return isPrivateIPv4(((h[1]! << 16) | h[2]!) >>> 0);
+    return isGloballyReachableIPv4(((h[1]! << 16) | h[2]!) >>> 0);
   }
   // Teredo 2001::/32 — client IPv4 is the obfuscated last 32 bits.
   if (h[0] === 0x2001 && h[1] === 0) {
-    return isPrivateIPv4((((h[6]! ^ 0xffff) << 16) | (h[7]! ^ 0xffff)) >>> 0);
+    return isGloballyReachableIPv4((((h[6]! ^ 0xffff) << 16) | (h[7]! ^ 0xffff)) >>> 0);
   }
-  // Link-local fe80::/10 (full range, not just the fe80 prefix).
-  if (h[0]! >= 0xfe80 && h[0]! <= 0xfebf) return true;
-  // Deprecated site-local fec0::/10 (RFC 3879: never globally routed).
-  if (h[0]! >= 0xfec0 && h[0]! <= 0xfeff) return true;
-  // Unique-local fc00::/7.
-  if (h[0]! >= 0xfc00 && h[0]! <= 0xfdff) return true;
-  // Multicast ff00::/8.
-  if (h[0]! >= 0xff00) return true;
-  // Documentation-only 2001:db8::/32 (non-routable).
-  if (h[0] === 0x2001 && h[1] === 0x0db8) return true;
-  // :: (unspecified), ::1 (loopback), and the deprecated IPv4-compatible
-  // ::/96 (first six hextets zero) are all refused.
-  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) return true;
-  return false;
+  // Global unicast 2000::/3 is the allowlist core; everything outside it
+  // fails closed (unspecified, loopback, discard-only 100::/64, local-use
+  // NAT64 64:ff9b:1::/48, link-local, site-local, unique-local, multicast, …).
+  if (h[0]! < 0x2000 || h[0]! > 0x3fff) return false;
+  // Non-routable exceptions inside 2000::/3:
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return false; // 2001:db8::/32 documentation
+  if (h[0] === 0x2001 && h[1] === 0x0002 && h[2] === 0) return false; // 2001:2::/48 benchmarking
+  if (h[0] === 0x2001 && h[1]! >= 0x0010 && h[1]! <= 0x001f) return false; // 2001:10::/28 ORCHID (deprecated)
+  if (h[0] === 0x2001 && h[1]! >= 0x0030 && h[1]! <= 0x003f) return false; // 2001:30::/28 ORCHIDv2
+  return true;
 }
 
 /** Parse a dotted-quad IPv4 address to a 32-bit number; null when invalid. */
@@ -216,7 +238,7 @@ export async function assertPublicDns(
   if (isIP(hostname) === 0 && hostname.startsWith("[") && hostname.endsWith("]")) {
     const literal = hostname.slice(1, -1);
     if (isIP(literal)) {
-      if (isPrivateIp(literal)) {
+      if (!isGloballyReachable(literal)) {
         throw new SafeFetchError(
           `Refusing to fetch "${hostname}": private, loopback, or local addresses are not allowed.`,
           "url_private_host",
@@ -247,9 +269,9 @@ export async function assertPublicDns(
     throw new SafeFetchError(`DNS lookup failed for "${hostname}".`, "url_dns_failure");
   }
   for (const { address } of records) {
-    if (isPrivateIp(address)) {
+    if (!isGloballyReachable(address)) {
       throw new SafeFetchError(
-        `Refusing to fetch "${hostname}": it resolves to a private address (${address}).`,
+        `Refusing to fetch "${hostname}": it resolves to a non-globally-reachable address (${address}).`,
         "url_private_host",
       );
     }

@@ -25,7 +25,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
-import { safeFetch, isPrivateIp, type SafeResponse } from "./safe-fetch.js";
+import { safeFetch, isGloballyReachable, type SafeResponse } from "./safe-fetch.js";
 
 /** DNS lookup shape used for SSRF validation and injection. */
 export interface LookupAllFn {
@@ -47,18 +47,22 @@ export class UrlSourceError extends Error {
   }
 }
 
-/** Hosts and IP ranges refused to prevent SSRF. */
-export function isPrivateHost(host: string): boolean {
+/**
+ * Hosts refused as SSRF destinations: local naming patterns plus any
+ * literal IP that is not globally reachable (decision delegated to the one
+ * centralized classifier in safe-fetch.ts — see isGloballyReachable).
+ */
+export function isRefusedHost(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, "");
   if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) {
     return true;
   }
   const ip = isIP(h) ? h : null;
-  if (ip) return isPrivateIp(ip);
+  if (ip) return !isGloballyReachable(ip);
   // IPv6 literal in brackets
   if (h.startsWith("[") && h.endsWith("]")) {
     const inner = h.slice(1, -1);
-    return isIP(inner) ? isPrivateIp(inner) : false;
+    return isIP(inner) ? !isGloballyReachable(inner) : false;
   }
   return false;
 }
@@ -224,9 +228,9 @@ export async function fetchUrlSource(
   }
 
   async function assertHopSafe(url: URL): Promise<void> {
-    if (isPrivateHost(url.hostname)) {
+    if (isRefusedHost(url.hostname)) {
       throw new UrlSourceError(
-        `Refusing to fetch "${url.hostname}": private, loopback, or local addresses are not allowed.`,
+        `Refusing to fetch "${url.hostname}": private, loopback, or non-globally-reachable addresses are not allowed.`,
         "url_private_host",
       );
     }
@@ -241,9 +245,9 @@ export async function fetchUrlSource(
       throw new UrlSourceError(`No DNS records for "${url.hostname}".`, "url_dns_failure");
     }
     for (const { address } of addresses) {
-      if (isPrivateIp(address)) {
+      if (!isGloballyReachable(address)) {
         throw new UrlSourceError(
-          `Refusing to fetch "${url.hostname}": it resolves to a private address (${address}).`,
+          `Refusing to fetch "${url.hostname}": it resolves to a non-globally-reachable address (${address}).`,
           "url_private_host",
         );
       }

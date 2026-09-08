@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { LookupAddress } from "node:dns";
 import {
   assertSafeUrl,
-  isPrivateHost,
+  isRefusedHost,
   htmlToText,
   fetchUrlSource,
   UrlSourceError,
   MAX_URL_BYTES,
   type LookupAllFn,
 } from "../src/core/sources/url.js";
-import { isPrivateIp } from "../src/core/sources/safe-fetch.js";
+import { isGloballyReachable } from "../src/core/sources/safe-fetch.js";
 
 type LookupFn = (hostname: string, options: { all: true; verbatim: true }) => Promise<LookupAddress[]>;
 
@@ -39,16 +39,16 @@ describe("URL safety guards", () => {
     expect(() => assertSafeUrl("https://user:pass@example.com/x")).toThrow(/credentials/);
   });
 
-  it("classifies private hosts and IPs", () => {
-    expect(isPrivateHost("localhost")).toBe(true);
-    expect(isPrivateHost("foo.localhost")).toBe(true);
-    expect(isPrivateHost("box.internal")).toBe(true);
-    expect(isPrivateHost("example.com")).toBe(false);
-    for (const ip of ["127.0.0.1", "10.0.0.5", "192.168.1.2", "172.16.0.9", "169.254.1.1", "0.0.0.0", "::1", "fe80::1", "fd00::5", "::ffff:127.0.0.1"]) {
-      expect(isPrivateIp(ip), ip).toBe(true);
+  it("classifies refused hosts and non-global IPs", () => {
+    expect(isRefusedHost("localhost")).toBe(true);
+    expect(isRefusedHost("foo.localhost")).toBe(true);
+    expect(isRefusedHost("box.internal")).toBe(true);
+    expect(isRefusedHost("example.com")).toBe(false);
+    for (const ip of ["127.0.0.1", "10.0.0.5", "192.168.1.2", "172.16.0.9", "169.254.1.1", "0.0.0.0", "192.0.2.1", "::1", "fe80::1", "fe90::1", "fd00::5", "::ffff:127.0.0.1", "::ffff:7f00:1"]) {
+      expect(isGloballyReachable(ip), ip).toBe(false);
     }
     for (const ip of ["8.8.8.8", "1.1.1.1", "2606:4700::1111"]) {
-      expect(isPrivateIp(ip), ip).toBe(false);
+      expect(isGloballyReachable(ip), ip).toBe(true);
     }
   });
 

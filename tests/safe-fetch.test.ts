@@ -13,11 +13,11 @@
  */
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { safeFetch, pinnedLookup, assertPublicDns, isPrivateIp } from "../src/core/sources/safe-fetch.js";
+import { safeFetch, pinnedLookup, assertPublicDns, isGloballyReachable } from "../src/core/sources/safe-fetch.js";
 import type { LookupAllFn } from "../src/core/sources/url.js";
 
 /** TEST-NET-3 documentation address (public-range, never routed). */
-const DOC_IP = "203.0.113.10";
+const DOC_IP = "93.184.216.34"; // genuinely public (example.com); TEST-NET is refused now
 const DOC_HOST = "docs.example.test";
 
 function lookupOf(records: Record<string, { address: string; family: number }[]>): LookupAllFn {
@@ -174,11 +174,13 @@ describe("safeFetch end to end (local sockets, no external network)", () => {
   });
 });
 
-describe("isPrivateIp invariants used by the transport", () => {
-  it("classifies documentation ranges as public-range (pinned behavior)", () => {
-    expect(isPrivateIp(DOC_IP)).toBe(false);
-    expect(isPrivateIp("198.51.100.7")).toBe(false);
-    expect(isPrivateIp("127.0.0.1")).toBe(true);
-    expect(isPrivateIp("169.254.169.254")).toBe(true);
+describe("isGloballyReachable invariants used by the transport", () => {
+  it("public addresses pass; private and special-purpose ranges fail closed", () => {
+    expect(isGloballyReachable(DOC_IP)).toBe(true);
+    expect(isGloballyReachable("127.0.0.1")).toBe(false);
+    expect(isGloballyReachable("169.254.169.254")).toBe(false);
+    expect(isGloballyReachable("192.0.2.1")).toBe(false); // TEST-NET-1
+    expect(isGloballyReachable("203.0.113.1")).toBe(false); // TEST-NET-3
+    expect(isGloballyReachable("100::1")).toBe(false); // discard-only
   });
 });
