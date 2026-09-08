@@ -65,13 +65,14 @@ When the source was a GitHub repository in **codebase** mode, `source.repository
   "url": "https://github.com/owner/repo",
   "owner": "owner", "name": "repo", "ref": "main",
   "mode": "codebase",
-  "inspectedFiles": ["package.json", "src/index.ts", "…"],
+  "scope": "packages/a",
+  "inspectedFiles": ["packages/a/package.json", "packages/a/src/index.ts", "…"],
   "treeBlobCount": 812, "candidateCount": 233, "selectedCount": 41,
   "treeTruncated": false
 }
 ```
 
-`inspectedFiles` lists exactly the files SkillForge read; every other tree entry existed but was **not** inspected (the counts make the boundedness explicit). Documentation-mode packages omit the block entirely. The full structured analysis (languages, evidenced commands, conventions, testing evidence, uncertainty) is carried by the canonical source record, not the manifest.
+`scope` names the `/tree/<ref>/<path>` subtree the analysis covers (absent = whole repository). `inspectedFiles` lists exactly the files SkillForge read; every other tree entry existed but was **not** inspected (the counts make the boundedness explicit — `selectedCount` equals `inspectedFiles.length` and never exceeds `candidateCount`). Documentation-mode packages omit the block entirely, and packages generated from a `github-codebase` source must keep it: the deterministic validator fails a codebase-origin package whose manifest lost its repository provenance. The full structured analysis (languages, evidenced commands, conventions, testing evidence, uncertainty) is carried by the canonical source record, not the manifest.
 
 ## Provenance
 

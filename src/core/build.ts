@@ -595,6 +595,8 @@ export interface ManifestRepositoryBlock {
   name: string;
   ref: string;
   mode: "codebase";
+  /** Subpath scope the analysis covers; absent = whole repository. */
+  scope?: string;
   inspectedFiles: string[];
   /** Blob count in the tree vs how many were inspected. */
   treeBlobCount: number;
@@ -615,6 +617,7 @@ export function manifestRepositoryBlock(repository: RepositoryAnalysis): Manifes
     name: repository.repository.name,
     ref: repository.repository.ref,
     mode: repository.mode,
+    ...(repository.repository.scope ? { scope: repository.repository.scope } : {}),
     inspectedFiles: repository.inspectedFiles,
     treeBlobCount: repository.selection.treeBlobCount,
     candidateCount: repository.selection.candidateCount,
