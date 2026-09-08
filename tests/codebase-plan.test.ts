@@ -160,8 +160,13 @@ describe("OpenAI-compatible provider receives repository context", () => {
       repository: fullAnalysis(),
     });
     await provider.generate({ source: input, analysis: analyzeSource(input), repository: input.repository });
-    expect(capturedBody).toContain("Repository analysis (bounded, evidence-backed");
+    // The analysis travels in the labeled untrusted data block (valid JSON).
+    expect(capturedBody).toContain("BEGIN UNTRUSTED DATA");
+    expect(capturedBody).toContain("END UNTRUSTED DATA");
     expect(capturedBody).toContain("acme/fixture-service");
+    // The system prompt carries the trust boundary for codebase requests.
+    expect(capturedBody).toContain("REPOSITORY TRUST BOUNDARY");
+    expect(capturedBody).toContain("untrusted repository content");
   });
 
   it("omits the repository section for documentation-mode inputs", async () => {
