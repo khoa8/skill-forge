@@ -804,3 +804,83 @@ describe("P1-4: editing a codebase skill preserves repository provenance", () =>
     expect(validatePackage({ skill: docsSkill, sourceText: docsNormalized.text, sourceType: "text" }).passed).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Re-audit P1-1 — canonical scoped reconnaissance set
+// ---------------------------------------------------------------------------
+
+function leakyMonorepoHarness() {
+  const tree: Record<string, unknown>[] = [
+    // Whole-repo noise (out of scope for /tree/main/packages/a):
+    { path: "package-lock.json", type: "blob", size: 400_000 }, // npm evidence at root
+    { path: "packages/b/pnpm-lock.yaml", type: "blob", size: 100 }, // sibling pnpm evidence
+    { path: "vendor/legacy.py", type: "blob", size: 200 }, // excluded dir
+    { path: "node_modules/left-pad/package.json", type: "blob", size: 100 }, // excluded dir
+    { path: "dist/app.min.js", type: "blob", size: 5000 }, // generated output
+    { path: "scripts/deep.min.js", type: "blob", size: 5000 },
+    // In-scope but excluded areas:
+    { path: "packages/a/vendor/legacy.py", type: "blob", size: 200 },
+    { path: "packages/a/node_modules/dep/package.json", type: "blob", size: 100 },
+    { path: "packages/a/dist/generated.min.js", type: "blob", size: 5000 },
+    // The actual scoped project:
+    { path: "packages/a/package.json", type: "blob", size: 200 },
+    { path: "packages/a/src/index.ts", type: "blob", size: 40 },
+    { path: "packages/a/tests/index.test.ts", type: "blob", size: 60 },
+    // Root project files (out of scope):
+    { path: "README.md", type: "blob", size: 60 },
+    { path: "packages/b/pyproject.toml", type: "blob", size: 100 },
+  ];
+  const bodies: Record<string, string> = {
+    "packages/a/package.json": JSON.stringify({ name: "pkg-a", scripts: { test: "vitest run" }, devDependencies: { vitest: "^1" } }),
+    "packages/a/src/index.ts": "export const a = 1;\n",
+    "packages/a/tests/index.test.ts": 'import { it } from "vitest";\nit("a", () => {});\n',
+    "README.md": "# root\n",
+    "packages/b/pyproject.toml": '[project]\nname = "b"\n',
+  };
+  return (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ sha: "x", truncated: false, tree }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.startsWith("https://raw.githubusercontent.com/")) {
+      const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+      const body = bodies[p];
+      const res = new Response(body ?? "not found", { status: body !== undefined ? 200 : 404, headers: { "content-type": "text/plain" } });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    }
+    return new Response("unexpected", { status: 500 });
+  }) as unknown as typeof fetch;
+}
+
+describe("Re-audit P1-1: one canonical scoped reconnaissance set", () => {
+  it("root/sibling lockfiles and excluded areas cannot influence scoped analysis", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/leaky/tree/main/packages/a", {
+      fetchImpl: leakyMonorepoHarness(),
+    });
+    const a = r.analysis;
+    // Package manager: NO lockfile exists inside packages/a → no manager
+    // evidence → root package-lock.json and sibling pnpm-lock.yaml must not
+    // decide it (no install command, scripts not runnable).
+    expect(a.commands.filter((c) => c.purpose === "install")).toEqual([]);
+    // Ecosystems: node only (from the scoped package.json). No python from
+    // vendor/node_modules/sibling pyproject; no pnpm/yarn leakage.
+    expect(a.ecosystems).toEqual(["node"]);
+    // Languages: TypeScript only — in-scope vendor/*.py and node_modules
+    // package.json must not create Python/extra claims.
+    expect(a.languages.map((l) => l.name)).toEqual(["TypeScript"]);
+    // Manifests: only the scoped package.json (+ not the sibling pyproject).
+    expect(a.manifests.map((m) => m.path)).toEqual(["packages/a/package.json"]);
+    // Roots/entrypoints remain scope-correct.
+    expect(a.structure.sourceRoots).toEqual(["src/"]);
+    expect(a.entrypoints.some((e) => e.path === "packages/a/src/index.ts")).toBe(true);
+    // Whole-tree count is retained but clearly the raw listing metadata.
+    expect(a.selection.treeBlobCount).toBe(14);
+    expect(a.selection.candidateCount).toBeLessThan(14);
+    // Excluded areas never end up inspected.
+    expect(a.inspectedFiles.every((p) => p.startsWith("packages/a/") && !p.includes("node_modules") && !p.includes("vendor") && !p.includes("dist"))).toBe(true);
+  });
+});

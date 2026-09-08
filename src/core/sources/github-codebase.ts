@@ -86,7 +86,7 @@ export const CODEBASE_EXTENSIONS = new Set([
   ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
   // structured config / data
   ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-  ".xml", ".properties",
+  ".xml", ".properties", ".gradle",
   // docs / text
   ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc",
   // web & misc
@@ -97,7 +97,8 @@ export const CODEBASE_EXTENSIONS = new Set([
 /** Extension-less files eligible by basename (tooling convention files). */
 export const CODEBASE_BASENAMES = new Set([
   "makefile", "dockerfile", "codeowners", "license", "notice", "contributing",
-  "readme", "changelog", "cmakelists.txt",
+  "readme", "changelog", "cmakelists.txt", "go.mod", "go.work", "gemfile",
+  "pipfile", "build.gradle", "settings.gradle",
   ".gitignore", ".dockerignore", ".editorconfig", ".gitattributes",
   ".nvmrc", ".node-version", ".python-version", ".ruby-version",
   ".tool-versions", ".prettierrc", ".eslintrc", ".babelrc",
@@ -185,11 +186,14 @@ export function codebaseExclusionReason(
   const ext = dot === -1 ? "" : base.slice(dot).toLowerCase();
   const baseKey = base.toLowerCase();
   if (isSensitivePath(entry.path)) return "sensitive_file";
+  // Metadata-only lockfiles are recognized before the extension allowlist:
+  // they are reconnaissance evidence (never fetched) even when their
+  // extension is not an analysis format.
+  if (METADATA_ONLY_BASENAMES.has(baseKey)) return "lockfile_metadata_only";
   const allowed =
     (dot > 0 && CODEBASE_EXTENSIONS.has(ext)) || CODEBASE_BASENAMES.has(baseKey);
   if (!allowed) return "extension_not_allowed";
   if (isGeneratedOrMinified(entry.path)) return "generated_or_minified";
-  if (METADATA_ONLY_BASENAMES.has(baseKey)) return "lockfile_metadata_only";
   return null;
 }
 
@@ -685,7 +689,16 @@ export async function fetchGithubCodebaseSource(
       );
     }
 
-    // 3. Eligibility + safety filtering (deterministic, local).
+    // 3. Canonical tree reconnaissance sets (P1-1):
+    //   allEntries      → raw GitHub listing; only whole-tree metadata (counts).
+    //   reconEntries    → safe scoped metadata for ALL analysis claims
+    //                     (inside path scope, safe path, not in skip dirs,
+    //                     within depth, not sensitive; metadata-only lockfiles
+    //                     retained — they are evidence, never fetched).
+    //   eligible        → entries allowed for deep fetch (recon + content
+    //                     allowlist + not generated/minified + not lockfile).
+    //   inspectedFiles  → actually fetched (post-fetch outcome only).
+    const reconEntries: TreeEntryLike[] = [];
     const eligible: TreeEntryLike[] = [];
     let skippedUnsafe = 0;
     let skippedSubmodules = 0;
@@ -693,7 +706,17 @@ export async function fetchGithubCodebaseSource(
     for (const entry of allEntries) {
       const reason = codebaseExclusionReason(entry, { maxDepth, pathScope: ref0.path });
       if (reason === null) {
+        reconEntries.push(entry);
         eligible.push(entry);
+      } else if (
+        // Metadata-only evidence classes: real tree metadata inside the safe
+        // scoped/safe-path/skip-dir/depth policy, retained for analysis
+        // claims but never fetched (lockfiles inform package-manager evidence).
+        (reason === "lockfile_metadata_only" || reason === "generated_or_minified") &&
+        isSafeRepoPath(entry.path) &&
+        !entry.path.split("/").slice(0, -1).some((seg) => CODEBASE_SKIP_DIRS.has(seg.toLowerCase()))
+      ) {
+        reconEntries.push(entry);
       } else if (reason === "submodule") {
         skippedSubmodules++;
       } else if (reason === "unsafe_path") {
@@ -819,10 +842,7 @@ export async function fetchGithubCodebaseSource(
     // (selection.treeBlobCount, labeled as the GitHub tree listing).
     // `selectedCount` means "actually inspected": manifest `fetched` flags and
     // the inspected-file set derive from the post-fetch outcome.
-    const scopedEntries =
-      ref0.path === ""
-        ? allEntries
-        : allEntries.filter((e) => e.path === ref0.path || e.path.startsWith(`${ref0.path}/`));
+    const scopedEntries = reconEntries;
     const inspectedSet = new Set(files.map((f) => f.path));
     const instructions = detectInstructionFiles(scopedEntries, ref0.path).filter((p) => inspectedSet.has(p));
     const analysis = buildRepositoryAnalysisFromFiles(
@@ -833,7 +853,7 @@ export async function fetchGithubCodebaseSource(
         ref,
         scope: ref0.path === "" ? undefined : ref0.path,
         treeBaseNames: new Set(
-          allEntries
+          reconEntries
             .filter((e) => e.type === "blob")
             .map((e) => (e.path.split("/").pop() ?? "").toLowerCase()),
         ),
