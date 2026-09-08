@@ -9,6 +9,7 @@
 import type { GenerationProvider, GenerateInput } from "./types.js";
 import type { SkillPlan } from "../plan.js";
 import { derivePlanFromAnalysis } from "../build.js";
+import { deriveCodebasePlan } from "../codebase/plan.js";
 import { slugify } from "../util.js";
 
 export class MockProvider implements GenerationProvider {
@@ -16,7 +17,12 @@ export class MockProvider implements GenerationProvider {
   readonly offline = true;
 
   async generate(input: GenerateInput): Promise<SkillPlan> {
-    const { analysis, source, requestedName } = input;
+    const { analysis, source, requestedName, repository } = input;
+    // Codebase mode: the repository analysis is the planning authority —
+    // deterministic, evidence-grounded, oriented at coding agents.
+    if (repository) {
+      return deriveCodebasePlan(repository, requestedName);
+    }
     const plan = derivePlanFromAnalysis(analysis);
     const description =
       plan.whenToUse.length > 0 && analysis.intro.length > 0

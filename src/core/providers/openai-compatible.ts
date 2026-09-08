@@ -76,9 +76,22 @@ export class OpenAICompatibleProvider implements GenerationProvider {
   }
 
   async generate(input: GenerateInput): Promise<SkillPlan> {
+    // Codebase mode: the bounded repository analysis is authoritative for
+    // repository facts (commands, conventions, structure) — send it so the
+    // model never has to guess from concatenated source alone.
+    const repositoryContext = input.repository
+      ? [
+          "",
+          "Repository analysis (bounded, evidence-backed; authoritative for repository facts):",
+          "```json",
+          truncate(JSON.stringify(input.repository), 20_000),
+          "```",
+        ]
+      : [];
     const userPrompt = [
       `Source name: ${input.source.originalName}`,
       input.requestedName ? `Preferred skill name: ${input.requestedName}` : "",
+      ...repositoryContext,
       "",
       "Source document:",
       "```",
