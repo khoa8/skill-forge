@@ -139,7 +139,11 @@ export function commandsFromPackageJson(
           frameworkEvidence.set(fw, [...(frameworkEvidence.get(fw) ?? []), ev].slice(0, 8));
         }
         for (const [testDep, fwName] of Object.entries(TEST_DEPENDENCIES)) {
-          if (dep === testDep || dep.includes(testDep)) testingFrameworks.add(fwName);
+          // Exact match, or scope match for the @testing-library org — a loose
+          // substring match would false-positive on unrelated packages.
+          if (dep === testDep || (testDep === "testing-library" && dep.startsWith("@testing-library/"))) {
+            testingFrameworks.add(fwName);
+          }
         }
       }
     }

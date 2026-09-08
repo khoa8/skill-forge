@@ -372,6 +372,10 @@ const ROOT_DOC_PRIORITY = new Map([
   ["readme", 2], ["contributing.md", 3], ["development.md", 4],
   ["security.md", 5], ["changelog", 9], ["codeowners", 10],
 ]);
+const NESTED_INSTRUCTION_PRIORITY = new Map([
+  ["agents.md", 0], ["claude.md", 1], ["contributing.md", 3],
+  ["development.md", 4], ["security.md", 5], ["codeowners", 10],
+]);
 const BUILD_CONFIG_PRIORITY = new Map([
   ["package.json", 3], ["pyproject.toml", 3], ["cargo.toml", 3], ["go.mod", 3],
   ["makefile", 4], ["dockerfile", 6], ["cmakelists.txt", 6],
@@ -399,12 +403,20 @@ export function codebasePriority(path: string): number {
   const top = segments.length > 1 ? segments[0]!.toLowerCase() : "";
   const stem = base.replace(/\.[a-z0-9]+$/i, "");
 
-  // 0. Repository instruction files (root first, then nested).
-  const instr = INSTRUCTION_PRIORITY.get(base);
-  if (instr !== undefined) return depth === 1 ? instr : instr + 0.5;
-  if (/^readme(\.[a-z0-9]+)?$/.test(base) && depth === 1) return 2;
-  const rootDoc = ROOT_DOC_PRIORITY.get(base);
-  if (rootDoc !== undefined) return depth === 1 ? rootDoc : rootDoc + 0.5;
+  // 0. Repository instruction files (root first, then nested). Nested
+  // instruction files (e.g. docs/contributing.md) rank only slightly below
+  // their root-level counterparts — repository instructions are the highest
+  // value content for a coding agent wherever they live.
+  const instr = INSTRUCTION_PRIORITY.get(base) ?? NESTED_INSTRUCTION_PRIORITY.get(base);
+  if (instr !== undefined) return depth === 1 ? instr : instr + Math.min(depth - 1, 6) * 0.5;
+  // Only the ROOT README carries top priority; nested READMEs (examples/,
+  // packages) are ordinary directory docs and fall through to their
+  // category so they cannot crowd out manifests and instructions.
+  if (depth === 1) {
+    if (/^readme(\.[a-z0-9]+)?$/.test(base)) return 2;
+    const rootDoc = ROOT_DOC_PRIORITY.get(base);
+    if (rootDoc !== undefined) return rootDoc;
+  }
 
   // 3. Manifests.
   if (depth === 1 && BUILD_CONFIG_PRIORITY.has(base)) return BUILD_CONFIG_PRIORITY.get(base)!;
@@ -483,13 +495,17 @@ export function detectEntrypointCandidates(entries: TreeEntryLike[]): { path: st
     if (e.type !== "blob") continue;
     const segments = e.path.split("/");
     if (segments.length > 3) continue;
+    const top = segments.length > 1 ? segments[0]!.toLowerCase() : "";
+    // Entrypoints live at the repository root, under a source root, or in
+    // Go-style cmd/<name>/. CI workflows, docs, tests, and examples are
+    // never entrypoints even when they carry entrypoint-shaped names.
+    const locationOk = segments.length === 1 || SOURCE_ROOT_NAMES.has(top) || top === "cmd";
+    if (!locationOk) continue;
     const base = segments[segments.length - 1]!;
     const dot = base.lastIndexOf(".");
     const stem = (dot === -1 ? base : base.slice(0, dot)).toLowerCase();
-    // Go entrypoints live in cmd/<name>/main.go; Python in src/<pkg>/__main__.py.
     const stemOk = ENTRYPOINT_BASENAME_RE.test(base) || stem === "main";
     if (!stemOk) continue;
-    const top = segments.length > 1 ? segments[0]!.toLowerCase() : "";
     let score = 40; // root-level entrypoints
     if (SOURCE_ROOT_NAMES.has(top)) score = 45;
     if (top === "cmd") score = 44;
