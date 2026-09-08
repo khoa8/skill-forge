@@ -1,21 +1,25 @@
 #!/usr/bin/env node
 /**
  * Production smoke check for a PRUNED installation (dev dependencies
- * removed). Dependency-free: plain Node + built-in fetch only — by
- * construction it cannot depend on Vitest, tsx, or any devDependency.
+ * removed). Dependency-free: plain Node + Node built-ins + npm itself.
  *
- * Verifies against the COMPILED server (dist/server/index.js):
- *   1. npm start launches;
+ * The server is started through the ACTUAL package contract — `npm start`,
+ * resolved from the repository's package.json — not a hand-built node
+ * invocation, so a regression in the start script (renamed, pointing at a
+ * wrong path, or depending on a devDependency like tsx) fails this check.
+ *
+ * Verifies against the compiled server:
+ *   1. npm start launches and serves;
  *   2. /api/health returns ok with the mock (offline) provider;
  *   3. static UI / is served;
- *   4. bundled sample assets are present and served;
+ *   4. bundled sample assets are present and readable;
  *   5. one full sample generation → export ZIP round-trip works.
  *
  * Exits nonzero with an actionable message on any failure.
  * Usage: npm run build && npm prune --omit=dev && npm run smoke:production
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -24,11 +28,12 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const entry = join(repoRoot, "dist", "server", "index.js");
 const sampleAsset = join(repoRoot, "dist", "core", "samples", "meridian-payments-api.md");
-const CHILD_BUDGET_MS = 60_000;
+const CHILD_BUDGET_MS = 90_000;
 
 function fail(message) {
   console.error(`production smoke FAILED: ${message}`);
-  process.exit(1);
+  process.exitCode = 1;
+  throw new Error(message);
 }
 
 if (!existsSync(entry)) {
@@ -36,6 +41,12 @@ if (!existsSync(entry)) {
 }
 if (!existsSync(sampleAsset)) {
   fail(`bundled sample asset missing in build output (${sampleAsset}) — rebuild.`);
+}
+// Resolve the start script from the package manifest; the smoke exercises
+// whatever npm start actually does, but a missing script is a hard failure.
+const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+if (!pkg.scripts?.start) {
+  fail("package.json has no start script — the documented production command is broken.");
 }
 
 /** Grab an ephemeral TCP port from the OS, release it, return it. */
@@ -60,8 +71,13 @@ const workDir = mkdtempSync(join(tmpdir(), "skillforge-smoke-"));
 // any) can never leak into the check.
 writeFileSync(join(workDir, ".env"), "# smoke: isolated from any real .env\n", "utf8");
 
-const child = spawn(process.execPath, [entry], {
-  cwd: workDir,
+// `npm start` resolves the start script from package.json. Port and host are
+// injected via the environment (documented contract), not by editing npm.
+// detached + process-group kill ensures the whole tree (npm → node server)
+// is terminated on both macOS and Linux CI; nothing is left orphaned.
+const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
+const child = spawn(npmBin, ["start"], {
+  cwd: repoRoot,
   env: {
     ...process.env,
     SKILLFORGE_PROVIDER: "mock",
@@ -71,16 +87,47 @@ const child = spawn(process.execPath, [entry], {
     SKILLFORGE_ACKNOWLEDGE_EXPOSURE: "1",
   },
   stdio: ["ignore", "pipe", "pipe"],
+  detached: true,
 });
+let stdout = "";
 let stderr = "";
+child.stdout.on("data", (c) => (stdout += c.toString()));
 child.stderr.on("data", (c) => (stderr += c.toString()));
+let finished = false;
 child.on("exit", (code, signal) => {
   if (!finished && code !== 0 && code !== null) {
-    fail(`server exited early with code ${code}: ${stderr.slice(0, 500)}`);
+    fail(`npm start exited early with code ${code}: ${(stderr || stdout).slice(0, 500)}`);
   }
 });
 
-let finished = false;
+/** Kill the entire npm → node process group (SIGTERM, then SIGKILL). */
+async function stopServer() {
+  if (child.exitCode !== null && child.signalCode === null) return;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+    } else {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
+    }
+  } catch {
+    /* already gone */
+  }
+  const gone = new Promise((r) => child.once("exit", () => r()));
+  const force = new Promise((r) => setTimeout(() => {
+    try {
+      if (process.platform !== "win32" && child.exitCode === null) process.kill(-child.pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    r();
+  }, 3_000));
+  await Promise.race([gone, force]);
+}
+
 let failures = 0;
 const check = (label, ok, detail = "") => {
   console.log(`  ${ok ? "✓" : "✗"} ${label}${ok || !detail ? "" : ` — ${detail}`}`);
@@ -88,7 +135,7 @@ const check = (label, ok, detail = "") => {
 };
 
 async function waitHealthy() {
-  const until = Date.now() + 15_000;
+  const until = Date.now() + 20_000;
   while (Date.now() < until) {
     assertTime();
     try {
@@ -99,12 +146,13 @@ async function waitHealthy() {
     }
     await new Promise((r) => setTimeout(r, 200));
   }
-  fail("server never became healthy on /api/health");
+  fail(`server never became healthy on /api/health. stderr: ${stderr.slice(0, 500)}`);
 }
 
 try {
   const health = await waitHealthy();
-  check("npm start (compiled server) launches", true);
+  check("npm start (package start script) launches the compiled server", true);
+  check("start script points at the compiled entry", pkg.scripts.start.includes("dist/server/index.js"), pkg.scripts.start);
   check("/api/health ok with mock provider", health.ok === true && health.provider === "mock" && health.offlineDemo === true, JSON.stringify(health));
 
   const ui = await fetch(`http://127.0.0.1:${port}/`);
@@ -145,18 +193,9 @@ try {
 } catch (err) {
   fail(err instanceof Error ? err.message : String(err));
 } finally {
-  finished = true;
-  const exited = new Promise((resolveExit) => child.once("exit", () => resolveExit()));
-  child.kill("SIGTERM");
-  await Promise.race([
-    exited,
-    new Promise((resolveForce) => setTimeout(() => {
-      child.kill("SIGKILL");
-      resolveForce();
-    }, 3_000)),
-  ]);
+  await stopServer();
   rmSync(workDir, { recursive: true, force: true });
 }
 
 if (failures > 0) fail(`${failures} check(s) failed`);
-console.log("production smoke OK (compiled server, health, UI, bundled samples, generate → export)");
+console.log("production smoke OK (npm start → health, UI, bundled samples, generate → export)");
