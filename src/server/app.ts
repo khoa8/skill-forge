@@ -505,8 +505,8 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       return;
     }
     try {
-      const stored = await updateFileContentImpl(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText) =>
-        validatePackage({ skill, sourceText, target: undefined }),
+      const stored = await updateFileContentImpl(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText, sourceType) =>
+        validatePackage({ skill, sourceText, target: undefined, sourceType }),
       );
       res.json(toResponse(stored));
     } catch (err) {

@@ -19,6 +19,7 @@ import type {
   CodeBlock,
   NormalizedSource,
   Provenance,
+  RepositoryAnalysis,
   SkillFile,
   SkillMeta,
   SourceAnalysis,
@@ -549,22 +550,7 @@ export function buildCanonicalSkill(
       sha256: source.sha256,
       lineCount: source.lineCount,
       notes: source.notes,
-      ...(source.repository
-        ? {
-            repository: {
-              url: source.repository.repository.url,
-              owner: source.repository.repository.owner,
-              name: source.repository.repository.name,
-              ref: source.repository.repository.ref,
-              mode: source.repository.mode,
-              inspectedFiles: source.repository.inspectedFiles,
-              treeBlobCount: source.repository.selection.treeBlobCount,
-              candidateCount: source.repository.selection.candidateCount,
-              selectedCount: source.repository.selection.selectedCount,
-              treeTruncated: source.repository.selection.treeTruncated,
-            },
-          }
-        : {}),
+      ...(source.repository ? { repository: manifestRepositoryBlock(source.repository) } : {}),
     }),
     purpose: "Machine-readable package manifest: source identity, gap list, file inventory with hashes.",
   });
@@ -599,18 +585,41 @@ export interface ManifestSourceInfo {
   notes: string[];
   /** Repository provenance for codebase-mode sources (manifest only — the
    * full structured analysis lives in the persisted record, not the package). */
-  repository?: {
-    url: string;
-    owner: string;
-    name: string;
-    ref: string;
-    mode: "codebase";
-    inspectedFiles: string[];
-    /** Blob count in the tree vs how many were inspected. */
-    treeBlobCount: number;
-    candidateCount: number;
-    selectedCount: number;
-    treeTruncated: boolean;
+  repository?: ManifestRepositoryBlock;
+}
+
+/** The compact repository provenance block embedded in manifest.json. */
+export interface ManifestRepositoryBlock {
+  url: string;
+  owner: string;
+  name: string;
+  ref: string;
+  mode: "codebase";
+  inspectedFiles: string[];
+  /** Blob count in the tree vs how many were inspected. */
+  treeBlobCount: number;
+  candidateCount: number;
+  selectedCount: number;
+  treeTruncated: boolean;
+}
+
+/**
+ * Derive the manifest repository block from a persisted RepositoryAnalysis.
+ * Shared by the initial build and by post-edit manifest regeneration so the
+ * two can never drift (P1-4): edits must keep codebase provenance intact.
+ */
+export function manifestRepositoryBlock(repository: RepositoryAnalysis): ManifestRepositoryBlock {
+  return {
+    url: repository.repository.url,
+    owner: repository.repository.owner,
+    name: repository.repository.name,
+    ref: repository.repository.ref,
+    mode: repository.mode,
+    inspectedFiles: repository.inspectedFiles,
+    treeBlobCount: repository.selection.treeBlobCount,
+    candidateCount: repository.selection.candidateCount,
+    selectedCount: repository.selection.selectedCount,
+    treeTruncated: repository.selection.treeTruncated,
   };
 }
 

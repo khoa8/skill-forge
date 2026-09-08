@@ -5,9 +5,7 @@
  *       (no HTML stripping, no entity decoding); docs mode keeps its behavior.
  * P1-2: /tree/<ref>/<path> scope must constrain ALL structured reconnaissance.
  */
-import { describe, expect, it } from "vitest";
-import { normalizeSource } from "../src/core/ingest.js";
-import { analyzeSource } from "../src/core/analyze.js";
+import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
 import {
   fetchGithubCodebaseSource,
   detectRoots,
@@ -678,5 +676,131 @@ describe("P2-2: provider repository context is compact and always valid JSON", (
     const raw = JSON.stringify(hugeAnalysis());
     expect(json.length).toBeLessThan(raw.length);
     expect(json.length).toBeLessThan(30_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-4 — codebase provenance survives edit → validate → export
+// ---------------------------------------------------------------------------
+
+import request from "supertest";
+import JSZip from "jszip";
+import { createApp } from "../src/server/app.js";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
+import { validatePackage } from "../src/core/validate.js";
+import { buildCanonicalSkill } from "../src/core/build.js";
+
+describe("P1-4: editing a codebase skill preserves repository provenance", () => {
+  let app: ReturnType<typeof createApp>;
+  let cleanupStore: () => Promise<void>;
+  beforeAll(async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    cleanupStore = cleanup;
+    app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+  });
+  afterAll(async () => {
+    await cleanupStore?.();
+  });
+
+  it("generate → inspect → edit → validate → export keeps source.repository intact", async () => {
+    // 1. Generate a codebase skill via the API (stubbed GitHub).
+    const impl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+        return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("/git/trees/")) {
+        return new Response(JSON.stringify({
+          sha: "x", truncated: true,
+          tree: [
+            { path: "README.md", type: "blob", size: 60 },
+            { path: "package.json", type: "blob", size: 120 },
+            { path: "src/index.ts", type: "blob", size: 40 },
+          ],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+        const bodies: Record<string, string> = {
+          "README.md": "# Repo\n\nProvenance-preservation fixture.\n",
+          "package.json": JSON.stringify({ name: "prov", scripts: { test: "vitest run" } }),
+          "src/index.ts": "export {};\n",
+        };
+        const body = bodies[p];
+        const res = new Response(body ?? "not found", { status: body !== undefined ? 200 : 404, headers: { "content-type": "text/plain" } });
+        Object.defineProperty(res, "url", { value: url });
+        return res;
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", impl);
+    const gen = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "github", repo: "https://github.com/acme/prov-fixture", mode: "codebase" })
+      .expect(200);
+    const result = gen.text.trim().split("\n").map((l) => JSON.parse(l)).find((e: { type: string }) => e.type === "result") as {
+      skill: { id: string; files: { path: string; content: string }[] };
+    };
+    vi.unstubAllGlobals();
+
+    // 2. Inspect the original manifest: repository provenance present.
+    const stored = await request(app).get(`/api/skills/${result.skill.id}`).expect(200);
+    const originalManifest = JSON.parse(stored.body.skill.files.find((f: { path: string }) => f.path === "manifest.json").content);
+    expect(originalManifest.source.repository).toMatchObject({ owner: "acme", name: "prov-fixture", mode: "codebase", treeTruncated: true });
+
+    // 3. Edit an editable generated file.
+    const skillMd = stored.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md");
+    const edit = await request(app)
+      .post(`/api/skills/${result.skill.id}/update-file`)
+      .send({ path: "SKILL.md", content: `${skillMd.content}\n<!-- user note: edited for provenance regression coverage -->\n` })
+      .expect(200);
+
+    // 4. Validation re-ran server-side and the regenerated manifest still
+    //    carries the full repository block.
+    expect(edit.body.validation.passed).toBe(true);
+    const editedManifest = JSON.parse(edit.body.skill.files.find((f: { path: string }) => f.path === "manifest.json").content);
+    expect(editedManifest.source.repository).toEqual(originalManifest.source.repository);
+
+    // 5. Export and inspect the ZIP manifest.
+    const binaryParser = (res2: unknown, cb: (err: Error | null, body?: unknown) => void) => {
+      const chunks: Buffer[] = [];
+      (res2 as { on: (ev: string, fn: (c: Buffer) => void) => void }).on("data", (c) => chunks.push(c));
+      (res2 as { on: (ev: string, fn: () => void) => void }).on("end", () => cb(null, Buffer.concat(chunks)));
+    };
+    const zipRes = await request(app)
+      .post(`/api/skills/${result.skill.id}/export`)
+      .buffer(true)
+      .parse(binaryParser)
+      .send({ target: "claude-code" })
+      .expect(200);
+    const zip = await JSZip.loadAsync(zipRes.body);
+    const manifestEntry = Object.values(zip.files).find((f) => f.name.endsWith("/manifest.json"))!;
+    const exportedManifest = JSON.parse(await manifestEntry.async("string"));
+    expect(exportedManifest.source.repository).toEqual(originalManifest.source.repository);
+  });
+
+  it("validator fails a codebase package whose manifest lost repository provenance", () => {
+    const input = {
+      type: "github-codebase" as const,
+      name: "acme/widgets",
+      content: `# package.json\n\n${JSON.stringify({ name: "widgets", scripts: { test: "vitest run" } }, null, 2)}\n`,
+      repository: sampleRepositoryAnalysis(),
+    };
+    const normalized = normalizeSource(input);
+    const skill = buildCanonicalSkill(normalized, analyzeSource(normalized), PlanSchema.parse({ name: "widgets" }), "mock");
+    // Provenance present + codebase source → passes.
+    expect(validatePackage({ skill, sourceText: normalized.text, sourceType: "github-codebase" }).passed).toBe(true);
+    // Strip the repository block → the codebase-origin package must FAIL.
+    const manifestFile = skill.files.find((f) => f.path === "manifest.json")!;
+    const manifest = JSON.parse(manifestFile.content);
+    delete manifest.source.repository;
+    manifestFile.content = JSON.stringify(manifest, null, 2) + "\n";
+    const report = validatePackage({ skill, sourceText: normalized.text, sourceType: "github-codebase" });
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((c) => c.id === "repository-provenance")?.message).toContain("github-codebase");
+    // Documentation-origin packages without the block still pass.
+    const docsNormalized = normalizeSource({ type: "text", name: "d", content: "# Docs\n\nPlain documentation source content, long enough to normalize cleanly through ingest." });
+    const docsSkill = buildCanonicalSkill(docsNormalized, analyzeSource(docsNormalized), PlanSchema.parse({}), "mock");
+    expect(validatePackage({ skill: docsSkill, sourceText: docsNormalized.text, sourceType: "text" }).passed).toBe(true);
   });
 });

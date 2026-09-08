@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CanonicalSkill, SourceAnalysis, ValidationReport, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { normalizeSource } from "../core/ingest.js";
-import { manifestFor } from "../core/build.js";
+import { manifestFor, manifestRepositoryBlock } from "../core/build.js";
 
 export const MAX_STORED = 50;
 
@@ -77,7 +77,7 @@ export interface SkillStore {
     id: string,
     path: string,
     content: string,
-    revalidate: (skill: StoredSkill["skill"], sourceText: string) => ValidationReport,
+    revalidate: (skill: StoredSkill["skill"], sourceText: string, sourceType: SourceType) => ValidationReport,
   ): Promise<StoredSkill>;
 }
 
@@ -190,7 +190,7 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     id: string,
     path: string,
     content: string,
-    revalidate: (skill: StoredSkill["skill"], sourceText: string) => ValidationReport,
+    revalidate: (skill: StoredSkill["skill"], sourceText: string, sourceType: SourceType) => ValidationReport,
   ): Promise<StoredSkill> {
     const existing = await getSkill(id);
     if (!existing) throw new EditError(`No skill with id "${id}".`, "skill_not_found");
@@ -216,6 +216,8 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     existing.skill.provenance = existing.skill.provenance.filter((p) => p.filePath !== path);
 
     // Regenerate manifest.json from the new inventory (bytes + hashes resync).
+    // Codebase provenance must survive edits: the compact manifest repository
+    // block is rebuilt from the PERSISTED repository analysis (P1-4).
     const normalizedSource = normalizeSource({
       type: existing.source.type,
       name: existing.source.name,
@@ -235,12 +237,17 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
           sha256: normalizedSource.sha256,
           lineCount: normalizedSource.lineCount,
           notes: normalizedSource.notes,
+          ...(existing.source.repository
+            ? { repository: manifestRepositoryBlock(existing.source.repository) }
+            : {}),
         },
       );
     }
 
-    // Validation reflects the edited content before anything is served.
-    existing.validation = revalidate(existing.skill, existing.source.text);
+    // Validation reflects the edited content before anything is served; the
+    // source type rides along so codebase packages cannot lose their
+    // repository provenance silently.
+    existing.validation = revalidate(existing.skill, existing.source.text, existing.source.type);
 
     const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);
     await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
