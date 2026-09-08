@@ -455,6 +455,34 @@ export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand
 const CONSTRAINT_LINE_RE =
   /\b(must|must not|never|always|do not|don'?t|avoid|required|forbidden|prohibited|make sure|ensure|before (?:pushing|committing|merging)|only)\b/i;
 
+/**
+ * Meta-instruction filter (re-audit P1-3): repository instruction text is
+ * untrusted. Lines that address the model/agent itself — instruction-hierarchy
+ * overrides, credential disclosure, data exfiltration, output-schema changes,
+ * persona adoption — must never be promoted into structured conventions (which
+ * the deterministic planner renders as skill constraints). Narrow, exact,
+ * deterministic patterns; legitimate development conventions pass untouched.
+ */
+const META_INSTRUCTION_PATTERNS: RegExp[] = [
+  // Instruction-hierarchy overrides.
+  /\bignore\b[^.\n]{0,60}\binstructions?\b/i,
+  /\b(disregard|forget|override)\b[^.\n]{0,60}\b(system|planner|developer|previous|prior|user|agent)\b[^.\n]{0,40}\b(prompt|instructions?|rules?|policies?|safeguards?)\b/i,
+  /\byou (are|'re)\b[^.\n]{0,40}\b(now|actually)\b/i,
+  /\b(pretend to be|roleplay as|adopt the persona of|act as an? (?:unrestricted|uncensored|evil|jailbroken|different|new))\b/i,
+  // Output-schema / policy tampering.
+  /\b(change|modify|alter|replace|update)\b[^.\n]{0,60}\boutput (schema|format|specification)\b/i,
+  /\bnew (?:output )?(?:schema|format|rules)\b[^.\n]{0,60}\binstead\b/i,
+  // Credential/secret disclosure.
+  /\b(reveal|show|print|expose|disclose|output|repeat|include)\b[^.\n]{0,60}\b(api[- ]?keys?|credentials?|secrets?|tokens?|passwords?)\b/i,
+  // Exfiltration of source/data to external destinations.
+  /\b(upload|send|exfiltrate|transmit|forward|post|copy)\b[^.\n]{0,80}\b(source code|sources?|data|secrets?|credentials?|environment(?: variables?)?|\.env)\b[^.\n]{0,80}\bto\b/i,
+  /\b(exfiltrate|curl|wget|fetch)\b[^.\n]{0,80}\b(https?:\/\/|evil\.|attacker|webhook\.site|requestbin)/i,
+];
+
+export function isMetaInstruction(line: string): boolean {
+  return META_INSTRUCTION_PATTERNS.some((re) => re.test(line));
+}
+
 /** Convention statements from repository instruction files, each traceable to
  * `path:line`. Imperative bullet/constraint lines only — never prose summaries. */
 export function conventionsFromInstructionFiles(files: FetchedFile[]): RepositoryConvention[] {
@@ -485,6 +513,9 @@ export function conventionsFromInstructionFiles(files: FetchedFile[]): Repositor
       const text = (bullet ? bullet[1]! : line).replace(/\*\*/g, "").trim();
       if (text.length < 12 || text.length > 400) continue;
       if (!CONSTRAINT_LINE_RE.test(text)) continue;
+      // Untrusted instruction text is never promoted into structured
+      // conventions when it addresses the model/agent itself (re-audit P1-3).
+      if (isMetaInstruction(text)) continue;
       out.push({ statement: text, evidence: [`${file.path}:${i + 1}`] });
     }
   }
