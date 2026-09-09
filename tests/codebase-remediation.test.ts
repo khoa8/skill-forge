@@ -253,6 +253,7 @@ describe("P1-2: scoped /tree/ analysis contains no out-of-scope facts", () => {
 // ---------------------------------------------------------------------------
 
 import { deriveCodebasePlan } from "../src/core/codebase/plan.js";
+import type { RepositoryCommand } from "../src/core/types.js";
 
 function accountingHarness(o: {
   rawMissing?: string[];
@@ -2975,7 +2976,7 @@ describe("Final-3 P1-3: convention command bypass closed (planner)", () => {
     "Run npm publish.",
   ];
 
-  function planWithConvention(statement: string, commands: { command: string }[] = []) {
+  function planWithConvention(statement: string, commands: Partial<RepositoryCommand>[] = []) {
     const analysis = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
       treeLockfiles: ["package-lock.json"],
