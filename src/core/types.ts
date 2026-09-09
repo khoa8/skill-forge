@@ -98,12 +98,29 @@ export const RepositoryCommandPurpose = z.enum([
 export type RepositoryCommandPurpose = z.infer<typeof RepositoryCommandPurpose>;
 
 /** A command evidenced by a manifest/CI/build file — documentation, never an
- * instruction SkillForge itself executed. */
+ * instruction SkillForge itself executed.
+ *
+ * Trust model (P1-1): repository metadata is untrusted, so synthesized
+ * invocations are built as structured argv (executable + whole-token
+ * arguments + cwd) and rendered to the display string only at the extraction
+ * boundary. `command` is that rendered form: shell-significant characters in
+ * repository-controlled values are always quoted (inert), and values that
+ * cannot be represented unambiguously cause the command to be OMITTED, never
+ * rewritten. */
 export const RepositoryCommand = z.object({
   purpose: RepositoryCommandPurpose,
   command: z.string().min(1).max(300),
   /** Where the command is defined (e.g. "package.json scripts.test", ".github/workflows/ci.yml:42"). */
   evidence: z.string().min(1).max(300),
+  /** Concrete working directory relative to the analysis root, "" = the
+   * analysis root itself. Present only when the execution context is
+   * concretely known; commands with an unknown/dynamic working directory are
+   * omitted from runnable evidence entirely (P1-2). */
+  cwd: z.string().max(300).optional(),
+  /** true = SkillForge synthesized the invocation from evidenced parts
+   * (script/workspace invocations, install forms). false/absent = the exact
+   * command text was directly observed in repository content (CI run step). */
+  synthesized: z.boolean().optional(),
 });
 export type RepositoryCommand = z.infer<typeof RepositoryCommand>;
 

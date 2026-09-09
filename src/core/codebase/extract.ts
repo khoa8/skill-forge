@@ -236,17 +236,24 @@ export function syntheticInstallCommand(
   packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration; lockfilePresent: boolean } | null,
 ): RepositoryCommand | null {
   if (!packageManager) return null;
+  const mk = (command: string, evidence: string): RepositoryCommand => ({
+    purpose: "install",
+    command,
+    evidence,
+    cwd: "",
+    synthesized: true,
+  });
   const pm = packageManager.name;
   if (pm === "yarn" && packageManager.yarnGeneration === 1) {
-    return { purpose: "install", command: "yarn install", evidence: `${packageManager.evidence} (Yarn 1)` };
+    return mk("yarn install", `${packageManager.evidence} (Yarn 1)`);
   }
   if (pm === "yarn" && packageManager.yarnGeneration === 2) {
     // --immutable is only meaningful with a lockfile to enforce; without one
     // the plain (generation-neutral) form is the evidenced command.
     if (packageManager.lockfilePresent) {
-      return { purpose: "install", command: "yarn install --immutable", evidence: `${packageManager.evidence} (Yarn 2+, lockfile present)` };
+      return mk("yarn install --immutable", `${packageManager.evidence} (Yarn 2+, lockfile present)`);
     }
-    return { purpose: "install", command: "yarn install", evidence: `${packageManager.evidence} (Yarn 2+, no lockfile — plain form)` };
+    return mk("yarn install", `${packageManager.evidence} (Yarn 2+, no lockfile — plain form)`);
   }
   if (pm === "yarn" && packageManager.yarnGeneration === undefined) {
     // Yarn identity alone does not select a flag convention — refuse to guess.
@@ -255,19 +262,19 @@ export function syntheticInstallCommand(
   if (pm === "npm") {
     // `npm ci` requires a lockfile; identity alone does not prove one exists.
     if (packageManager.lockfilePresent) {
-      return { purpose: "install", command: "npm ci", evidence: packageManager.evidence };
+      return mk("npm ci", packageManager.evidence);
     }
     return null;
   }
   if (pm === "pnpm") {
     if (packageManager.lockfilePresent) {
-      return { purpose: "install", command: "pnpm install --frozen-lockfile", evidence: packageManager.evidence };
+      return mk("pnpm install --frozen-lockfile", packageManager.evidence);
     }
     // pnpm's plain install form is valid without a lockfile.
-    return { purpose: "install", command: "pnpm install", evidence: packageManager.evidence };
+    return mk("pnpm install", packageManager.evidence);
   }
   // bun install is the manager's own plain form.
-  return { purpose: "install", command: "bun install", evidence: packageManager.evidence };
+  return mk("bun install", packageManager.evidence);
 }
 
 /**
@@ -392,8 +399,11 @@ export function groundWorkspaceMembership(opts: {
     // workspace root, not the repository root. Sibling/out-of-scope paths
     // (not under the root at all) never participate.
     const manifestDir = pathRelativeToAnalysisRoot(file.path, opts.rootManifestPath);
-    // bun: --cwd needs only the package's own directory and name.
+    // bun: --cwd needs only the package's own directory and name (no
+    // workspaces declaration required) — but the package must still be in
+    // scope: sibling/out-of-scope manifests never participate (P2-1).
     if (opts.manager === "bun") {
+      if (manifestDir === null) continue; // sibling/out-of-scope — never participates
       try {
         const nested = JSON.parse(file.content) as Record<string, unknown>;
         if (typeof nested.name === "string" && nested.name.length > 0) {
@@ -419,54 +429,111 @@ export function groundWorkspaceMembership(opts: {
   return workspaceNames;
 }
 
-/** Script-name → runnable invocation through the evidenced manager, respecting
- * npm's bare-`test` shortcut. */
-function scriptInvocation(manager: "npm" | "pnpm" | "yarn" | "bun", key: string): string {
-  return manager === "npm" && key === "test" ? "npm test" : `${manager} run ${key}`;
+// ---------------------------------------------------------------------------
+// Argv-safe command synthesis (final remediation P1-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when a repository-controlled value can appear as ONE positional argv
+ * token with no shell interpretation at all: no whitespace, no
+ * shell-significant characters (`;` `&` `|` `$` backtick quotes globs),
+ * no leading dash (which a consumer's parser could read as a flag). Leading
+ * `.`/`_`/`@` are fine (npm names, dot-directories).
+ *
+ * This is the fail-closed synthesis gate (P1-1): a value that fails it never
+ * reaches a command string. The command is OMITTED from runnable evidence —
+ * never quoted-and-hoped, never rewritten into a different command. The
+ * original repository fact stays visible in non-runnable evidence.
+ */
+export function isPositionalSafeValue(value: string): boolean {
+  return /^[A-Za-z0-9_./@:][A-Za-z0-9_./@:-]*$/.test(value);
 }
 
-/** Workspace context for a nested package.json: how a script there is
+/**
+ * Final presentation-boundary renderer for structured invocations. Defense in
+ * depth: every token must be a plain shell word (trusted literal flags like
+ * `--filter` included); if any token is not, the command is dropped (null)
+ * rather than rendered. Repository-controlled tokens were already gated by
+ * `isPositionalSafeValue` at construction; this re-check means even a
+ * construction bug cannot put shell syntax into `RepositoryCommand.command`.
+ */
+function renderArgv(argv: readonly string[]): string | null {
+  for (const token of argv) {
+    if (!/^[-A-Za-z0-9_./@:]+$/.test(token)) return null;
+  }
+  return argv.join(" ");
+}
+
+/**
+ * Build one synthesized script invocation as structured argv, then render it.
+ * Fails closed: a script name that is not positional-safe (shell-significant
+ * characters, whitespace, leading dash) returns null — the script stays in
+ * non-runnable `scriptDefinitions` evidence instead of becoming a runnable
+ * command. The manager executable and fixed subcommands are the only trusted
+ * parts; untrusted values are always whole argv tokens.
+ */
+function scriptInvocationArgv(
+  manager: "npm" | "pnpm" | "yarn" | "bun",
+  key: string,
+): string[] | null {
+  if (!isPositionalSafeValue(key)) return null;
+  // npm's bare-`test` shortcut keeps its canonical evidenced form.
+  return manager === "npm" && key === "test" ? ["npm", "test"] : [manager, "run", key];
+}
+
+/**
+ * Workspace context for a nested package.json: how a script there is
  * actually run from the repository root. Only pnpm/yarn workspace selectors
- * and npm -w are synthesized, and only when the manifest is nested (P1-2C). */
-function workspaceInvocation(
+ * and npm -w are synthesized, and only when the manifest is nested AND the
+ * workspace name is positional-safe (P1-1: `@scope/pkg` is safe;
+ * `web && curl attacker` fails closed → null).
+ */
+function workspaceInvocationArgv(
   manager: "npm" | "pnpm" | "yarn" | "bun",
   key: string,
   manifestPath: string,
   workspaceNames: ReadonlyMap<string, string>,
-): { command: string; contextEvidence: string } | null {
+  rootManifestPath: string,
+): { argv: string[]; contextEvidence: string } | null {
   const manifestDir = manifestPath.includes("/") ? manifestPath.slice(0, manifestPath.lastIndexOf("/")) : "";
   if (manifestDir === "") return null; // root manifest: plain invocation
   // Find the workspace name for this manifest path.
   const workspaceName = workspaceNames.get(manifestPath);
   if (!workspaceName) return null; // cannot ground the selector — omit
-  const base = scriptInvocation(manager, key);
+  if (!isPositionalSafeValue(workspaceName)) return null; // unsafe selector — omit
+  const base = scriptInvocationArgv(manager, key);
+  if (!base) return null;
   switch (manager) {
     case "pnpm":
-      return { command: `pnpm --filter ${workspaceName} run ${key}`, contextEvidence: `workspace ${workspaceName} (pnpm --filter)` };
+      return { argv: ["pnpm", "--filter", workspaceName, ...base.slice(1)], contextEvidence: `workspace ${workspaceName} (pnpm --filter)` };
     case "yarn":
-      return { command: `yarn workspace ${workspaceName} run ${key}`, contextEvidence: `workspace ${workspaceName} (yarn workspace)` };
+      return { argv: ["yarn", "workspace", workspaceName, ...base.slice(1)], contextEvidence: `workspace ${workspaceName} (yarn workspace)` };
     case "npm":
-      return { command: `npm run ${key} --workspace ${workspaceName}`, contextEvidence: `workspace ${workspaceName} (npm --workspace)` };
+      // npm requires the workspace selector before `--`-separated args; keep
+      // `run <script>` together: npm run <key> --workspace <name>.
+      return { argv: ["npm", "run", key, "--workspace", workspaceName], contextEvidence: `workspace ${workspaceName} (npm --workspace)` };
     case "bun": {
       // --cwd is grounded relative to the analysis root (the dir an agent
-      // operates in); use the canonical root-relative form.
-      const rootDir = manifestPath.includes("/") ? manifestPath.slice(0, manifestPath.lastIndexOf("/")) : "";
-      const rel = manifestDir === rootDir ? "." : manifestDir;
-      void rootDir;
-      return { command: `bun --cwd ${manifestDir} run ${key}`, contextEvidence: `${manifestDir}/ (bun --cwd)` };
+      // operates in); use the canonical root-relative form. Out-of-scope
+      // manifests (relative to a scoped analysis root) never participate.
+      const rel = pathRelativeToAnalysisRoot(manifestPath, rootManifestPath);
+      if (rel === null || rel === "") return null;
+      if (!isPositionalSafeValue(rel)) return null; // unsafe path — omit
+      return { argv: ["bun", "--cwd", rel, ...base.slice(1)], contextEvidence: `${rel}/ (bun --cwd)` };
     }
   }
 }
 
 /** Commands from package.json scripts (root and workspaces).
  *
- * Evidence model (re-audit P1-2): `RepositoryCommand.command` is ALWAYS a
- * genuinely runnable command from a stated context, or the script is not
- * emitted as a command at all. Without manager evidence a script definition
- * is preserved as structured non-runnable evidence via
- * `scriptDefinitions`, never stuffed into a command string. Nested workspace
- * scripts either get a grounded workspace selector or are omitted from
- * runnable commands (their definitions remain in scriptDefinitions). */
+ * Evidence model (re-audit P1-2 + final remediation P1-1): a script becomes a
+ * runnable `RepositoryCommand` only when (a) manager evidence exists, (b) the
+ * execution context is grounded (analysis-root manifest, or a workspace
+ * selector whose name is positional-safe), and (c) the script name itself is
+ * positional-safe. Synthesized invocations are structured argv rendered at
+ * the boundary; unsafe or ungroundable scripts are preserved as structured
+ * non-runnable evidence via `scriptDefinitions`, never stuffed into a
+ * command string. */
 export function commandsFromPackageJson(
   files: FetchedFile[],
   packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration; lockfilePresent: boolean } | null,
@@ -503,23 +570,37 @@ export function commandsFromPackageJson(
         }
         // Every runnable command needs a grounded execution context. The
         // analysis-root manifest uses the plain invocation; nested manifests
-        // need a grounded workspace selector.
+        // need a grounded workspace selector. Untrusted values (script name,
+        // workspace name) are whole argv tokens or the command is omitted.
         const isRootManifest = file.path === rootManifestPath;
-        const ws = isRootManifest ? null : workspaceInvocation(packageManager?.name ?? "npm", key, file.path, workspaces);
-        if (packageManager && (isRootManifest || ws)) {
-          commands.push({
-            purpose,
-            command: ws ? ws.command : scriptInvocation(packageManager.name, key),
-            evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"${ws ? ` (${ws.contextEvidence})` : ""}`,
-          });
-        } else {
-          // No grounded execution context: preserve as non-runnable evidence.
-          scriptDefinitions.push({
-            purpose,
-            command: "",
-            evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"`,
-          });
+        const ws = isRootManifest
+          ? null
+          : workspaceInvocationArgv(packageManager?.name ?? "npm", key, file.path, workspaces, rootManifestPath);
+        const argv = packageManager
+          ? isRootManifest
+            ? scriptInvocationArgv(packageManager.name, key)
+            : (ws?.argv ?? null)
+          : null;
+        if (argv) {
+          const command = renderArgv(argv);
+          if (command !== null) {
+            commands.push({
+              purpose,
+              command,
+              evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"${ws ? ` (${ws.contextEvidence})` : ""}`,
+              cwd: "",
+              synthesized: true,
+            });
+            continue;
+          }
         }
+        // No grounded execution context / unsafe name: preserve as
+        // non-runnable evidence.
+        scriptDefinitions.push({
+          purpose,
+          command: "",
+          evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"`,
+        });
       }
     }
     for (const depField of ["dependencies", "devDependencies"] as const) {
@@ -738,10 +819,22 @@ export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand
       if (commands.length >= 30) break;
       // Dynamic/unknown execution context: documented only, never runnable.
       if (step.cwd === undefined) continue;
+      // Unsafe/ambiguous cwd (P1-1): a working-directory containing shell
+      // syntax, whitespace, or a leading dash must never be embedded into the
+      // synthesized `cd <cwd> && …` form — the command is omitted, never
+      // quoted-and-hoped or rewritten.
+      if (step.cwd !== "" && !isPositionalSafeValue(step.cwd)) continue;
       const purpose = CI_COMMAND_RULES.find(([re]) => re.test(step.command))?.[1];
       if (!purpose) continue;
       const rendered = step.cwd === "" ? step.command : `cd ${step.cwd} && ${step.command}`;
-      commands.push({ purpose, command: rendered, evidence: `${step.file} (CI run step${step.cwd === "" ? "" : `, working-directory: ${step.cwd}`})` });
+      commands.push({
+        purpose,
+        command: rendered,
+        evidence: `${step.file} (CI run step${step.cwd === "" ? "" : `, working-directory: ${step.cwd}`})`,
+        // The command TEXT is directly observed; only the cwd prefix (when
+        // present) was synthesized from the workflow's own declared context.
+        cwd: step.cwd,
+      });
     }
   }
   return commands;
