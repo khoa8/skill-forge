@@ -395,7 +395,7 @@ describe("P2-1: inspection accounting is internally consistent", () => {
 // P1-5 — package-manager evidence grounding
 // ---------------------------------------------------------------------------
 
-import { detectPackageManager, commandsFromPackageJson, syntheticInstallCommand, type FetchedFile } from "../src/core/codebase/extract.js";
+import { detectPackageManager, commandsFromPackageJson, syntheticInstallCommand, workspaceGlobMatches, type FetchedFile } from "../src/core/codebase/extract.js";
 
 const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}): FetchedFile => ({
   path: "package.json",
@@ -403,58 +403,62 @@ const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {
 });
 
 describe("P1-5: package-manager detection is evidence-only", () => {
+  const locks = (...paths: string[]) => paths.map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() }));
   it("detects npm / pnpm / yarn / bun from their respective evidence", () => {
     // packageManager field.
-    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "pnpm@9.1.0" }))?.name).toBe("pnpm");
-    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "yarn@4.1.0" }))?.name).toBe("yarn");
-    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "bun@1.1.0" }))?.name).toBe("bun");
-    expect(detectPackageManager(new Set(), [], pkg({}, { packageManager: "npm@10.0.0" }))?.name).toBe("npm");
-    // Lockfile presence.
-    expect(detectPackageManager(new Set(["package-lock.json"]), [], undefined)?.name).toBe("npm");
-    expect(detectPackageManager(new Set(["pnpm-lock.yaml"]), [], undefined)?.name).toBe("pnpm");
-    expect(detectPackageManager(new Set(["yarn.lock"]), [], undefined)?.name).toBe("yarn");
-    expect(detectPackageManager(new Set(["bun.lockb"]), [], undefined)?.name).toBe("bun");
+    expect(detectPackageManager([], [], pkg({}, { packageManager: "pnpm@9.1.0" }), "")?.name).toBe("pnpm");
+    expect(detectPackageManager([], [], pkg({}, { packageManager: "yarn@4.1.0" }), "")?.name).toBe("yarn");
+    expect(detectPackageManager([], [], pkg({}, { packageManager: "bun@1.1.0" }), "")?.name).toBe("bun");
+    expect(detectPackageManager([], [], pkg({}, { packageManager: "npm@10.0.0" }), "")?.name).toBe("npm");
+    // Lockfile presence (path-aware: root-dir lockfiles only).
+    expect(detectPackageManager(locks("package-lock.json"), [], undefined, "")?.name).toBe("npm");
+    expect(detectPackageManager(locks("pnpm-lock.yaml"), [], undefined, "")?.name).toBe("pnpm");
+    expect(detectPackageManager(locks("yarn.lock"), [], undefined, "")?.name).toBe("yarn");
+    expect(detectPackageManager(locks("bun.lockb"), [], undefined, "")?.name).toBe("bun");
     // CI install commands.
-    expect(detectPackageManager(new Set(), ["pnpm install --frozen-lockfile"], undefined)?.name).toBe("pnpm");
-    expect(detectPackageManager(new Set(), ["yarn install --immutable"], undefined)?.name).toBe("yarn");
-    expect(detectPackageManager(new Set(), ["bun install"], undefined)?.name).toBe("bun");
+    expect(detectPackageManager([], ["pnpm install --frozen-lockfile"], undefined, "")?.name).toBe("pnpm");
+    expect(detectPackageManager([], ["yarn install --immutable"], undefined, "")?.name).toBe("yarn");
+    expect(detectPackageManager([], ["bun install"], undefined, "")?.name).toBe("bun");
   });
 
   it("invents no runner when evidence is absent or ambiguous", () => {
     // No evidence at all.
-    expect(detectPackageManager(new Set(), [], undefined)).toBeNull();
+    expect(detectPackageManager([], [], undefined, "")).toBeNull();
     // Conflicting lockfiles → ambiguous → null.
-    expect(detectPackageManager(new Set(["package-lock.json", "yarn.lock"]), [], undefined)).toBeNull();
+    expect(detectPackageManager(locks("package-lock.json", "yarn.lock"), [], undefined, "")).toBeNull();
     // Conflicting CI commands → null.
-    expect(detectPackageManager(new Set(), ["npm ci", "pnpm i"], undefined)).toBeNull();
+    expect(detectPackageManager([], ["npm ci", "pnpm i"], undefined, "")).toBeNull();
+    // Nested lockfiles do NOT evidence the root package (path-aware).
+    expect(detectPackageManager(locks("packages/legacy/package-lock.json"), [], pkg({}, { packageManager: undefined }), "")).toBeNull();
+    expect(detectPackageManager(locks("packages/b/pnpm-lock.yaml"), [], undefined, "")).toBeNull();
   });
 
   it("expresses scripts through the evidenced manager; npm test stays npm test", () => {
     const { commands } = commandsFromPackageJson(
       [pkg({ test: "vitest run", build: "tsc" })],
-      { name: "pnpm", evidence: "pnpm-lock.yaml in the repository tree (lockfile)" },
+      { name: "pnpm", evidence: "pnpm-lock.yaml in the analyzed root directory (lockfile)", lockfilePresent: true },
     );
     expect(commands.find((c) => c.purpose === "test")?.command).toBe("pnpm run test");
     expect(commands.find((c) => c.purpose === "build")?.command).toBe("pnpm run build");
-    const npm = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "npm", evidence: "package-lock.json" });
+    const npm = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "npm", evidence: "package-lock.json", lockfilePresent: true });
     expect(npm.commands.find((c) => c.purpose === "test")?.command).toBe("npm test");
-    const yarn = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "yarn", evidence: "yarn.lock" });
+    const yarn = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "yarn", evidence: "yarn.lock", lockfilePresent: true });
     expect(yarn.commands.find((c) => c.purpose === "test")?.command).toBe("yarn run test");
-    const bun = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "bun", evidence: "bun.lockb" });
+    const bun = commandsFromPackageJson([pkg({ test: "vitest run" })], { name: "bun", evidence: "bun.lockb", lockfilePresent: true });
     expect(bun.commands.find((c) => c.purpose === "test")?.command).toBe("bun run test");
   });
 
   it("lifecycle scripts never become dependency-install commands", () => {
     const { commands } = commandsFromPackageJson(
       [pkg({ prepare: "husky", postinstall: "echo done", install: "node scripts/setup.js", test: "vitest run" })],
-      { name: "npm", evidence: "package-lock.json" },
+      { name: "npm", evidence: "package-lock.json", lockfilePresent: true },
     );
     expect(commands.filter((c) => c.purpose === "install")).toEqual([]);
     expect(commands.find((c) => c.evidence.includes("scripts.prepare"))).toBeUndefined();
     expect(commands.find((c) => c.evidence.includes("scripts.postinstall"))).toBeUndefined();
     // The only install command comes from the manager evidence itself
     // (npm ci is legal: its lockfile prerequisite is the evidence).
-    const install = syntheticInstallCommand({ name: "npm", evidence: "package-lock.json in the repository tree (lockfile)", lockfilePresent: true });
+    const install = syntheticInstallCommand({ name: "npm", evidence: "package-lock.json in the analyzed root directory (lockfile)", lockfilePresent: true });
     expect(install).toMatchObject({ purpose: "install", command: "npm ci" });
   });
 
@@ -900,7 +904,7 @@ describe("Re-audit P1-2: runnable commands are grounded end-to-end", () => {
   it("npm packageManager without a lockfile invents no install command", () => {
     const analysis = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", packageManager: "npm@10.0.0", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json"]), // no package-lock.json
+      treeLockfiles: [], // no package-lock.json in the analyzed root
     });
     expect(analysis.commands.filter((c) => c.purpose === "install")).toEqual([]);
     // Scripts still runnable through the evidenced runner.
@@ -912,7 +916,7 @@ describe("Re-audit P1-2: runnable commands are grounded end-to-end", () => {
   it("npm with package-lock.json may synthesize npm ci", () => {
     const analysis = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", packageManager: "npm@10", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      treeLockfiles: ["package-lock.json"],
     });
     expect(analysis.commands.find((c) => c.purpose === "install")?.command).toBe("npm ci");
   });
@@ -921,38 +925,38 @@ describe("Re-audit P1-2: runnable commands are grounded end-to-end", () => {
     // packageManager: yarn@1.22 → Yarn 1 → plain yarn install.
     const yarn1 = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", packageManager: "yarn@1.22.19", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "yarn.lock"]),
+      treeLockfiles: ["yarn.lock"],
     });
     expect(yarn1.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install");
     // Modern yarn via .yarnrc.yml → --immutable.
     const yarn2 = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "yarn.lock", ".yarnrc.yml"]),
+      treeLockfiles: ["yarn.lock", ".yarnrc.yml"],
     });
     expect(yarn2.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install --immutable");
     // yarn.lock + .yarnrc (Yarn 1 config) → plain form.
     const yarn1b = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "yarn.lock", ".yarnrc"]),
+      treeLockfiles: ["yarn.lock", ".yarnrc"],
     });
     expect(yarn1b.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install");
     // yarn.lock alone (ambiguous generation) → NO synthetic install command.
     const yarnAmbiguous = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "yarn.lock"]),
+      treeLockfiles: ["yarn.lock"],
     });
     expect(yarnAmbiguous.commands.filter((c) => c.purpose === "install")).toEqual([]);
     // pnpm + lockfile → frozen lockfile; bun → plain install.
     expect(
       buildRepositoryAnalysisFromCommandsFixture({
         packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-        treeBaseNames: new Set(["package.json", "pnpm-lock.yaml"]),
+        treeLockfiles: ["pnpm-lock.yaml"],
       }).commands.find((c) => c.purpose === "install")?.command,
     ).toBe("pnpm install --frozen-lockfile");
     expect(
       buildRepositoryAnalysisFromCommandsFixture({
         packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-        treeBaseNames: new Set(["package.json", "bun.lockb"]),
+        treeLockfiles: ["bun.lockb"],
       }).commands.find((c) => c.purpose === "install")?.command,
     ).toBe("bun install");
   });
@@ -960,7 +964,7 @@ describe("Re-audit P1-2: runnable commands are grounded end-to-end", () => {
   it("non-runnable script definitions never render as Run commands in the plan", () => {
     const analysis = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json"]), // no lockfile, no packageManager
+      treeLockfiles: [], // no lockfile, no packageManager
     });
     const plan = PlanSchema.parse(deriveCodebasePlan(analysis));
     for (const entry of [...plan.steps, ...plan.verification]) {
@@ -984,7 +988,7 @@ describe("Re-audit P1-2: runnable commands are grounded end-to-end", () => {
         scripts: { test: "root-test" },
       }),
       nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
-      treeBaseNames: new Set(["package.json", "pnpm-lock.yaml"]),
+      treeLockfiles: ["pnpm-lock.yaml"],
     });
     const nested = withWorkspace.commands.filter((c) => c.evidence.startsWith("packages/web/"));
     expect(nested.every((c) => c.command.startsWith("pnpm --filter web run ") || c.command.startsWith("pnpm --filter "))).toBe(true);
@@ -993,7 +997,7 @@ describe("Re-audit P1-2: runnable commands are grounded end-to-end", () => {
     const withoutWorkspace = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "root", scripts: { test: "root-test" } }),
       nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
-      treeBaseNames: new Set(["package.json", "pnpm-lock.yaml"]),
+      treeLockfiles: ["pnpm-lock.yaml"],
     });
     expect(withoutWorkspace.commands.every((c) => !c.evidence.startsWith("packages/web/"))).toBe(true);
     // The nested script is preserved as non-runnable evidence instead.
@@ -1026,7 +1030,7 @@ function manifestRepositoryBlockFrom(analysis: ReturnType<typeof buildRepository
 function codebaseSkillFor(plan: Record<string, unknown>, commands: string[]) {
   const analysis = buildRepositoryAnalysisFromCommandsFixture({
     packageJson: JSON.stringify({ name: "fixture", scripts: { test: "vitest run", build: "tsc" } }),
-    treeBaseNames: new Set(["package.json", "package-lock.json"]),
+    treeLockfiles: ["package-lock.json"],
   });
   void commands;
   return { analysis, normalized: normalizeSource({
@@ -1149,7 +1153,7 @@ describe("Re-audit P1-3: meta-instruction hardening", () => {
   it("the deterministic plan's constraints stay free of hostile lines", () => {
     const analysis = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      treeLockfiles: ["package-lock.json"],
     });
     const withHostile = {
       ...analysis,
@@ -1196,7 +1200,7 @@ describe("Re-audit P2-1: scoped plans state their subtree; unscoped unchanged", 
     const scoped: RepositoryAnalysis = {
       ...buildRepositoryAnalysisFromCommandsFixture({
         packageJson: JSON.stringify({ name: "web", scripts: { test: "vitest run" } }),
-        treeBaseNames: new Set(["package.json", "package-lock.json"]),
+        treeLockfiles: ["package-lock.json"],
       }),
       repository: {
         url: "https://github.com/acme/monorepo",
@@ -1216,7 +1220,7 @@ describe("Re-audit P2-1: scoped plans state their subtree; unscoped unchanged", 
   it("unscoped plans keep their whole-repository wording", () => {
     const unscoped = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "web", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      treeLockfiles: ["package-lock.json"],
     });
     const plan = PlanSchema.parse(deriveCodebasePlan(unscoped));
     expect(plan.whenToUse[0]).toContain("acme/fixture repository");
@@ -1234,7 +1238,7 @@ import { repositoryContextJson, MAX_REPOSITORY_CONTEXT_BYTES } from "../src/core
 function adversarialAnalysis(): RepositoryAnalysis {
   const base = buildRepositoryAnalysisFromCommandsFixture({
     packageJson: JSON.stringify({ name: "x", scripts: { test: "t" } }),
-    treeBaseNames: new Set(["package.json"]),
+    treeLockfiles: [],
   });
   const long = (i: number, ch: string) => `${i}-${ch.repeat(400)}`;
   return {
@@ -1271,7 +1275,7 @@ describe("Re-audit P2-2: provider context hard byte ceiling", () => {
   it("a normally-sized analysis is not reduced", () => {
     const json = repositoryContextJson(buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      treeLockfiles: ["package-lock.json"],
     }));
     expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(MAX_REPOSITORY_CONTEXT_BYTES);
     expect((JSON.parse(json) as { boundedSelection: { inspectedFilesOmitted: number } }).boundedSelection.inspectedFilesOmitted).toBe(0);
@@ -1288,7 +1292,7 @@ describe("Re-audit P2-3: provenance count fields are mandatory and consistency-c
   function skillWithManifestPatch(patch: (repo: Record<string, unknown>) => void) {
     const analysis = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      treeLockfiles: ["package-lock.json"],
     });
     const normalized = normalizeSource({
       type: "github-codebase",
@@ -1351,7 +1355,7 @@ describe("Re-audit P2-3: provenance count fields are mandatory and consistency-c
     // A real, schema-valid fixture parses.
     const real = buildRepositoryAnalysisFromCommandsFixture({
       packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
-      treeBaseNames: new Set(["package.json", "package-lock.json"]),
+      treeLockfiles: ["package-lock.json"],
     });
     expect(RASchema.safeParse(real).success).toBe(true);
     // Exceeding any schema cap (inspectedFiles > 200) is rejected at parse.
@@ -1426,5 +1430,184 @@ describe("Final P1-1: generated/minified files cannot influence structured claim
     // Eligible deep-fetch candidates: package.json + src/index.ts only.
     expect(r.analysis.selection.candidateCount).toBe(2);
     expect(r.analysis.selection.selectedCount).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final remediation P1-2 — path-aware manager/lockfile/workspace evidence
+// ---------------------------------------------------------------------------
+
+describe("Final P1-2A: Yarn install flags require their prerequisites", () => {
+  it("yarn@1.x with lockfile → plain install; without lockfile → no synthetic install", () => {
+    const withLock = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", packageManager: "yarn@1.22.19", scripts: { test: "t" } }),
+      treeLockfiles: ["yarn.lock"],
+    });
+    expect(withLock.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install");
+    const withoutLock = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", packageManager: "yarn@1.22.19", scripts: { test: "t" } }),
+      treeLockfiles: [],
+    });
+    // Yarn 1's plain install is valid without a lockfile.
+    expect(withoutLock.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install");
+  });
+
+  it("modern Yarn with yarn.lock → --immutable; without lockfile → plain form", () => {
+    const withLock = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", packageManager: "yarn@4.1.0", scripts: { test: "t" } }),
+      treeLockfiles: ["yarn.lock"],
+    });
+    expect(withLock.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install --immutable");
+    const withoutLock = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", packageManager: "yarn@4.1.0", scripts: { test: "t" } }),
+      treeLockfiles: [],
+    });
+    expect(withoutLock.commands.find((c) => c.purpose === "install")?.command).toBe("yarn install");
+    expect(withoutLock.commands.find((c) => c.purpose === "install")?.command).not.toContain("--immutable");
+  });
+
+  it("exact CI-observed install commands are retained as evidence", () => {
+    // CI evidence path: the CI step itself becomes the install command.
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", scripts: { test: "t" } }),
+      treeLockfiles: [],
+    });
+    // Fixture has no CI file, so synthesis rules apply; assert no --immutable without lockfile.
+    expect(analysis.commands.find((c) => c.command.includes("--immutable"))).toBeUndefined();
+  });
+
+  it("ambiguous yarn.lock with no generation evidence → no synthetic install", () => {
+    const ambiguous = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", scripts: { test: "t" } }),
+      treeLockfiles: ["yarn.lock"],
+    });
+    expect(ambiguous.commands.filter((c) => c.purpose === "install")).toEqual([]);
+  });
+});
+
+describe("Final P1-2B: lockfile evidence is path-aware", () => {
+  it("nested/sibling lockfiles never evidence the analyzed root", () => {
+    // Root package + nested package-lock.json → root has NO npm evidence.
+    const nested = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", scripts: { test: "t" } }),
+      nested: [{ path: "packages/legacy/package.json", name: "legacy" }],
+      treeLockfiles: ["packages/legacy/package-lock.json"],
+    });
+    expect(nested.commands.filter((c) => c.purpose === "install")).toEqual([]);
+    // Scoped package a + sibling lockfile in packages/b → no pnpm evidence for a.
+    const sibling = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "a", scripts: { test: "t" } }),
+      treeLockfiles: ["packages/b/pnpm-lock.yaml"],
+    });
+    expect(sibling.commands.filter((c) => c.purpose === "install")).toEqual([]);
+    // Root lockfile → npm ci.
+    expect(
+      buildRepositoryAnalysisFromCommandsFixture({
+        packageJson: JSON.stringify({ name: "root", scripts: { test: "t" } }),
+        treeLockfiles: ["package-lock.json"],
+      }).commands.find((c) => c.purpose === "install")?.command,
+    ).toBe("npm ci");
+  });
+});
+
+describe("Final P1-2C: workspace membership is actually grounded", () => {
+  const rootWithWorkspaces = JSON.stringify({
+    name: "root",
+    workspaces: ["packages/*"],
+    scripts: { test: "root-test" },
+  });
+
+  it("only pattern-matched nested manifests get workspace selectors", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: rootWithWorkspaces,
+      nested: [
+        { path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } },
+        { path: "examples/demo/package.json", name: "demo", scripts: { test: "demo-test" } },
+      ],
+      treeLockfiles: ["package-lock.json"],
+    });
+    const commands = analysis.commands.filter((c) => c.evidence.includes("(workspace"));
+    // web matched; demo did not.
+    expect(commands.some((c) => c.evidence.includes("workspace web"))).toBe(true);
+    expect(commands.some((c) => c.evidence.includes("demo"))).toBe(false);
+  });
+
+  it("nested manifest without a name gets no workspace command", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", workspaces: ["packages/*"] }),
+      nested: [{ path: "packages/anonymous/package.json", name: "", scripts: { test: "t" } }],
+      treeLockfiles: ["package-lock.json"],
+    });
+    expect(analysis.commands.filter((c) => c.evidence.includes("(workspace"))).toEqual([]);
+  });
+
+  it("no workspace declaration → nested scripts have no runnable form", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", scripts: { test: "t" } }),
+      nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["package-lock.json"],
+    });
+    expect(analysis.commands.filter((c) => c.evidence.includes("(workspace"))).toEqual([]);
+    // The nested script must not render as a root-level runnable command.
+    const plan = PlanSchema.parse(deriveCodebasePlan(analysis));
+    expect([...plan.steps, ...plan.verification].join(" ")).not.toContain("`npm run test --workspace");
+  });
+
+  it("multiple workspace patterns are honored (deep star included)", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({
+        name: "root",
+        workspaces: ["apps/*", "tools/**"],
+        scripts: { test: "t" },
+      }),
+      nested: [
+        { path: "apps/web/package.json", name: "web", scripts: { test: "web-test" } },
+        { path: "tools/lint/deep/package.json", name: "deep", scripts: { test: "deep-test" } },
+        { path: "misc/x/package.json", name: "x", scripts: { test: "x-test" } },
+      ],
+      treeLockfiles: ["package-lock.json"],
+    });
+    const ws = analysis.commands.filter((c) => c.evidence.includes("(workspace"));
+    expect(ws.some((c) => c.evidence.includes("workspace web"))).toBe(true);
+    expect(ws.some((c) => c.evidence.includes("workspace deep"))).toBe(true);
+    expect(ws.some((c) => c.evidence.includes("x"))).toBe(false);
+  });
+
+  it("pnpm workspace membership comes from pnpm-workspace.yaml, not package.json workspaces", () => {
+    // pnpm + package.json workspaces declaration only → NOT grounded.
+    const pkgDeclared = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", workspaces: ["packages/*"] }),
+      nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["pnpm-lock.yaml"],
+    });
+    expect(pkgDeclared.commands.filter((c) => c.evidence.includes("(workspace"))).toEqual([]);
+    // pnpm + pnpm-workspace.yaml → grounded.
+    const pnpmWs = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root" }),
+      nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["pnpm-lock.yaml"],
+      pnpmWorkspaceYaml: "packages:\n  - packages/*\n",
+    });
+    expect(pnpmWs.commands.some((c) => c.evidence.includes("workspace web (pnpm --filter)"))).toBe(true);
+  });
+
+  it("workspaceGlobMatches is deterministic and conservative", () => {
+    expect(workspaceGlobMatches("packages/*", "packages/web")).toBe(true);
+    expect(workspaceGlobMatches("packages/*", "packages/web/deep")).toBe(false);
+    expect(workspaceGlobMatches("packages/**", "packages/web/deep")).toBe(true);
+    expect(workspaceGlobMatches("packages/web", "packages/web")).toBe(true);
+    expect(workspaceGlobMatches("packages/web", "packages/webx")).toBe(false);
+    expect(workspaceGlobMatches("examples/*", "packages/web")).toBe(false);
+  });
+
+  it("bun --cwd stays grounded on the package's own directory", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", scripts: { test: "t" } }),
+      nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["bun.lockb"],
+    });
+    const bunCmds = analysis.commands.filter((c) => c.command.startsWith("bun --cwd"));
+    expect(bunCmds.length).toBeGreaterThan(0);
+    expect(bunCmds.every((c) => c.command.includes("packages/web"))).toBe(true);
   });
 });

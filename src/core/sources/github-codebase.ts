@@ -854,11 +854,13 @@ export async function fetchGithubCodebaseSource(
         name: ref0.repo,
         ref,
         scope: ref0.path === "" ? undefined : ref0.path,
-        treeBaseNames: new Set(
-          reconEntries
-            .filter((e) => e.type === "blob")
-            .map((e) => (e.path.split("/").pop() ?? "").toLowerCase()),
-        ),
+        treeLockfiles: reconEntries
+          .filter((e) => e.type === "blob")
+          .map((e) => e.path)
+          .filter((p) => {
+            const base = (p.split("/").pop() ?? "").toLowerCase();
+            return ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"].includes(base);
+          }),
         languages: detectLanguages(scopedEntries),
         ecosystems: detectEcosystems(scopedEntries),
         manifests: detectManifests(scopedEntries, inspectedSet),

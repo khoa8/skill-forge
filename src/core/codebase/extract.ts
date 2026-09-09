@@ -106,11 +106,49 @@ export function scriptPurpose(name: string): RepositoryCommand["purpose"] {
  * commands observed in CI run steps. Returns null when nothing evidences a
  * runner — callers must then NOT invent one.
  */
+/** Path-aware lockfile evidence: one entry per lockfile in the safe scoped
+ * reconnaissance set (re-audit P1-2B — never basename-only). */
+export interface TreeLockfile {
+  path: string;
+  basename: string;
+}
+
+const MANAGER_LOCKFILES: Array<[string, "npm" | "pnpm" | "yarn" | "bun"]> = [
+  ["package-lock.json", "npm"],
+  ["pnpm-lock.yaml", "pnpm"],
+  ["yarn.lock", "yarn"],
+  ["bun.lockb", "bun"],
+  ["bun.lock", "bun"],
+];
+
+/** The manager lockfiles that live in the analyzed root's own directory —
+ * nested/sibling package lockfiles never evidence the root package. */
+function rootDirLockfiles(
+  treeLockfiles: TreeLockfile[],
+  rootManifestDir: string,
+): Array<{ basename: string; manager: "npm" | "pnpm" | "yarn" | "bun" }> {
+  return treeLockfiles
+    .map((l) => {
+      const manager = MANAGER_LOCKFILES.find(([b]) => b === l.basename)?.[1];
+      const dir = l.path.includes("/") ? l.path.slice(0, l.path.lastIndexOf("/")) : "";
+      return manager ? { basename: l.basename, manager, dir } : null;
+    })
+    .filter((x): x is { basename: string; manager: "npm" | "pnpm" | "yarn" | "bun"; dir: string } => x !== null)
+    .filter((x) => x.dir === rootManifestDir);
+}
+
 export function detectPackageManager(
-  treeBaseNames: Set<string>,
+  treeLockfiles: TreeLockfile[],
   ciInstallCommands: string[],
-  packageJson?: FetchedFile,
+  packageJson: FetchedFile | undefined,
+  rootManifestDir: string,
 ): { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration; lockfilePresent: boolean } | null {
+  // Lockfiles in the analyzed root's own directory only (path-aware).
+  const rootLockfiles = rootDirLockfiles(treeLockfiles, rootManifestDir);
+  const rootManagerLockfiles = new Set(rootLockfiles.map((l) => l.manager));
+  const managerFromLockfiles =
+    rootManagerLockfiles.size === 1 ? ([...rootManagerLockfiles][0] as "npm" | "pnpm" | "yarn" | "bun") : undefined;
+
   // 1. Explicit packageManager field (strongest evidence). For Yarn the
   //    pinned version identifies the generation (1.x vs 2+/3+/4+).
   if (packageJson) {
@@ -120,39 +158,38 @@ export function detectPackageManager(
       const m = pm.match(/^(npm|pnpm|yarn|bun)@/);
       if (m) {
         const yarnGeneration = m[1] === "yarn" ? yarnGenerationFromSpec(pm) : undefined;
-        const lockfilePresent =
-          (m[1] === "npm" && treeBaseNames.has("package-lock.json")) ||
-          (m[1] === "pnpm" && treeBaseNames.has("pnpm-lock.yaml")) ||
-          (m[1] === "yarn" && treeBaseNames.has("yarn.lock")) ||
-          (m[1] === "bun" && (treeBaseNames.has("bun.lockb") || treeBaseNames.has("bun.lock")));
-        return { name: m[1] as "npm" | "pnpm" | "yarn" | "bun", evidence: `${packageJson.path} packageManager: ${pm.slice(0, 80)}`, yarnGeneration, lockfilePresent };
+        // Yarn generation is corroborated by root-dir config files only:
+        // .yarnrc.yml is modern Yarn, .yarnrc (without .yarnrc.yml) is Yarn 1.
+        let generation = yarnGeneration;
+        if (m[1] === "yarn" && generation === undefined) {
+          const hasModern = treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc.yml" : `${rootManifestDir}/.yarnrc.yml`));
+          const hasClassic = treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc" : `${rootManifestDir}/.yarnrc`));
+          generation = hasModern ? 2 : hasClassic ? 1 : undefined;
+        }
+        return {
+          name: m[1] as "npm" | "pnpm" | "yarn" | "bun",
+          evidence: `${packageJson.path} packageManager: ${pm.slice(0, 80)}`,
+          yarnGeneration: generation,
+          lockfilePresent: m[1] === managerFromLockfiles,
+        };
       }
     } catch {
       // malformed manifest — fall through to weaker evidence
     }
   }
-  // 2. Lockfile presence (mutually exclusive lockfiles name the manager).
-  const lockfiles: Array<[string, "npm" | "pnpm" | "yarn" | "bun"]> = [
-    ["package-lock.json", "npm"],
-    ["pnpm-lock.yaml", "pnpm"],
-    ["yarn.lock", "yarn"],
-    ["bun.lockb", "bun"],
-    ["bun.lock", "bun"],
-  ];
-  const present = lockfiles.filter(([lock]) => treeBaseNames.has(lock));
-  if (present.length === 1) {
-    // Yarn generation from config-file evidence only: .yarnrc.yml is modern
-    // Yarn, .yarnrc (without .yarnrc.yml) is Yarn 1. yarn.lock alone is
-    // ambiguous, so yarnGeneration stays undefined.
+  // 2. Exactly one manager's lockfile in the root directory names the manager.
+  if (managerFromLockfiles !== undefined) {
+    const lockfile = rootLockfiles.find((l) => l.manager === managerFromLockfiles)!;
+    // Yarn generation from config-file evidence only (see above).
     const yarnGeneration =
-      present[0]![1] === "yarn"
-        ? treeBaseNames.has(".yarnrc.yml")
+      managerFromLockfiles === "yarn"
+        ? treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc.yml" : `${rootManifestDir}/.yarnrc.yml`))
           ? (2 as YarnGeneration)
-          : treeBaseNames.has(".yarnrc")
+          : treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc" : `${rootManifestDir}/.yarnrc`))
             ? (1 as YarnGeneration)
             : undefined
         : undefined;
-    return { name: present[0]![1], evidence: `${present[0]![0]} in the repository tree (lockfile)`, yarnGeneration, lockfilePresent: true };
+    return { name: managerFromLockfiles, evidence: `${lockfile.basename} in the analyzed root directory (lockfile)`, yarnGeneration, lockfilePresent: true };
   }
   // 3. CI install commands (only when unambiguous).
   const ciMatches = ciInstallCommands
@@ -204,7 +241,12 @@ export function syntheticInstallCommand(
     return { purpose: "install", command: "yarn install", evidence: `${packageManager.evidence} (Yarn 1)` };
   }
   if (pm === "yarn" && packageManager.yarnGeneration === 2) {
-    return { purpose: "install", command: "yarn install --immutable", evidence: `${packageManager.evidence} (Yarn 2+)` };
+    // --immutable is only meaningful with a lockfile to enforce; without one
+    // the plain (generation-neutral) form is the evidenced command.
+    if (packageManager.lockfilePresent) {
+      return { purpose: "install", command: "yarn install --immutable", evidence: `${packageManager.evidence} (Yarn 2+, lockfile present)` };
+    }
+    return { purpose: "install", command: "yarn install", evidence: `${packageManager.evidence} (Yarn 2+, no lockfile — plain form)` };
   }
   if (pm === "yarn" && packageManager.yarnGeneration === undefined) {
     // Yarn identity alone does not select a flag convention — refuse to guess.
@@ -226,6 +268,104 @@ export function syntheticInstallCommand(
   }
   // bun install is the manager's own plain form.
   return { purpose: "install", command: "bun install", evidence: packageManager.evidence };
+}
+
+/**
+ * Deterministic workspace-glob matching (final remediation P1-2C). Supported
+ * patterns: exact directory ("packages/web"), one-level star
+ * ("packages/*"), and deep star ("packages/**"). A nested manifest joins the
+ * workspace only when its directory matches a declared pattern.
+ */
+export function workspaceGlobMatches(pattern: string, manifestDir: string): boolean {
+  const p = pattern.replace(/\/+$/, "");
+  if (p === manifestDir) return true;
+  if (p.endsWith("/**")) {
+    const base = p.slice(0, -3);
+    return manifestDir.startsWith(base === "" ? "" : `${base}/`);
+  }
+  if (p.endsWith("/*")) {
+    const base = p.slice(0, -2);
+    if (base === "") return !manifestDir.includes("/");
+    return manifestDir.startsWith(`${base}/`) && !manifestDir.slice(base.length + 1).includes("/");
+  }
+  return false;
+}
+
+/**
+ * Ground workspace membership per manager (final remediation P1-2C):
+ * npm/yarn read the analysis-root manifest's `workspaces` globs; pnpm reads
+ * pnpm-workspace.yaml (its native mechanism — package.json workspaces do NOT
+ * ground pnpm selectors); bun's --cwd needs only the package's own directory
+ * and name. Membership is matched deterministically against each nested
+ * manifest's path; nested manifests without a usable name are skipped.
+ * Returns a map of nested-manifest path → workspace package name.
+ */
+export function groundWorkspaceMembership(opts: {
+  manager: "npm" | "pnpm" | "yarn" | "bun" | undefined;
+  files: FetchedFile[];
+  rootManifestPath: string;
+}): Map<string, string> {
+  const workspaceNames = new Map<string, string>();
+  const rootManifestDir = opts.rootManifestPath.includes("/")
+    ? opts.rootManifestPath.slice(0, opts.rootManifestPath.lastIndexOf("/"))
+    : "";
+  let globs: string[] = [];
+  const rootPackageJson = opts.files.find((f) => f.path === opts.rootManifestPath);
+  if (opts.manager === "pnpm") {
+    const wsFile = opts.files.find(
+      (f) => f.path === (rootManifestDir === "" ? "pnpm-workspace.yaml" : `${rootManifestDir}/pnpm-workspace.yaml`),
+    );
+    if (wsFile) {
+      try {
+        const doc = parseYaml(wsFile.content) as { packages?: unknown } | null;
+        if (doc !== null && typeof doc === "object" && Array.isArray(doc.packages)) {
+          globs = doc.packages.filter((g): g is string => typeof g === "string");
+        }
+      } catch {
+        // malformed pnpm-workspace.yaml — no pnpm workspace grounding
+      }
+    }
+  } else if (rootPackageJson && (opts.manager === "npm" || opts.manager === "yarn")) {
+    try {
+      const rootRaw = JSON.parse(rootPackageJson.content) as Record<string, unknown>;
+      const ws = rootRaw.workspaces;
+      globs = Array.isArray(ws)
+        ? ws.filter((w): w is string => typeof w === "string")
+        : ws !== null && typeof ws === "object" && Array.isArray((ws as { packages?: unknown }).packages)
+          ? (ws as { packages: unknown[] }).packages.filter((w): w is string => typeof w === "string")
+          : [];
+    } catch {
+      // malformed root manifest — no workspace grounding
+    }
+  }
+  for (const file of opts.files) {
+    if (file.path === opts.rootManifestPath) continue;
+    if ((file.path.split("/").pop() ?? "").toLowerCase() !== "package.json") continue;
+    const manifestDir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+    // bun: --cwd needs only the package's own directory and name.
+    if (opts.manager === "bun") {
+      try {
+        const nested = JSON.parse(file.content) as Record<string, unknown>;
+        if (typeof nested.name === "string" && nested.name.length > 0) {
+          workspaceNames.set(file.path, nested.name);
+        }
+      } catch {
+        // malformed nested manifest — no workspace entry
+      }
+      continue;
+    }
+    if (globs.length === 0) continue;
+    if (!globs.some((g) => workspaceGlobMatches(g, manifestDir))) continue;
+    try {
+      const nested = JSON.parse(file.content) as Record<string, unknown>;
+      if (typeof nested.name === "string" && nested.name.length > 0) {
+        workspaceNames.set(file.path, nested.name);
+      }
+    } catch {
+      // malformed nested manifest — no workspace entry
+    }
+  }
+  return workspaceNames;
 }
 
 /** Script-name → runnable invocation through the evidenced manager, respecting
@@ -272,7 +412,7 @@ function workspaceInvocation(
  * runnable commands (their definitions remain in scriptDefinitions). */
 export function commandsFromPackageJson(
   files: FetchedFile[],
-  packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration } | null,
+  packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration; lockfilePresent: boolean } | null,
   context?: { rootManifestPath?: string; workspaceNames?: ReadonlyMap<string, string> },
 ): { commands: RepositoryCommand[]; frameworks: RepositoryClaim[]; testing: string[]; scriptDefinitions: RepositoryCommand[] } {
   const workspaceNames = context?.workspaceNames ?? new Map<string, string>();
@@ -604,9 +744,9 @@ export interface AnalysisFromFilesInput {
   ref: string;
   /** Subpath scope the analysis covers; undefined = whole repository. */
   scope?: string;
-  /** Lowercased basenames present in the repository tree — used for
-   * package-manager lockfile evidence (never for content claims). */
-  treeBaseNames?: Set<string>;
+  /** Paths of metadata-only lockfiles in the safe scoped reconnaissance set
+   * — path-aware package-manager evidence (final remediation P1-2B). */
+  treeLockfiles?: string[];
   /** Reconnaissance results from the tree (already computed). */
   languages: RepositoryAnalysis["languages"];
   ecosystems: string[];
@@ -631,47 +771,27 @@ export function buildRepositoryAnalysisFromFiles(
   uncertainty: string[],
 ): RepositoryAnalysis {
   // Package-manager evidence: CI install steps first (they may name the
-  // runner), then the tree lockfiles via input.treeBaseNames + the analysis
-  // root package.json's packageManager field.
+  // runner), then the PATH-AWARE tree lockfiles (only lockfiles in the
+  // analyzed root's own directory count — final remediation P1-2B) + the
+  // analysis-root package.json's packageManager field.
   const ciCommandsRaw = commandsFromCiWorkflows(input.fetched);
   const ciInstallCommands = ciCommandsRaw
     .filter((c) => c.purpose === "install")
     .map((c) => c.command);
   const rootManifestPath = input.scope ? `${input.scope}/package.json` : "package.json";
+  const rootManifestDir = input.scope ?? "";
   const rootPackageJson = input.fetched.find(
     (f) => f.path === rootManifestPath,
   ) ?? input.fetched.find((f) => (f.path.split("/").pop() ?? "").toLowerCase() === "package.json");
-  const packageManager = detectPackageManager(input.treeBaseNames ?? new Set(), ciInstallCommands, rootPackageJson);
-  // Workspace names grounded in the root manifest's workspaces declaration
-  // (npm/pnpm/yarn) — bun's --cwd needs no declaration.
-  const workspaceNames = new Map<string, string>();
-  if (packageManager && rootPackageJson) {
-    try {
-      const rootRaw = JSON.parse(rootPackageJson.content) as Record<string, unknown>;
-      const ws = rootRaw.workspaces;
-      const globs = Array.isArray(ws)
-        ? ws.filter((w): w is string => typeof w === "string")
-        : ws !== null && typeof ws === "object" && Array.isArray((ws as { packages?: unknown }).packages)
-          ? (ws as { packages: unknown[] }).packages.filter((w): w is string => typeof w === "string")
-          : [];
-      if (globs.length > 0 || packageManager.name === "bun") {
-        for (const file of input.fetched) {
-          if (file.path === rootPackageJson.path) continue;
-          if ((file.path.split("/").pop() ?? "").toLowerCase() !== "package.json") continue;
-          try {
-            const nested = JSON.parse(file.content) as Record<string, unknown>;
-            if (typeof nested.name === "string" && nested.name.length > 0) {
-              workspaceNames.set(file.path, nested.name);
-            }
-          } catch {
-            // malformed nested manifest — no workspace entry
-          }
-        }
-      }
-    } catch {
-      // malformed root manifest — no workspace grounding
-    }
-  }
+  const treeLockfiles: TreeLockfile[] = (input.treeLockfiles ?? [])
+    .map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() }))
+    .filter((l) => MANAGER_LOCKFILES.some(([b]) => b === l.basename));
+  const packageManager = detectPackageManager(treeLockfiles, ciInstallCommands, rootPackageJson, rootManifestDir);
+  const workspaceNames = groundWorkspaceMembership({
+    manager: packageManager?.name,
+    files: input.fetched,
+    rootManifestPath,
+  });
   const { commands, frameworks: depFrameworks, testing: depTesting, scriptDefinitions } = commandsFromPackageJson(
     input.fetched,
     packageManager,

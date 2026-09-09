@@ -8,6 +8,7 @@ import {
   commandsFromPackageJson,
   detectPackageManager,
   syntheticInstallCommand,
+  groundWorkspaceMembership,
   type FetchedFile,
 } from "../src/core/codebase/extract.js";
 import type { RepositoryAnalysis as RA } from "../src/core/types.js";
@@ -17,8 +18,10 @@ export interface CommandsFixtureInput {
   packageJson: string;
   /** Nested package manifests (path + JSON content fields). */
   nested?: { path: string; name: string; scripts?: Record<string, string> }[];
-  /** Lowercased basenames present in the (scoped) tree — lockfile evidence. */
-  treeBaseNames: Set<string>;
+  /** Lockfile paths in the (scoped) tree — path-aware manager evidence. */
+  treeLockfiles?: string[];
+  /** Optional pnpm-workspace.yaml content (fetched at the analysis root). */
+  pnpmWorkspaceYaml?: string;
 }
 
 /** Build the analysis the ingestion pipeline would produce for these files. */
@@ -32,33 +35,23 @@ export function buildRepositoryAnalysisFromCommandsFixture(
       content: JSON.stringify({ name: n.name, ...(n.scripts ? { scripts: n.scripts } : {}) }),
     });
   }
-  const packageManager = detectPackageManager(input.treeBaseNames, [], files[0]);
+  if (input.pnpmWorkspaceYaml !== undefined) {
+    files.push({ path: "pnpm-workspace.yaml", content: input.pnpmWorkspaceYaml });
+  }
+  const packageManager = detectPackageManager(
+    (input.treeLockfiles ?? []).map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() })),
+    [],
+    files[0],
+    "",
+  );
   const rootManifestPath = "package.json";
-  const workspaceNames = new Map<string, string>();
-  // Ground workspace names only when the root declares workspaces.
-  let declaresWorkspaces = false;
-  try {
-    const rootRaw = JSON.parse(input.packageJson) as Record<string, unknown>;
-    declaresWorkspaces =
-      Array.isArray(rootRaw.workspaces) ||
-      (rootRaw.workspaces !== null &&
-        typeof rootRaw.workspaces === "object" &&
-        Array.isArray((rootRaw.workspaces as { packages?: unknown }).packages));
-  } catch {
-    declaresWorkspaces = false;
-  }
-  if (declaresWorkspaces) {
-    for (const f of files.slice(1)) {
-      try {
-        const nested = JSON.parse(f.content) as { name?: unknown };
-        if (typeof nested.name === "string" && nested.name.length > 0) {
-          workspaceNames.set(f.path, nested.name);
-        }
-      } catch {
-        // malformed — skip
-      }
-    }
-  }
+  // Membership matching goes through the SAME exported helper the real
+  // extraction path uses, so fixture results match production behavior.
+  const workspaceNames = groundWorkspaceMembership({
+    manager: packageManager?.name,
+    files,
+    rootManifestPath,
+  });
   const { commands, scriptDefinitions } = commandsFromPackageJson(files, packageManager, {
     rootManifestPath,
     workspaceNames,
