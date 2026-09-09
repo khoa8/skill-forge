@@ -292,6 +292,52 @@ export function workspaceGlobMatches(pattern: string, manifestDir: string): bool
 }
 
 /**
+ * The one canonical analysis-root-relative path helper (final remediation
+ * P2-1): returns the directory of `path` relative to the analysis-root
+ * directory, or null when the path is NOT under the root (sibling/
+ * out-of-scope entries never participate in root-relative matching).
+ */
+export function pathRelativeToAnalysisRoot(path: string, rootManifestPath: string): string | null {
+  const rootDir = rootManifestPath.includes("/")
+    ? rootManifestPath.slice(0, rootManifestPath.lastIndexOf("/"))
+    : "";
+  if (rootDir === "") {
+    return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  }
+  if (path === rootManifestPath || path === rootDir) return "";
+  if (!path.startsWith(`${rootDir}/`)) return null;
+  const rel = path.slice(rootDir.length + 1);
+  return rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+}
+
+/**
+ * Deterministic workspace membership from a declared pattern list (final
+ * remediation P1-3): positive match AND no applicable exclusion. Supports
+ * "dir", "dir/*", "dir/**" positives and "!"-prefixed exclusions of the same
+ * shapes. Anything else (negations of complex globs, BraceExpansion,
+ * incremental ":" syntax, non-strings) is outside the supported subset —
+ * fail closed: the whole declaration yields no grounded members.
+ */
+export function isWorkspaceMember(patterns: readonly string[], manifestDir: string): boolean {
+  let sawPositive = false;
+  for (const raw of patterns) {
+    if (typeof raw !== "string") return false; // non-string → fail closed
+    const pattern = raw.trim();
+    if (pattern.length === 0) continue;
+    const negated = pattern.startsWith("!");
+    const body = negated ? pattern.slice(1) : pattern;
+    const supported = /^[A-Za-z0-9_@./-]*(\/\*)?$|^[A-Za-z0-9_@./-]+(\/\*\*)?$|^\*$|^\*\*$/.test(body) || body === "." || /^[^*{}[\]!]*$/.test(body);
+    if (!supported) return false; // unsupported syntax → fail closed
+    const matches = workspaceGlobMatches(body, manifestDir);
+    if (matches) {
+      if (negated) return false; // exclusion wins
+      sawPositive = true;
+    }
+  }
+  return sawPositive;
+}
+
+/**
  * Ground workspace membership per manager (final remediation P1-2C):
  * npm/yarn read the analysis-root manifest's `workspaces` globs; pnpm reads
  * pnpm-workspace.yaml (its native mechanism — package.json workspaces do NOT
@@ -341,7 +387,11 @@ export function groundWorkspaceMembership(opts: {
   for (const file of opts.files) {
     if (file.path === opts.rootManifestPath) continue;
     if ((file.path.split("/").pop() ?? "").toLowerCase() !== "package.json") continue;
-    const manifestDir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+    // Candidate dirs are compared relative to the analysis root (final
+    // remediation P2-1): workspace patterns are declared relative to the
+    // workspace root, not the repository root. Sibling/out-of-scope paths
+    // (not under the root at all) never participate.
+    const manifestDir = pathRelativeToAnalysisRoot(file.path, opts.rootManifestPath);
     // bun: --cwd needs only the package's own directory and name.
     if (opts.manager === "bun") {
       try {
@@ -354,8 +404,9 @@ export function groundWorkspaceMembership(opts: {
       }
       continue;
     }
+    if (manifestDir === null) continue; // sibling/out-of-scope — never participates
     if (globs.length === 0) continue;
-    if (!globs.some((g) => workspaceGlobMatches(g, manifestDir))) continue;
+    if (!isWorkspaceMember(globs, manifestDir)) continue;
     try {
       const nested = JSON.parse(file.content) as Record<string, unknown>;
       if (typeof nested.name === "string" && nested.name.length > 0) {
@@ -396,8 +447,14 @@ function workspaceInvocation(
       return { command: `yarn workspace ${workspaceName} run ${key}`, contextEvidence: `workspace ${workspaceName} (yarn workspace)` };
     case "npm":
       return { command: `npm run ${key} --workspace ${workspaceName}`, contextEvidence: `workspace ${workspaceName} (npm --workspace)` };
-    case "bun":
+    case "bun": {
+      // --cwd is grounded relative to the analysis root (the dir an agent
+      // operates in); use the canonical root-relative form.
+      const rootDir = manifestPath.includes("/") ? manifestPath.slice(0, manifestPath.lastIndexOf("/")) : "";
+      const rel = manifestDir === rootDir ? "." : manifestDir;
+      void rootDir;
       return { command: `bun --cwd ${manifestDir} run ${key}`, contextEvidence: `${manifestDir}/ (bun --cwd)` };
+    }
   }
 }
 

@@ -2104,3 +2104,96 @@ describe("Final-2 P1-2: CI working-directory context is preserved", () => {
     expect(cmds[0]!.evidence).toContain("working-directory: packages/web");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-2 remediation P1-3 — workspace exclusion semantics
+// ---------------------------------------------------------------------------
+
+import { isWorkspaceMember } from "../src/core/codebase/extract.js";
+
+describe("Final-2 P1-3: workspace exclusions are respected (fail closed)", () => {
+  it("pnpm: excluded packages get no selector; included ones do", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root" }),
+      nested: [
+        { path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } },
+        { path: "packages/legacy/package.json", name: "legacy", scripts: { test: "legacy-test" } },
+      ],
+      treeLockfiles: ["pnpm-lock.yaml"],
+      pnpmWorkspaceYaml: "packages:\n  - 'packages/*'\n  - '!packages/legacy'\n",
+    });
+    const ws = analysis.commands.filter((c) => c.evidence.includes("(workspace"));
+    expect(ws.some((c) => c.evidence.includes("workspace web"))).toBe(true);
+    expect(ws.some((c) => c.evidence.includes("legacy"))).toBe(false);
+  });
+
+  it("isWorkspaceMember: positive match AND no exclusion → member", () => {
+    expect(isWorkspaceMember(["packages/*", "!packages/legacy"], "packages/web")).toBe(true);
+    expect(isWorkspaceMember(["packages/*", "!packages/legacy"], "packages/legacy")).toBe(false);
+    // No positive match → not a member.
+    expect(isWorkspaceMember(["packages/*", "!packages/legacy"], "apps/x")).toBe(false);
+    // Exclusion wins even when a later positive re-matches.
+    expect(isWorkspaceMember(["!packages/legacy", "packages/*"], "packages/legacy")).toBe(false);
+  });
+
+  it("unsupported/complex patterns fail closed (no grounded members)", () => {
+    expect(isWorkspaceMember(["packages/{a,b}"], "packages/a")).toBe(false);
+    expect(isWorkspaceMember(["packages/[a-b]/pkg"], "packages/a/pkg")).toBe(false);
+    expect(isWorkspaceMember(["packages/**/*.ts"], "packages/a/x.ts")).toBe(false);
+    expect(isWorkspaceMember([42 as unknown as string], "packages/a")).toBe(false);
+  });
+
+  it("malformed pnpm-workspace.yaml grounds nothing", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root" }),
+      nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["pnpm-lock.yaml"],
+      pnpmWorkspaceYaml: "packages: [unclosed\n  broken",
+    });
+    expect(analysis.commands.filter((c) => c.evidence.includes("(workspace"))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final-2 remediation P2-1 — workspace matching relative to the analysis root
+// ---------------------------------------------------------------------------
+
+describe("Final-2 P2-1: scoped workspace matching is analysis-root-relative", () => {
+  it("scoped root matches patterns against root-relative dirs", () => {
+    // scope=packages/a, root manifest packages/a/package.json, pattern
+    // packages/*, nested packages/a/packages/web — equivalent to the
+    // unscoped case.
+    const scoped = buildRepositoryAnalysisFromCommandsFixture({
+      scope: "packages/a",
+      packageJson: JSON.stringify({ name: "a", workspaces: ["packages/*"] }),
+      nested: [
+        { path: "packages/a/packages/web/package.json", name: "web", scripts: { test: "web-test" } },
+        { path: "packages/b/packages/other/package.json", name: "other", scripts: { test: "other-test" } },
+      ],
+      treeLockfiles: ["packages/a/package-lock.json"],
+    });
+    const ws = scoped.commands.filter((c) => c.evidence.includes("(workspace"));
+    expect(ws.some((c) => c.evidence.includes("workspace web"))).toBe(true);
+    // Sibling/out-of-scope entries never participate.
+    expect(ws.some((c) => c.evidence.includes("other"))).toBe(false);
+  });
+
+  it("unscoped matching is unchanged", () => {
+    const unscoped = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", workspaces: ["packages/*"] }),
+      nested: [{ path: "packages/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["package-lock.json"],
+    });
+    expect(unscoped.commands.some((c) => c.evidence.includes("workspace web"))).toBe(true);
+  });
+
+  it("pathRelativeToAnalysisRoot behaves canonically", async () => {
+    const { pathRelativeToAnalysisRoot } = await import("../src/core/codebase/extract.js");
+    expect(pathRelativeToAnalysisRoot("packages/web/package.json", "package.json")).toBe("packages/web");
+    expect(pathRelativeToAnalysisRoot("packages/a/packages/web/package.json", "packages/a/package.json")).toBe("packages/web");
+    expect(pathRelativeToAnalysisRoot("packages/a/package.json", "packages/a/package.json")).toBe("");
+    // Sibling of the analysis root → null (never participates).
+    expect(pathRelativeToAnalysisRoot("packages/b/x/package.json", "packages/a/package.json")).toBeNull();
+    expect(pathRelativeToAnalysisRoot("packages/a", "packages/a/package.json")).toBe("");
+  });
+});
