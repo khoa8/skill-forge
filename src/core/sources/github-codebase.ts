@@ -709,10 +709,12 @@ export async function fetchGithubCodebaseSource(
         reconEntries.push(entry);
         eligible.push(entry);
       } else if (
-        // Metadata-only evidence classes: real tree metadata inside the safe
-        // scoped/safe-path/skip-dir/depth policy, retained for analysis
-        // claims but never fetched (lockfiles inform package-manager evidence).
-        (reason === "lockfile_metadata_only" || reason === "generated_or_minified") &&
+        // Metadata-only evidence: lockfiles inside the safe scoped/safe-path/
+        // skip-dir/depth policy are retained for package-manager evidence but
+        // never fetched. Generated/minified output is deliberately NOT
+        // claim-bearing reconnaissance — it may not influence language,
+        // ecosystem, manifest, root, entrypoint, or instruction claims.
+        reason === "lockfile_metadata_only" &&
         isSafeRepoPath(entry.path) &&
         !entry.path.split("/").slice(0, -1).some((seg) => CODEBASE_SKIP_DIRS.has(seg.toLowerCase()))
       ) {

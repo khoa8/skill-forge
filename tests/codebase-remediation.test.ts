@@ -1362,3 +1362,69 @@ describe("Re-audit P2-3: provenance count fields are mandatory and consistency-c
     expect(RASchema.safeParse(overCaps).success).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final remediation P1-1 — generated/minified files out of claim-bearing recon
+// ---------------------------------------------------------------------------
+
+function generatedNoiseHarness() {
+  const tree: Record<string, unknown>[] = [
+    { path: "packages/a/package.json", type: "blob", size: 150 },
+    { path: "packages/a/src/index.ts", type: "blob", size: 40 },
+    // Generated/minified in a NORMAL directory (not dist/vendor):
+    { path: "packages/a/scripts/vendor-bundle.min.js", type: "blob", size: 5000 },
+    { path: "packages/a/api/v1/service.pb.go", type: "blob", size: 3000 },
+    // Generated/minified inside a skipped directory (already excluded):
+    { path: "packages/a/dist/bundle.min.js", type: "blob", size: 5000 },
+    // Metadata-only lockfile still present for package-manager evidence:
+    { path: "packages/a/package-lock.json", type: "blob", size: 400_000 },
+  ];
+  const bodies: Record<string, string> = {
+    "packages/a/package.json": JSON.stringify({ name: "pkg-a", scripts: { test: "vitest run" } }),
+    "packages/a/src/index.ts": "export const a = 1;\n",
+    "packages/a/package-lock.json": "{}",
+  };
+  return (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ sha: "x", truncated: false, tree }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.startsWith("https://raw.githubusercontent.com/")) {
+      const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+      const body = bodies[p];
+      const res = new Response(body ?? "not found", { status: body !== undefined ? 200 : 404, headers: { "content-type": "text/plain" } });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    }
+    return new Response("unexpected", { status: 500 });
+  }) as unknown as typeof fetch;
+}
+
+describe("Final P1-1: generated/minified files cannot influence structured claims", () => {
+  it("a scoped .min.js does not fabricate JavaScript language claims", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/gen/tree/main/packages/a", {
+      fetchImpl: generatedNoiseHarness(),
+    });
+    const a = r.analysis;
+    // The only real source is TypeScript; the min.js/pb.go must not add JS/Go.
+    expect(a.languages.map((l) => l.name)).toEqual(["TypeScript"]);
+    // Nothing generated ends up inspected.
+    expect(a.inspectedFiles.every((p) => !p.includes(".min.") && !p.includes(".pb."))).toBe(true);
+    // Lockfile evidence still works (metadata-only, not fetched).
+    expect(a.manifests.find((m) => m.path === "packages/a/package-lock.json")).toMatchObject({ kind: "lockfile", fetched: false });
+    // Whole-tree listing count still counts raw blobs (labeled listing metadata).
+    expect(a.selection.treeBlobCount).toBe(6);
+  });
+
+  it("whole-tree blob count remains raw listing metadata, candidates exclude noise", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/gen/tree/main/packages/a", {
+      fetchImpl: generatedNoiseHarness(),
+    });
+    // Eligible deep-fetch candidates: package.json + src/index.ts only.
+    expect(r.analysis.selection.candidateCount).toBe(2);
+    expect(r.analysis.selection.selectedCount).toBe(2);
+  });
+});
