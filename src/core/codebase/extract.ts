@@ -532,27 +532,117 @@ export function frameworksFromPyproject(file: FetchedFile): { frameworks: Reposi
 // ---------------------------------------------------------------------------
 
 /** Collect `run:` command strings from a parsed YAML document. */
-function collectRunCommands(node: unknown, out: string[]): void {
-  if (out.length >= 20) return;
-  if (typeof node === "string") return;
-  if (Array.isArray(node)) {
-    for (const item of node) collectRunCommands(item, out);
-    return;
+/** One CI run step with its resolved execution context (final remediation
+ * P1-2): `cwd` is the effective working-directory (step-level overrides
+ * job/workflow defaults). A dynamic/unsupported cwd (${{
+ ... }}) or a
+ * non-string value yields `cwd: undefined` — the command stays documented but
+ * is NOT runnable evidence, never a guessed directory. */
+export interface CiRunStep {
+  command: string;
+  /** Concrete execution directory relative to the repository root, "" = root.
+   * undefined = execution context unknown/dynamic (non-runnable). */
+  cwd?: string;
+  file: string;
+  line: number;
+}
+
+/** GitHub Actions defaults.run.working-directory lookup: job-level overrides
+ * workflow-level. Returns "" (root) or a concrete string; anything else is
+ * dynamic/unsupported. */
+function effectiveDefaults(node: unknown): string | undefined {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return "";
+  // Structure: defaults.run["working-directory"] (GitHub Actions schema).
+  const defaults = (node as Record<string, unknown>).defaults as Record<string, unknown> | undefined;
+  const run = defaults !== null && typeof defaults === "object" ? (defaults as Record<string, unknown>).run as Record<string, unknown> | undefined : undefined;
+  const wd = run !== null && typeof run === "object" ? run["working-directory"] : undefined;
+  if (wd === undefined) return "";
+  if (typeof wd !== "string") return undefined;
+  if (wd.includes("${{")) return undefined;
+  return wd.replace(/\/+$/, "");
+}
+
+/** Step-level working-directory resolution, three-state (final remediation
+ * P1-2): "absent" (inherit defaults), a concrete string, or "unknown"
+ * (dynamic `${{ … }}` / non-string — the step is non-runnable and must NOT
+ * inherit defaults). */
+type StepWorkingDirectory = { state: "absent" } | { state: "concrete"; value: string } | { state: "unknown" };
+
+function stepWorkingDirectory(step: Record<string, unknown>): StepWorkingDirectory {
+  const wd = step.workingDirectory ?? step["working-directory"];
+  if (wd === undefined) return { state: "absent" };
+  if (typeof wd !== "string") return { state: "unknown" };
+  if (wd.includes("${{")) return { state: "unknown" };
+  return { state: "concrete", value: wd.replace(/\/+$/, "") };
+}
+
+/** Deterministic container for one CI run line. */
+function pushRunLines(
+  out: CiRunStep[],
+  raw: string,
+  cwd: string | undefined,
+  file: string,
+  line: number,
+): void {
+  for (const rawLine of raw.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.startsWith("echo ")) continue;
+    out.push({ command: trimmed, cwd, file, line });
   }
-  if (node !== null && typeof node === "object") {
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-      if (key === "run" && typeof value === "string") {
-        for (const line of value.split("\n")) {
-          const trimmed = line.trim();
-          if (trimmed.length > 0 && !trimmed.startsWith("#") && !trimmed.startsWith("echo ")) {
-            out.push(trimmed);
-          }
-        }
-      } else {
-        collectRunCommands(value, out);
-      }
+}
+
+/**
+ * Collect run steps with their execution context. Deterministic direct walk:
+ * top-level steps (composite workflows) + jobs[].steps, resolving each step's
+ * cwd as step-level working-directory ?? job defaults ?? workflow defaults.
+ * Dynamic `${{ ... }}` or non-string cwds make the step non-runnable.
+ */
+function collectRunSteps(node: unknown, out: CiRunStep[], file: string, workflowDefaults: string | undefined): void {
+  if (out.length >= 30) return;
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return;
+  const root = node as Record<string, unknown>;
+
+  const collectSteps = (steps: unknown, defaults: string): void => {
+    if (!Array.isArray(steps)) return;
+    for (const step of steps) {
+      if (out.length >= 30) return;
+      if (step === null || typeof step !== "object" || Array.isArray(step)) continue;
+      const s = step as Record<string, unknown>;
+      if (typeof s.run !== "string") continue;
+      const stepWd = stepWorkingDirectory(s);
+      // Precedence: step-level > job/workflow defaults; an unknown step cwd
+      // (dynamic/non-string) stays unknown — never inherit.
+      const cwd =
+        stepWd.state === "concrete"
+          ? stepWd.value
+          : stepWd.state === "unknown"
+            ? undefined
+            : defaults;
+      pushRunLines(out, s.run, cwd, file, 0);
+    }
+  };
+
+  // Top-level steps (composite workflow actions).
+  collectSteps(root.steps, workflowDefaults ?? "");
+
+  // Jobs: job-level defaults.run.working-directory override workflow-level.
+  const jobs = root.jobs;
+  if (jobs !== null && typeof jobs === "object" && !Array.isArray(jobs)) {
+    for (const job of Object.values(jobs as Record<string, unknown>)) {
+      if (out.length >= 30) return;
+      if (job === null || typeof job !== "object" || Array.isArray(job)) continue;
+      const jobDefaults = effectiveDefaults(job);
+      // effectiveDefaults returns "" for absent defaults, undefined for
+      // dynamic/non-string — resolve the effective chain explicitly.
+      const defaults = jobDefaults === "" ? (workflowDefaults ?? "") : jobDefaults === undefined ? undefined : jobDefaults;
+      collectSteps((job as Record<string, unknown>).steps, defaults ?? workflowDefaults ?? "");
     }
   }
+}
+
+/** Extract workflow-level defaults.run.working-directory from the raw doc. */
+function workflowLevelDefaults(doc: unknown): string | undefined {
+  return effectiveDefaults(doc);
 }
 
 const CI_COMMAND_RULES: Array<[RegExp, RepositoryCommand["purpose"]]> = [
@@ -566,6 +656,14 @@ const CI_COMMAND_RULES: Array<[RegExp, RepositoryCommand["purpose"]]> = [
 
 /** Commands evidenced by CI workflow run steps (documentation only — SkillForge
  * never executes anything it reads). */
+/**
+ * CI run steps → commands with preserved execution context (final remediation
+ * P1-2). A concrete cwd renders the canonical `cd <dir> && <command>` form so
+ * "npm ci at root" and "npm ci in packages/web" remain context-distinct; an
+ * unknown/dynamic cwd keeps the command OUT of the runnable evidence (only
+ * root-scoped commands may evidence root execution later, and uncertain cwd
+ * must never become a runnable instruction).
+ */
 export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand[] {
   const commands: RepositoryCommand[] = [];
   for (const file of files) {
@@ -576,13 +674,17 @@ export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand
     } catch {
       continue; // malformed workflow degrades gracefully
     }
-    const runs: string[] = [];
-    collectRunCommands(doc, runs);
-    for (const run of runs) {
+    const wfDefaults = workflowLevelDefaults(doc);
+    const steps: CiRunStep[] = [];
+    collectRunSteps(doc, steps, file.path, wfDefaults);
+    for (const step of steps) {
       if (commands.length >= 30) break;
-      const purpose = CI_COMMAND_RULES.find(([re]) => re.test(run))?.[1];
+      // Dynamic/unknown execution context: documented only, never runnable.
+      if (step.cwd === undefined) continue;
+      const purpose = CI_COMMAND_RULES.find(([re]) => re.test(step.command))?.[1];
       if (!purpose) continue;
-      commands.push({ purpose, command: firstLine(run), evidence: `${file.path} (CI run step)` });
+      const rendered = step.cwd === "" ? step.command : `cd ${step.cwd} && ${step.command}`;
+      commands.push({ purpose, command: rendered, evidence: `${step.file} (CI run step${step.cwd === "" ? "" : `, working-directory: ${step.cwd}`})` });
     }
   }
   return commands;
@@ -780,13 +882,24 @@ export function buildRepositoryAnalysisFromFiles(
     .map((c) => c.command);
   const rootManifestPath = input.scope ? `${input.scope}/package.json` : "package.json";
   const rootManifestDir = input.scope ?? "";
-  const rootPackageJson = input.fetched.find(
-    (f) => f.path === rootManifestPath,
-  ) ?? input.fetched.find((f) => (f.path.split("/").pop() ?? "").toLowerCase() === "package.json");
+  // EXACT analysis-root manifest only (final remediation P1-1): a nested
+  // package manifest must never silently become root package-manager
+  // evidence. No fallback — when the exact root manifest is absent, the
+  // root manager stays unknown (root-scoped lockfiles/CI commands can still
+  // evidence it independently).
+  const rootPackageJson = input.fetched.find((f) => f.path === rootManifestPath);
   const treeLockfiles: TreeLockfile[] = (input.treeLockfiles ?? [])
     .map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() }))
     .filter((l) => MANAGER_LOCKFILES.some(([b]) => b === l.basename));
-  const packageManager = detectPackageManager(treeLockfiles, ciInstallCommands, rootPackageJson, rootManifestDir);
+  // CI evidence is root-scoped only when the step's resolved working-directory
+  // is the analysis root ("" or the scope itself); CI steps inside nested
+  // directories document their own context and never become root evidence.
+  const rootCiInstallCommands = ciCommandsRaw
+    .filter((c) => c.purpose === "install")
+    .filter((c) => c.evidence.includes("(CI run step)"))
+    .filter((c) => c.command.startsWith("cd ") === false) // rendered `cd X && …` = non-root cwd
+    .map((c) => c.command);
+  const packageManager = detectPackageManager(treeLockfiles, rootCiInstallCommands, rootPackageJson, rootManifestDir);
   const workspaceNames = groundWorkspaceMembership({
     manager: packageManager?.name,
     files: input.fetched,

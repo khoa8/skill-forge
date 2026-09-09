@@ -1864,3 +1864,243 @@ describe("Final P2-1: provider-context byte ceiling holds for every valid analys
     expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(MAX_CTX_BYTES);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-2 remediation P1-1 — exact analysis-root package-manager evidence
+// ---------------------------------------------------------------------------
+
+function noRootHarness() {
+  const tree: Record<string, unknown>[] = [
+    { path: "apps/web/package.json", type: "blob", size: 150 },
+    { path: "apps/web/pnpm-lock.yaml", type: "blob", size: 100 },
+  ];
+  const bodies: Record<string, string> = {
+    "apps/web/package.json": JSON.stringify({
+      name: "web",
+      packageManager: "pnpm@9.1.0",
+      scripts: { test: "vitest run" },
+    }),
+  };
+  return (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/git/trees/")) {
+      return new Response(JSON.stringify({ sha: "x", truncated: false, tree }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.startsWith("https://raw.githubusercontent.com/")) {
+      const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+      const body = bodies[p];
+      const res = new Response(body ?? "not found", { status: body !== undefined ? 200 : 404, headers: { "content-type": "text/plain" } });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    }
+    return new Response("unexpected", { status: 500 });
+  }) as unknown as typeof fetch;
+}
+
+describe("Final-2 P1-1: nested manifests never become root manager evidence", () => {
+  it("no root manifest + nested pnpm@9 → no root install, no root run command", async () => {
+    const r = await fetchGithubCodebaseSource("https://github.com/acme/noroot", {
+      fetchImpl: noRootHarness(),
+    });
+    const a = r.analysis;
+    // No root-scoped manager evidence exists (no root manifest, no root-dir
+    // lockfiles, no root-scoped CI): zero runnable commands are synthesized.
+    expect(a.commands).toEqual([]);
+    expect(a.commands.some((c) => c.command === "pnpm install")).toBe(false);
+    expect(a.commands.some((c) => c.command.includes("pnpm run test"))).toBe(false);
+  });
+
+  it("root npm vs nested pnpm disagreement: root stays npm-root, nested never overrides", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "root", packageManager: "npm@10.0.0", scripts: { test: "vitest run" } }),
+      nested: [{ path: "apps/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["package-lock.json", "apps/web/pnpm-lock.yaml"],
+    });
+    const install = analysis.commands.find((c) => c.purpose === "install");
+    expect(install?.command).toBe("npm ci");
+    expect(analysis.commands.some((c) => c.command.includes("pnpm"))).toBe(false);
+    // The nested web script is not runnable (no grounded workspace context for
+    // apps/web) — it survives only as non-runnable evidence.
+    expect(analysis.commands.some((c) => c.evidence.startsWith("apps/web/"))).toBe(false);
+  });
+
+  it("scoped root: the exact scoped manifest is the analysis root", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      scope: "packages/a",
+      packageJson: JSON.stringify({ name: "a", packageManager: "npm@10.0.0", scripts: { test: "scoped-test" } }),
+      nested: [{ path: "packages/a/apps/web/package.json", name: "web", scripts: { test: "web-test" } }],
+      treeLockfiles: ["packages/a/package-lock.json"],
+    });
+    // Root evidence comes from the scoped manifest + scoped-dir lockfile; the
+    // nested apps/web manifest stays nested (no workspace grounding → not runnable).
+    expect(analysis.commands.find((c) => c.purpose === "install")?.command).toBe("npm ci");
+    expect(analysis.commands.find((c) => c.purpose === "test")?.command).toBe("npm test");
+    expect(analysis.commands.some((c) => c.evidence.startsWith("packages/a/apps/web/"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final-2 remediation P1-2 — CI working-directory preservation
+// ---------------------------------------------------------------------------
+
+import { commandsFromCiWorkflows } from "../src/core/codebase/extract.js";
+import { stringify as yamlStringify } from "yaml";
+
+const wf = (steps: unknown[], defaults?: unknown, jobs?: unknown) => {
+  const doc: Record<string, unknown> = { name: "ci", on: "push" };
+  if (defaults !== undefined) doc.defaults = defaults;
+  if (jobs !== undefined) doc.jobs = jobs;
+  else doc.jobs = { build: { "runs-on": "ubuntu-latest", steps } };
+  return doc;
+};
+
+describe("Final-2 P1-2: CI working-directory context is preserved", () => {
+  it("step-level working-directory renders cd-prefixed commands", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: [
+          "name: ci",
+          "on: push",
+          "jobs:",
+          "  b:",
+          "    steps:",
+          "      - name: Install web",
+          "        working-directory: packages/web",
+          "        run: npm ci",
+          "      - run: npm test",
+        ].join("\n"),
+      },
+    ]);
+    expect(cmds.find((c) => c.command === "cd packages/web && npm ci")).toBeTruthy();
+    // Root step stays root (no cd prefix) — contexts remain distinct.
+    expect(cmds.find((c) => c.command === "npm test")).toBeTruthy();
+    expect(cmds.every((c) => c.command !== "npm ci")).toBe(true);
+  });
+
+  it("workflow-level defaults.run.working-directory applies to cwd-less steps", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: [
+          "name: ci",
+          "on: push",
+          "defaults:",
+          "  run:",
+          "    working-directory: packages/web",
+          "jobs:",
+          "  b:",
+          "    steps:",
+          "      - run: npm ci",
+        ].join("\n"),
+      },
+    ]);
+    expect(cmds.find((c) => c.command === "cd packages/web && npm ci")).toBeTruthy();
+  });
+
+  it("job-level defaults override workflow defaults; step overrides both", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          defaults: { run: { "working-directory": "apps/api" } },
+          jobs: {
+            b: {
+              defaults: { run: { "working-directory": "apps/web" } },
+              steps: [
+                { run: "npm ci" }, // job default → apps/web
+                { run: "npm run lint", "working-directory": "packages/lint" }, // step override
+              ],
+            },
+          },
+        }),
+      },
+    ]);
+    expect(cmds.find((c) => c.command === "cd apps/web && npm ci")).toBeTruthy();
+    expect(cmds.find((c) => c.command === "cd packages/lint && npm run lint")).toBeTruthy();
+    expect(cmds.some((c) => c.command.includes("apps/api"))).toBe(false);
+  });
+
+  it("dynamic expression cwd is non-runnable (command omitted, never guessed)", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          jobs: {
+            b: {
+              strategy: { matrix: { package: ["a", "b"] } },
+              steps: [
+                { run: "npm ci", "working-directory": "packages/${{ matrix.package }}" },
+                { run: "npm test" },
+              ],
+            },
+          },
+        }),
+      },
+    ]);
+    expect(cmds.some((c) => c.command.includes("matrix.package"))).toBe(false);
+    expect(cmds.find((c) => c.command === "npm test")).toBeTruthy();
+  });
+
+  it("non-string working-directory values are treated as unknown (non-runnable)", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          jobs: { b: { steps: [{ run: "npm ci", "working-directory": { nested: true } }] } },
+        }),
+      },
+    ]);
+    expect(cmds.some((c) => c.command === "npm ci")).toBe(false);
+  });
+
+  it("identical command text with different cwd stays context-distinct", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          jobs: {
+            b: {
+              strategy: { matrix: { pkg: ["web", "api"] } },
+              steps: [
+                { run: "npm ci", "working-directory": "packages/web" },
+                { run: "npm ci", "working-directory": "packages/api" },
+                { run: "npm ci" },
+              ],
+            },
+          },
+        }),
+      },
+    ]);
+    const texts = cmds.filter((c) => c.purpose === "install").map((c) => c.command);
+    expect(texts).toContain("cd packages/web && npm ci");
+    expect(texts).toContain("cd packages/api && npm ci");
+    expect(texts).toContain("npm ci");
+    expect(new Set(texts).size).toBe(3);
+  });
+
+  it("evidence records the working-directory", () => {
+    const cmds = commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          jobs: { b: { steps: [{ run: "npm ci", "working-directory": "packages/web" }] } },
+        }),
+      },
+    ]);
+    expect(cmds[0]!.evidence).toContain("working-directory: packages/web");
+  });
+});

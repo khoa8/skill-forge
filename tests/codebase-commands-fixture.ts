@@ -16,6 +16,8 @@ import type { RepositoryAnalysis as RA } from "../src/core/types.js";
 export interface CommandsFixtureInput {
   /** Root package.json content. */
   packageJson: string;
+  /** Analysis-root directory (scoped requests); "" = repository root. */
+  scope?: string;
   /** Nested package manifests (path + JSON content fields). */
   nested?: { path: string; name: string; scripts?: Record<string, string> }[];
   /** Lockfile paths in the (scoped) tree — path-aware manager evidence. */
@@ -28,7 +30,8 @@ export interface CommandsFixtureInput {
 export function buildRepositoryAnalysisFromCommandsFixture(
   input: CommandsFixtureInput,
 ): RepositoryAnalysis {
-  const files: FetchedFile[] = [{ path: "package.json", content: input.packageJson }];
+  const rootManifestPath = input.scope ? `${input.scope}/package.json` : "package.json";
+  const files: FetchedFile[] = [{ path: rootManifestPath, content: input.packageJson }];
   for (const n of input.nested ?? []) {
     files.push({
       path: n.path,
@@ -42,9 +45,8 @@ export function buildRepositoryAnalysisFromCommandsFixture(
     (input.treeLockfiles ?? []).map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() })),
     [],
     files[0],
-    "",
+    input.scope ?? "",
   );
-  const rootManifestPath = "package.json";
   // Membership matching goes through the SAME exported helper the real
   // extraction path uses, so fixture results match production behavior.
   const workspaceNames = groundWorkspaceMembership({
