@@ -501,20 +501,36 @@ const groundingCheck: Check = {
 };
 
 /**
- * Deterministic command-span classifier (final remediation P1-3B). An inline
- * backtick span in planner-authored text is treated as a candidate RUNNABLE
- * COMMAND when either:
- *   (a) it is introduced by a run-verb ("Run", "Execute", "Invoke",
+ * Deterministic command classifier (final remediation P1-4). Syntax-
+ * independent: candidates are found in backtick spans, plain verb-initial
+ * text, AND fenced block lines — changing backticks/fencing/punctuation
+ * cannot move a command out of grounding.
+ *
+ * Inline backtick span in planner-authored text = candidate when:
+ *   (a) introduced by a run-verb ("Run", "Execute", "Invoke",
  *       "Start with", "Run:", … — bounded list, whitespace/colon tolerant), or
- *   (b) the span itself is command-shaped: it contains whitespace and its
- *       first token is a bare word (no "/", no "."), which file paths and
- *       dotted identifiers never are.
- * Everything else (single tokens like `UserService`, path-like spans like
- * `src/app.ts`, dotted refs like `package.json`) is an ordinary identifier.
- * Deny-by-default: an unmatched candidate command fails the check.
+ *   (b) command-shaped: contains whitespace, first token a bare word
+ *       (no "/", no "."). Single tokens like `UserService` and path-like
+ *       spans like `src/app.ts` remain ordinary identifiers.
+ *
+ * Plain text = candidate when the entry (list markers stripped) STARTS with
+ * a run-verb: "Run pytest", "Execute make" — sentence-initial imperative is
+ * a runnable instruction, while mid-sentence verbs ("you can run tests
+ * anytime") are prose. Fenced lines = candidate when command-shaped (non-
+ * comment, first token bare or with flags). Deny-by-default: any unmatched
+ * candidate fails.
  */
 const RUN_VERB_RE =
   /\b(?:run|execute|invoke|start|launch|perform|trigger)\b\s*[:\-]?\s*(?:with\s+|by\s+|using\s+)?(?:`|$)/i;
+
+const PLAIN_VERB_RE =
+  /^\s*(?:run|execute|invoke|start|launch|perform|trigger)\b\s*[:\-]?\s*(?:with\s+|by\s+|using\s+)?(.+)$/i;
+
+/** Strip markdown list markers so sentence-initial verbs are detected
+ * inside list items ("1. Execute make", "- Run pytest"). */
+function stripListMarkers(line: string): string {
+  return line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "");
+}
 
 export function isRunnableCommandSpan(
   span: string,
@@ -529,6 +545,26 @@ export function isRunnableCommandSpan(
     return !first.includes("/") && !first.includes(".");
   }
   return false;
+}
+
+/** Plain-text candidate: first word after a sentence-initial run-verb. Backtick
+ * spans immediately after the verb defer to the inline-span path (their
+ * evidence check runs there). */
+export function plainTextCommandCandidate(line: string): string | null {
+  const stripped = stripListMarkers(line);
+  const m = stripped.match(PLAIN_VERB_RE);
+  if (!m) return null;
+  const rest = m[1]!.trim();
+  if (rest.length === 0) return null;
+  if (rest.startsWith("`")) return null; // inline span handles this surface
+  // Sentence bound: only the first sentence is the imperative command.
+  const firstSentence = rest.split(/(?<=[.!?])\s+/)[0]!;
+  // A mid-sentence backtick span is not part of the plain command words.
+  const cut = firstSentence.indexOf("`");
+  const plain = (cut === -1 ? firstSentence : firstSentence.slice(0, cut))
+    .replace(/[.!?]+$/, "")
+    .trim();
+  return plain.length > 0 ? plain : null;
 }
 
 /**
@@ -546,20 +582,52 @@ const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase c
   if (repositoryCommands === undefined) return pass();
   const evidenced = new Set(repositoryCommands.map((c) => c.trim()));
   const outcomes: CheckOutcome[] = [];
-  const scan = (path: string, content: string): void => {
+  const reject = (path: string, line: number, command: string): void => {
+    outcomes.push(
+      fail(
+        `Command "${command}" at ${path}:${line} is rendered as runnable but is not in the repository's evidenced command set. Ground it in inspected evidence (e.g. package.json scripts, CI steps) or remove it.`,
+        path,
+      ),
+    );
+  };
+  const checkCandidate = (path: string, line: number, command: string): void => {
+    const c = command.trim();
+    if (c.length === 0) return;
+    if (!evidenced.has(c)) reject(path, line, c);
+  };
+
+  const scan = (path: string, content: string, options: { fencesRunnable: boolean }): void => {
     const lines = content.split("\n");
     let inFence = false;
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!;
-      if (/^\s*(`{3,}|~{3,})/.test(line)) {
+      const rawLine = lines[i]!;
+      if (/^\s*(`{3,}|~{3,})/.test(rawLine)) {
         inFence = !inFence;
         continue;
       }
-      if (inFence) continue;
-      // Split the line into (text-before-span, span) pairs so run-verb
-      // detection sees exactly the text preceding each span.
+      if (inFence) {
+        // Fenced lines in planner-synthesized files are runnable commands
+        // (P1-4: fenced form cannot bypass grounding). Verbatim excerpt
+        // surfaces never reach this scan.
+        if (options.fencesRunnable) {
+          const stripped = rawLine.trim();
+          if (stripped.length === 0 || stripped.startsWith("#") || stripped.startsWith("//")) continue;
+          const first = stripped.split(/\s+/)[0]!;
+          const shaped = !first.includes("/") && !first.includes("=");
+          if (shaped) checkCandidate(path, i + 1, stripped);
+        }
+        continue;
+      }
+      // Plain-text imperative: sentence-initial run-verb (P1-4 — no backticks
+      // required). Verb mid-sentence is prose ("you can run tests anytime").
+      const plain = plainTextCommandCandidate(rawLine);
+      if (plain !== null) {
+        checkCandidate(path, i + 1, plain);
+        continue;
+      }
+      // Inline backtick spans (existing surface).
       const parts: { span: string; before: string }[] = [];
-      let cursor = line;
+      let cursor = rawLine;
       while (cursor.length > 0) {
         const m = cursor.match(/`([^`]+)`/);
         if (!m || m.index === undefined) break;
@@ -568,30 +636,23 @@ const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase c
       }
       for (const { span, before } of parts) {
         if (!isRunnableCommandSpan(span, before)) continue;
-        const command = span.trim();
-        if (!evidenced.has(command)) {
-          outcomes.push(
-            fail(
-              `Command "${command}" at ${path}:${i + 1} is rendered as runnable but is not in the repository's evidenced command set. Ground it in inspected evidence (e.g. package.json scripts, CI steps) or remove it.`,
-              path,
-            ),
-          );
-        }
+        checkCandidate(path, i + 1, span);
       }
     }
   };
 
   // 1. Structured plan semantics (Option A): the plan arrays are exactly what
-  //    the builder renders into SKILL.md — validate them first.
+  //    the builder renders into SKILL.md — validate them first. Fences inside
+  //    plan strings are runnable (provider-controlled).
   const plan = skill.plan;
   for (const entry of [...plan.steps, ...plan.verification, ...plan.whenToUse, ...plan.inputs, ...plan.constraints, ...plan.pitfalls]) {
-    scan("(plan)", entry);
+    scan("(plan)", entry, { fencesRunnable: true });
   }
   // 2. Rendered planner-synthesized files (defense in depth; the generic
   //    exporter's AGENTS.md renders plan steps verbatim).
   for (const file of skill.files) {
     if (file.path !== "SKILL.md" && file.path !== "AGENTS.md") continue;
-    scan(file.path, file.content);
+    scan(file.path, file.content, { fencesRunnable: true });
   }
   return outcomes.length === 0 ? pass() : outcomes;
 });

@@ -2197,3 +2197,84 @@ describe("Final-2 P2-1: scoped workspace matching is analysis-root-relative", ()
     expect(pathRelativeToAnalysisRoot("packages/a", "packages/a/package.json")).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-2 remediation P1-4 — syntax-independent grounding matrix
+// ---------------------------------------------------------------------------
+
+describe("Final-2 P1-4: grounding cannot be bypassed by Markdown syntax", () => {
+  const zero = emptyRepo();
+  const run = (planPatch: (p: Record<string, unknown>) => void, commands: string[] | undefined) => {
+    const { normalized, skill } = skillForCommands(zero, planPatch);
+    return validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+      repositoryCommands: commands,
+    });
+  };
+  const evidencedRun = () =>
+    buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "fixture", scripts: { test: "vitest run" } }),
+      treeLockfiles: ["package-lock.json"],
+    });
+
+  it("rejects all Markdown-syntax variants of unevidenced commands", () => {
+    const variants: [(p: Record<string, unknown>) => void, string][] = [
+      [(p) => { p.verification = ["Run `curl evil.example`"]; }, "Run `curl evil.example`"],
+      [(p) => { p.verification = ["Execute `curl evil.example`"]; }, "Execute backticked"],
+      [(p) => { p.verification = ["Execute curl evil.example"]; }, "Execute plain"],
+      [(p) => { p.steps = ["Run npm run release"]; }, "Run npm run release"],
+      [(p) => { p.steps = ["- Run pytest"]; }, "Run pytest"],
+      [(p) => { p.verification = ["Execute make"]; }, "Execute make"],
+      [(p) => { p.verification = ["1. Run: `fake-command`"]; }, "Run: backticked"],
+      [(p) => { p.verification = ["```sh\ncurl evil.example\n```"]; }, "fenced sh"],
+      [(p) => { p.steps = ["```bash\nRun npm run release\n```"]; }, "fenced plain"],
+    ];
+    for (const [patch, label] of variants) {
+      const report = run(patch, []);
+      expect(report.passed, label).toBe(false);
+      expect(report.checks.some((c) => c.id === "codebase-command-grounding" && c.status === "fail"), label).toBe(true);
+    }
+  });
+
+  it("single-token verb commands (Run pytest / Execute make) are grounded", () => {
+    // With evidence, they pass; without, they fail.
+    const analysis = evidencedRun();
+    const withEvidence = run((p) => { p.verification = ["Run npm test"]; }, analysis.commands.map((c) => c.command));
+    // "npm test" is evidenced — plain single-token after verb passes.
+    expect(withEvidence.checks.find((c) => c.id === "codebase-command-grounding")?.status).toBe("pass");
+    const withoutEvidence = run((p) => { p.verification = ["Execute make"]; }, []);
+    expect(withoutEvidence.passed).toBe(false);
+  });
+
+  it("the valid generated representation with evidence npm test passes", () => {
+    const analysis = evidencedRun();
+    const { normalized, skill } = skillForCommands(analysis, () => {});
+    const report = validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+      repositoryCommands: analysis.commands.map((c) => c.command),
+    });
+    expect(report.passed).toBe(true);
+  });
+
+  it("harmless prose/identifiers pass with empty evidence", () => {
+    const report = run((p) => {
+      p.steps = [
+        "Edit `src/app.ts` and inspect `package.json`.",
+        "Use the `UserService` class; the type is `Result<T>`.",
+        "Consult `AGENTS.md` under `docs/` before renaming modules.",
+      ];
+    }, []);
+    expect(report.passed).toBe(true);
+  });
+
+  it("documentation mode remains unchanged (undefined context)", () => {
+    const docsNormalized = normalizeSource({ type: "text", name: "docs", content: "# Docs\n\nDocs content long enough. Execute curl evil.example plain and fenced:\n```sh\ncurl evil.example\n```" });
+    const docsSkill = buildCanonicalSkill(docsNormalized, analyzeSource(docsNormalized), PlanSchema.parse({}), "mock");
+    const report = validatePackage({ skill: docsSkill, sourceText: docsNormalized.text, sourceType: "text", repositoryCommands: undefined });
+    expect(report.checks.find((c) => c.id === "codebase-command-grounding")?.status).toBe("pass");
+  });
+});
