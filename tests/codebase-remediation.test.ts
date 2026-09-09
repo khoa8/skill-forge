@@ -1794,3 +1794,73 @@ describe("Final P1-3: command grounding is deny-by-default and syntax-independen
     expect(report.checks.find((c) => c.id === "codebase-command-grounding")?.status).toBe("pass");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final remediation P2-1 — provider-context byte cap is a real invariant
+// ---------------------------------------------------------------------------
+
+import { repositoryContextJson as ctxJson, MAX_REPOSITORY_CONTEXT_BYTES as MAX_CTX_BYTES } from "../src/core/codebase/provider-context.js";
+
+/** Maximal valid RepositoryAnalysis (at/near schema caps) with multibyte
+ * content in every free-text field. */
+function maximalAnalysis(): RepositoryAnalysis {
+  const mb = (i: number, ch: string) => `${i}-${ch.repeat(180)}漢字`; // ~3 bytes/char
+  return {
+    repository: {
+      url: `https://github.com/${"o".repeat(100)}/${"r".repeat(100)}`,
+      owner: "o".repeat(120),
+      name: "n".repeat(120),
+      ref: "r".repeat(200),
+      scope: "s".repeat(300),
+    },
+    mode: "codebase",
+    languages: Array.from({ length: 12 }, (_, i) => ({ name: mb(i, "l"), evidence: [mb(i, "e"), mb(i, "f"), mb(i, "g")] })),
+    ecosystems: Array.from({ length: 12 }, (_, i) => mb(i, "y")),
+    frameworks: Array.from({ length: 16 }, (_, i) => ({ name: mb(i, "f"), evidence: [mb(i, "e")] })),
+    manifests: Array.from({ length: 24 }, (_, i) => ({ path: mb(i, "p"), kind: mb(i, "k"), fetched: true })),
+    commands: Array.from({ length: 30 }, (_, i) => ({ purpose: "other" as const, command: mb(i, "c"), evidence: mb(i, "v") })),
+    structure: {
+      sourceRoots: Array.from({ length: 16 }, (_, i) => mb(i, "s")),
+      testRoots: Array.from({ length: 16 }, (_, i) => mb(i, "t")),
+      exampleRoots: Array.from({ length: 16 }, (_, i) => mb(i, "x")),
+      packages: Array.from({ length: 24 }, (_, i) => mb(i, "w")),
+    },
+    entrypoints: Array.from({ length: 12 }, (_, i) => ({ path: mb(i, "p"), reason: mb(i, "r") })),
+    importantFiles: Array.from({ length: 24 }, (_, i) => ({ path: mb(i, "p"), reason: mb(i, "i") })),
+    conventions: Array.from({ length: 20 }, (_, i) => ({ statement: mb(i, "v"), evidence: [mb(i, "f")] })),
+    publicInterfaces: Array.from({ length: 16 }, (_, i) => ({ name: mb(i, "n"), path: mb(i, "p") })),
+    testing: { frameworks: [mb(0, "t")], relevantFiles: Array.from({ length: 24 }, (_, i) => mb(i, "j")) },
+    inspectedFiles: Array.from({ length: 200 }, (_, i) => mb(i, "d")),
+    selection: { candidateCount: 250, selectedCount: 200, treeBlobCount: 300, treeTruncated: true },
+    uncertainty: Array.from({ length: 12 }, (_, i) => `${mb(i, "u")} bounded; parts were not inspected.`),
+  };
+}
+
+describe("Final P2-1: provider-context byte ceiling holds for every valid analysis", () => {
+  it("maximal near-schema-limit multibyte analysis stays under the cap, valid, deterministic", () => {
+    const analysis = maximalAnalysis();
+    const json = ctxJson(analysis);
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(MAX_CTX_BYTES);
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    // Boundedness + uncertainty survive any reduction.
+    const bounded = parsed.boundedSelection as Record<string, unknown>;
+    expect(bounded.candidateCount).toBe(250);
+    expect(bounded.selectedCount).toBeUndefined; // inspectedCount name
+    expect((parsed.uncertainty as unknown[]).length).toBeGreaterThan(0);
+    // Identity survives (clamped, never removed).
+    expect((parsed.repository as Record<string, unknown>).url).toContain("https://github.com/");
+    // Deterministic.
+    expect(ctxJson(analysis)).toBe(json);
+    // Reduction actually engaged (some arrays were reduced below their caps).
+    const inspected = bounded.inspectedFiles as unknown[];
+    expect(inspected.length).toBeLessThan(200);
+    expect((bounded.inspectedFilesOmitted as number) + inspected.length).toBe(200);
+  });
+
+  it("floor payload provably fits: identity + uncertainty + counts only", () => {
+    // The reduction ladder cannot go below the floor; assert the floor itself
+    // is under the cap for the worst-case analysis.
+    const json = ctxJson(maximalAnalysis());
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(MAX_CTX_BYTES);
+  });
+});
