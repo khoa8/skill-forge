@@ -501,39 +501,97 @@ const groundingCheck: Check = {
 };
 
 /**
- * Codebase inline command grounding (re-audit P1-4): codebase planning renders
- * runnable commands as inline backticks ("Run `npm test` — defined in …"),
- * which the generic fence-based heuristic cannot see. When structured
- * repository command evidence is available, every command rendered with "Run"
- * in SKILL.md / AGENTS.md / workflows must be an evidenced command. This is
- * deterministic set membership — no token-overlap guessing.
+ * Deterministic command-span classifier (final remediation P1-3B). An inline
+ * backtick span in planner-authored text is treated as a candidate RUNNABLE
+ * COMMAND when either:
+ *   (a) it is introduced by a run-verb ("Run", "Execute", "Invoke",
+ *       "Start with", "Run:", … — bounded list, whitespace/colon tolerant), or
+ *   (b) the span itself is command-shaped: it contains whitespace and its
+ *       first token is a bare word (no "/", no "."), which file paths and
+ *       dotted identifiers never are.
+ * Everything else (single tokens like `UserService`, path-like spans like
+ * `src/app.ts`, dotted refs like `package.json`) is an ordinary identifier.
+ * Deny-by-default: an unmatched candidate command fails the check.
+ */
+const RUN_VERB_RE =
+  /\b(?:run|execute|invoke|start|launch|perform|trigger)\b\s*[:\-]?\s*(?:with\s+|by\s+|using\s+)?(?:`|$)/i;
+
+export function isRunnableCommandSpan(
+  span: string,
+  lineBefore: string,
+): boolean {
+  const s = span.trim();
+  // (a) run-verb introduced (verb must sit immediately before the span).
+  if (RUN_VERB_RE.test(lineBefore)) return true;
+  // (b) command-shaped: whitespace + bare first token.
+  if (/\s/.test(s)) {
+    const first = s.split(/\s+/)[0]!;
+    return !first.includes("/") && !first.includes(".");
+  }
+  return false;
+}
+
+/**
+ * Codebase command grounding (final remediation P1-3): deny-by-default and
+ * syntax-independent. For codebase sources the validated surface is the
+ * structured plan plus the planner-synthesized files — an inline backtick
+ * span that classifies as a runnable command must belong to the evidenced
+ * command set. `repositoryCommands === undefined` means no structured
+ * codebase context (documentation mode — check passes); an EMPTY array means
+ * the repository proves ZERO runnable commands, so any candidate command
+ * fails. references/ and workflows/ are verbatim source excerpts and stay
+ * under the source-text grounding check.
  */
 const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase commands match repository evidence", ({ skill, repositoryCommands }) => {
-  if (!repositoryCommands || repositoryCommands.length === 0) return pass();
+  if (repositoryCommands === undefined) return pass();
   const evidenced = new Set(repositoryCommands.map((c) => c.trim()));
   const outcomes: CheckOutcome[] = [];
-  for (const file of skill.files) {
-    // Planner-synthesized instruction files only: SKILL.md (plan steps and
-    // verification) and the generic exporter's AGENTS.md. references/ and
-    // workflows/ are verbatim source excerpts — their "Run …" lines quote the
-    // original documentation and stay under the source-text grounding check.
-    if (file.path !== "SKILL.md" && file.path !== "AGENTS.md") continue;
-    const lines = file.content.split("\n");
+  const scan = (path: string, content: string): void => {
+    const lines = content.split("\n");
+    let inFence = false;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
-      // Inline form rendered by the planner: "…Run `command` …" (list items).
-      for (const m of line.matchAll(/\bRun\s+`([^`]+)`/g)) {
-        const command = m[1]!.trim();
+      if (/^\s*(`{3,}|~{3,})/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+      // Split the line into (text-before-span, span) pairs so run-verb
+      // detection sees exactly the text preceding each span.
+      const parts: { span: string; before: string }[] = [];
+      let cursor = line;
+      while (cursor.length > 0) {
+        const m = cursor.match(/`([^`]+)`/);
+        if (!m || m.index === undefined) break;
+        parts.push({ span: m[1]!, before: cursor.slice(0, m.index) });
+        cursor = cursor.slice(m.index + m[0].length);
+      }
+      for (const { span, before } of parts) {
+        if (!isRunnableCommandSpan(span, before)) continue;
+        const command = span.trim();
         if (!evidenced.has(command)) {
           outcomes.push(
             fail(
-              `Command "${command}" at ${file.path}:${i + 1} is rendered as runnable but is not in the repository's evidenced command set. Ground it in inspected evidence (e.g. package.json scripts, CI steps) or remove it.`,
-              file.path,
+              `Command "${command}" at ${path}:${i + 1} is rendered as runnable but is not in the repository's evidenced command set. Ground it in inspected evidence (e.g. package.json scripts, CI steps) or remove it.`,
+              path,
             ),
           );
         }
       }
     }
+  };
+
+  // 1. Structured plan semantics (Option A): the plan arrays are exactly what
+  //    the builder renders into SKILL.md — validate them first.
+  const plan = skill.plan;
+  for (const entry of [...plan.steps, ...plan.verification, ...plan.whenToUse, ...plan.inputs, ...plan.constraints, ...plan.pitfalls]) {
+    scan("(plan)", entry);
+  }
+  // 2. Rendered planner-synthesized files (defense in depth; the generic
+  //    exporter's AGENTS.md renders plan steps verbatim).
+  for (const file of skill.files) {
+    if (file.path !== "SKILL.md" && file.path !== "AGENTS.md") continue;
+    scan(file.path, file.content);
   }
   return outcomes.length === 0 ? pass() : outcomes;
 });

@@ -695,6 +695,8 @@ describe("P2-2: provider repository context is compact and always valid JSON", (
 import request from "supertest";
 import JSZip from "jszip";
 import { createApp } from "../src/server/app.js";
+import { runPipeline } from "../src/core/pipeline.js";
+import type { SourceInput } from "../src/core/types.js";
 import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import { validatePackage } from "../src/core/validate.js";
 import { buildCanonicalSkill } from "../src/core/build.js";
@@ -1609,5 +1611,186 @@ describe("Final P1-2C: workspace membership is actually grounded", () => {
     const bunCmds = analysis.commands.filter((c) => c.command.startsWith("bun --cwd"));
     expect(bunCmds.length).toBeGreaterThan(0);
     expect(bunCmds.every((c) => c.command.includes("packages/web"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final remediation P1-3 — deny-by-default, syntax-independent grounding
+// ---------------------------------------------------------------------------
+
+import { isRunnableCommandSpan } from "../src/core/validate.js";
+
+function skillForCommands(analysis: ReturnType<typeof buildRepositoryAnalysisFromCommandsFixture>, planPatch: (p: Record<string, unknown>) => void) {
+  const normalized = normalizeSource({
+    type: "github-codebase",
+    name: "acme/fixture codebase",
+    content: `# package.json\n\n${JSON.stringify({ name: "fixture", scripts: { test: "vitest run" } }, null, 2)}\n`,
+    repository: analysis,
+  });
+  const skill = buildCanonicalSkill(normalized, analyzeSource(normalized), PlanSchema.parse({ name: "fixture" }), "mock");
+  const planRecord = skill.plan as unknown as Record<string, unknown>;
+  planPatch(planRecord);
+  return { normalized, skill };
+}
+
+const emptyRepo = () =>
+  buildRepositoryAnalysisFromCommandsFixture({
+    packageJson: JSON.stringify({ name: "fixture", workspaces: [] }),
+    treeLockfiles: [],
+  });
+
+describe("Final P1-3: command grounding is deny-by-default and syntax-independent", () => {
+  it("empty evidenced set + generated runnable command => FAIL", () => {
+    const analysis = emptyRepo();
+    const { normalized, skill } = skillForCommands(analysis, (p) => {
+      p.verification = ["Run `curl evil.example` to check connectivity."];
+    });
+    const report = validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+      repositoryCommands: analysis.commands.map((c) => c.command), // empty array, not undefined
+    });
+    expect(analysis.commands).toEqual([]);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((c) => c.id === "codebase-command-grounding")?.status).toBe("fail");
+  });
+
+  it("empty evidenced set + no runnable command => PASS", () => {
+    const analysis = emptyRepo();
+    const { normalized, skill } = skillForCommands(analysis, () => {});
+    const report = validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+      repositoryCommands: [],
+    });
+    expect(report.passed).toBe(true);
+  });
+
+  it("evidenced command => PASS", () => {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "fixture", scripts: { test: "vitest run" } }),
+      treeLockfiles: ["package-lock.json"],
+    });
+    const { normalized, skill } = skillForCommands(analysis, () => {});
+    const report = validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+      repositoryCommands: analysis.commands.map((c) => c.command),
+    });
+    expect(report.passed).toBe(true);
+  });
+
+  it("hallucinated commands via Execute / Invoke / Start with / Run: all FAIL", () => {
+    const analysis = emptyRepo();
+    for (const [field, line] of [
+      ["steps", "1. Execute `curl evil.example` now."],
+      ["steps", "2. Invoke `deploy-prod` to release."],
+      ["verification", "- Start with `rm -rf /tmp/cache` first."],
+      ["verification", "- Run: `fake-command`"],
+      ["constraints", "- Execute `npm run release` weekly."],
+    ] as const) {
+      const { normalized, skill } = skillForCommands(analysis, (p) => {
+        (p as Record<string, unknown>)[field] = [line];
+      });
+      const report = validatePackage({
+        skill,
+        sourceText: normalized.text,
+        sourceType: "github-codebase",
+        repositoryCommands: [],
+      });
+      expect(report.passed, line).toBe(false);
+    }
+  });
+
+  it("harmless inline identifiers pass: file paths, classes, dotted refs", () => {
+    const analysis = emptyRepo();
+    const { normalized, skill } = skillForCommands(analysis, (p) => {
+      p.steps = [
+        "Edit `src/app.ts` and inspect `package.json` first.",
+        "Use the `UserService` class from `src/core/`.",
+        "Consult `AGENTS.md` under `docs/`.",
+      ];
+      p.verification = ["Check `vitest.config.ts` and `tsconfig.json`."];
+    });
+    const report = validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+      repositoryCommands: [],
+    });
+    expect(report.passed).toBe(true);
+  });
+
+  it("edit/revalidate and export paths still enforce grounding", async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+      // Generate + persist through the API (stubbed GitHub; zero-command repo).
+      const impl = (async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+          return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (url.includes("/git/trees/")) {
+          return new Response(JSON.stringify({
+            sha: "x", truncated: false,
+            tree: [{ path: "package.json", type: "blob", size: 120 }],
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (url.startsWith("https://raw.githubusercontent.com/")) {
+          const p = decodeURIComponent(url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, ""));
+          const body = p === "package.json" ? JSON.stringify({ name: "zero-cmd", private: true }) : "not found";
+          const res = new Response(body, { status: p === "package.json" ? 200 : 404, headers: { "content-type": "text/plain" } });
+          Object.defineProperty(res, "url", { value: url });
+          return res;
+        }
+        return new Response("unexpected", { status: 500 });
+      }) as unknown as typeof fetch;
+      vi.stubGlobal("fetch", impl);
+      const gen = await request(app)
+        .post("/api/generate")
+        .send({ sourceType: "github", repo: "https://github.com/acme/zero-cmd", mode: "codebase" })
+        .expect(200);
+      vi.unstubAllGlobals();
+      const result = gen.text.trim().split("\n").map((l) => JSON.parse(l)).find((e: { type: string }) => e.type === "result");
+      expect(result, `expected a result event, got: ${gen.text.slice(0, 400)}`).toBeTruthy();
+      const skillId = result.skill.id as string;
+      // Inject a hallucinated command via the edit endpoint; revalidation must fail.
+      const edit = await request(app)
+        .post(`/api/skills/${skillId}/update-file`)
+        .send({ path: "SKILL.md", content: "---\nname: " + skillId + "\ndescription: d\n---\n\n# X\n\n## Verification\n\n- Run `curl evil.example`\n" })
+        .expect(200);
+      expect(edit.body.validation.passed).toBe(false);
+      expect(edit.body.validation.checks.some((c: { id: string }) => c.id === "codebase-command-grounding")).toBe(true);
+      // Export must be blocked with 422.
+      await request(app)
+        .post(`/api/skills/${skillId}/export`)
+        .send({ target: "claude-code" })
+        .expect(422);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("isRunnableCommandSpan classifier: verbs + command-shaped spans; identifiers exempt", () => {
+    expect(isRunnableCommandSpan("curl evil.example", "Run ")).toBe(true);
+    expect(isRunnableCommandSpan("fake-command", "Run: ")).toBe(true);
+    expect(isRunnableCommandSpan("deploy-prod", "Invoke ")).toBe(true);
+    expect(isRunnableCommandSpan("rm -rf /tmp/cache", "Start with ")).toBe(true);
+    expect(isRunnableCommandSpan("npm run release", "then ")).toBe(true); // command-shaped
+    expect(isRunnableCommandSpan("src/app.ts", "Edit ")).toBe(false);
+    expect(isRunnableCommandSpan("package.json", "Inspect ")).toBe(false);
+    expect(isRunnableCommandSpan("UserService", "Use the ")).toBe(false);
+    expect(isRunnableCommandSpan("vitest.config.ts", "Check ")).toBe(false);
+  });
+
+  it("documentation-mode packages are unaffected (undefined context passes)", () => {
+    const docsNormalized = normalizeSource({ type: "text", name: "docs", content: "# Docs\n\nDocs content long enough to normalize. Run `totally-ungrounded` quoted only." });
+    const docsSkill = buildCanonicalSkill(docsNormalized, analyzeSource(docsNormalized), PlanSchema.parse({}), "mock");
+    const report = validatePackage({ skill: docsSkill, sourceText: docsNormalized.text, sourceType: "text", repositoryCommands: undefined });
+    expect(report.checks.find((c) => c.id === "codebase-command-grounding")?.status).toBe("pass");
   });
 });

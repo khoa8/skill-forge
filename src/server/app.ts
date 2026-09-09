@@ -551,7 +551,15 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     const target = parsed.data.target;
 
     // Validation gate: never export a package that fails deterministic checks.
-    const report = validatePackage({ skill: stored.skill, sourceText: stored.source.text, target });
+    const report = validatePackage({
+      skill: stored.skill,
+      sourceText: stored.source.text,
+      target,
+      sourceType: stored.source.type,
+      repositoryCommands: stored.source.repository?.commands
+        .map((c) => c.command)
+        .filter((c) => c.length > 0),
+    });
     if (!report.passed) {
       res.status(422).json({
         error: `Export blocked: deterministic validation found ${report.errorCount} error(s). Inspect the validation panel, repair the source or plan, and try again.`,
