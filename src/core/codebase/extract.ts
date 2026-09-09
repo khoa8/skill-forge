@@ -752,34 +752,70 @@ export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand
 // ---------------------------------------------------------------------------
 
 const CONSTRAINT_LINE_RE =
-  /\b(must|must not|never|always|do not|don'?t|avoid|required|forbidden|prohibited|make sure|ensure|before (?:pushing|committing|merging)|only)\b/i;
+  /\b(must|must not|never|always|do not|don'?t|avoid|required|forbidden|prohibited|make sure|ensure|before (?:pushing|committing|merging)|only|use|prefer|keep)\b/i;
 
 /**
- * Meta-instruction filter (re-audit P1-3): repository instruction text is
- * untrusted. Lines that address the model/agent itself — instruction-hierarchy
- * overrides, credential disclosure, data exfiltration, output-schema changes,
- * persona adoption — must never be promoted into structured conventions (which
- * the deterministic planner renders as skill constraints). Narrow, exact,
- * deterministic patterns; legitimate development conventions pass untouched.
+ * Deterministic trust-boundary classification (final remediation P1-5).
+ *
+ * Subject/domain-centered, not a blacklist: repository content may govern the
+ * TARGET CODEBASE (developer_convention) but never the agent instruction
+ * hierarchy (meta_instruction), secret disclosure / data exfiltration
+ * (secret_exfiltration), or anything unclassifiable (unknown). Only
+ * developer_convention is promoted into RepositoryAnalysis.conventions —
+ * unknown suspicious directives are omitted (fail closed), never guessed.
  */
-const META_INSTRUCTION_PATTERNS: RegExp[] = [
-  // Instruction-hierarchy overrides.
-  /\bignore\b[^.\n]{0,60}\binstructions?\b/i,
-  /\b(disregard|forget|override)\b[^.\n]{0,60}\b(system|planner|developer|previous|prior|user|agent)\b[^.\n]{0,40}\b(prompt|instructions?|rules?|policies?|safeguards?)\b/i,
-  /\byou (are|'re)\b[^.\n]{0,40}\b(now|actually)\b/i,
-  /\b(pretend to be|roleplay as|adopt the persona of|act as an? (?:unrestricted|uncensored|evil|jailbroken|different|new))\b/i,
-  // Output-schema / policy tampering.
-  /\b(change|modify|alter|replace|update)\b[^.\n]{0,60}\boutput (schema|format|specification)\b/i,
-  /\bnew (?:output )?(?:schema|format|rules)\b[^.\n]{0,60}\binstead\b/i,
-  // Credential/secret disclosure.
-  /\b(reveal|show|print|expose|disclose|output|repeat|include)\b[^.\n]{0,60}\b(api[- ]?keys?|credentials?|secrets?|tokens?|passwords?)\b/i,
-  // Exfiltration of source/data to external destinations.
-  /\b(upload|send|exfiltrate|transmit|forward|post|copy)\b[^.\n]{0,80}\b(source code|sources?|data|secrets?|credentials?|environment(?: variables?)?|\.env)\b[^.\n]{0,80}\bto\b/i,
-  /\b(exfiltrate|curl|wget|fetch)\b[^.\n]{0,80}\b(https?:\/\/|evil\.|attacker|webhook\.site|requestbin)/i,
+export type ConventionCategory =
+  | "developer_convention"
+  | "meta_instruction"
+  | "secret_exfiltration"
+  | "unknown";
+
+/** Instruction-hierarchy domain: any mention pairing an agent/instruction
+ * role with hierarchy vocabulary, or a hierarchy verb with such an object. */
+const HIERARCHY_RE = [
+  /\b(system|developer|user|assistant|model|planner|ai|llm)\b[^.\n]{0,50}\b(prompt|prompts|message|messages|instruction|instructions|direction|directions|request|policy|policies|rules?|safeguard|guardrail|guardrails|priority|priorities|hierarchy|behavior)\b/i,
+  /\b(obey|follow|prioritize|prioritise|prefer|supersede|defer to|override|disregard|ignore|replace|take precedence|precedence over|trump|outrank|above|over|instead of)\b[^.\n]{0,60}\b(system|developer|user|assistant|model|planner|prompt|prompts|message|messages|instruction|instructions|request|policies?|rules?|safeguards?|guardrails?)\b/i,
+  /\b(treat|regard|consider)\b[^.\n]{0,60}\b(higher|lower) priority/i,
+  /\bhigher priority than (?:the )?(?:system|developer|user)/i,
+  /\bthis file|this document\b[^.\n]{0,50}\b(above|over|instead of|supersede)/i,
 ];
 
+/** Agent-behavior / output-control domain: repository text must not govern
+ * what the model answers with or how it behaves. */
+const BEHAVIOR_RE = [
+  /\byou (?:are|'re|must|should|will)\b[^.\n]{0,50}\b(now|DeploymentBot|a different|an? (?:unrestricted|uncensored|evil))\b/i,
+  /\b(answers?|respond|responds|reply|replies|output)\b[^.\n]{0,40}\b(only|exclusively)\b[^.\n]{0,40}\b(using|with|from|per)\b/i,
+  /\b(only|exclusively)\b[^.\n]{0,40}\b(answer|answers|respond|responds|reply|replies|output)\b[^.\n]{0,40}\b(using|with|from|per|as|in)\b/i,
+  /\b(change|modify|alter|replace|update)\b[^.\n]{0,50}\b(output|response|answer)\b[^.\n]{0,30}\b(schema|format|template|specification)\b/i,
+  /\b(hidden prompt|chain[- ]of[- ]thought|developer mode|jailbreak|pretend to be|roleplay as|adopt the persona)/i,
+];
+
+/** Secret-disclosure / data-exfiltration domain: any transmission or
+ * disclosure of sensitive material toward a destination or audience. */
+const SECRET_EXFIL_RE = [
+  /\b(reveal|show|print|expose|disclose|display|repeat|leak|emit)\b[^.\n]{0,60}\b(system prompt|hidden prompt|api[- ]?keys?|credentials?|secrets?|tokens?|passwords?)\b/i,
+  /\b(send|upload|post|transmit|forward|exfiltrate|copy|deliver|push)\b[^.\n]{0,80}\b(source code|sources?|code|data|secrets?|credentials?|environment|\.env|keys?)\b[^.\n]{0,80}\b(to|at|into)\b[^.\n]{0,40}\b(https?:\/\/|external|remote|third[- ]party|server|endpoint|attacker|evil)\b/i,
+  /\b(send|upload|post|transmit|exfiltrate|curl|wget|fetch)\b[^.\n]{0,60}\b(https?:\/\/|evil\.|attacker|webhook\.site|requestbin)/i,
+];
+
+/** Development-domain signals: the vocabulary of codebase conventions. */
+const DEV_DOMAIN_RE =
+  /\b(test|tests|testing|pytest|vitest|jest|mocha|lint|eslint|typecheck|tsc|mypy|ruff|build|compile|commit|commits|push|branch|branches|merge|merging|rebase|pr|pull request|review|migration|migrations|database|db|schema|api|module|modules|file|files|folder|folders|directory|directories|src|deps|dependenc(?:y|ies)|package|packages|version|versions|format|formatter|prettier|naming|style|docs|documentation|readme|changelog|ci|release|deploy|config|configs|env|environment|workspace|workspaces|script|scripts|generated|codegen|imports?|exports?|types?|typescript|javascript|python|node|npm|pnpm|yarn|bun|cargo|go|gem|bundle|repo|repository|codebase|generated files|public api)\b/i;
+
+export function classifyConvention(line: string): ConventionCategory {
+  const text = line.replace(/\*\*/g, "").trim();
+  if (SECRET_EXFIL_RE.some((re) => re.test(text))) return "secret_exfiltration";
+  if (HIERARCHY_RE.some((re) => re.test(text))) return "meta_instruction";
+  if (BEHAVIOR_RE.some((re) => re.test(text))) return "meta_instruction";
+  // Developer conventions must be ABOUT the codebase; anything without a
+  // development-domain signal is unknown → fail closed.
+  return DEV_DOMAIN_RE.test(text) ? "developer_convention" : "unknown";
+}
+
+/** Kept for the adversarial-suite call sites: true when the line may NOT be
+ * promoted (anything that is not a developer convention). */
 export function isMetaInstruction(line: string): boolean {
-  return META_INSTRUCTION_PATTERNS.some((re) => re.test(line));
+  return classifyConvention(line) !== "developer_convention";
 }
 
 /** Convention statements from repository instruction files, each traceable to
@@ -812,9 +848,10 @@ export function conventionsFromInstructionFiles(files: FetchedFile[]): Repositor
       const text = (bullet ? bullet[1]! : line).replace(/\*\*/g, "").trim();
       if (text.length < 12 || text.length > 400) continue;
       if (!CONSTRAINT_LINE_RE.test(text)) continue;
-      // Untrusted instruction text is never promoted into structured
-      // conventions when it addresses the model/agent itself (re-audit P1-3).
-      if (isMetaInstruction(text)) continue;
+      // Untrusted instruction text is promoted ONLY when it classifies as a
+      // repository development convention (final remediation P1-5); meta/
+      // secret/unknown directives fail closed.
+      if (classifyConvention(text) !== "developer_convention") continue;
       out.push({ statement: text, evidence: [`${file.path}:${i + 1}`] });
     }
   }
