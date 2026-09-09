@@ -112,8 +112,11 @@ export const RepositoryCommand = z.object({
   command: z.string().min(1).max(300),
   /** Where the command is defined (e.g. "package.json scripts.test", ".github/workflows/ci.yml:42"). */
   evidence: z.string().min(1).max(300),
-  /** Concrete working directory relative to the analysis root, "" = the
-   * analysis root itself. Present only when the execution context is
+  /** Concrete execution directory of the command relative to the REPOSITORY
+   * root ("" = the repository root), as declared by the evidence. For scoped
+   * analyses the analysis root is `repository.scope`; consumers must compare
+   * against that explicitly (a repository-root cwd is NOT the analysis root
+   * of a scoped request). Present only when the execution context is
    * concretely known; commands with an unknown/dynamic working directory are
    * omitted from runnable evidence entirely (P1-2). */
   cwd: z.string().max(300).optional(),

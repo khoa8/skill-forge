@@ -24,6 +24,20 @@ function commandsOfPurpose(commands: RepositoryCommand[], purpose: RepositoryCom
   return commands.filter((c) => c.purpose === purpose);
 }
 
+/**
+ * Root-scoped commands only (final remediation P1-2): a command whose
+ * concrete working directory differs from the analysis root documents a
+ * nested execution context (rendered `cd <dir> && …` with its own evidence)
+ * and must never be presented as a repository-wide fact — most importantly as
+ * "how dependencies are installed". `cwd` is repository-root-relative;
+ * the analysis root is the scope for scoped requests, "" otherwise. An absent
+ * cwd (provider-authored analyses) is treated as the analysis root for
+ * backwards compatibility; deterministic extraction always sets it.
+ */
+function rootScoped(commands: RepositoryCommand[], scope: string | undefined): RepositoryCommand[] {
+  return commands.filter((c) => (c.cwd ?? scope ?? "") === (scope ?? ""));
+}
+
 /** Render an evidenced command: the command plus where it is defined. */
 function commandStep(cmd: RepositoryCommand): string {
   return `Run \`${cmd.command}\` — defined in ${evidenceLabel(cmd.evidence)}.`;
@@ -62,7 +76,7 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
       `A checkout of ${repository.owner}/${repository.name} at ref \`${repository.ref}\` with its manifests: ${fetchedManifests.slice(0, 6).map((m) => `\`${m.path}\``).join(", ")}.`,
     );
   }
-  for (const cmd of commandsOfPurpose(commands, "install").slice(0, 2)) {
+  for (const cmd of commandsOfPurpose(rootScoped(commands, repository.scope), "install").slice(0, 2)) {
     inputs.push(`Dependencies are installed with \`${cmd.command}\` (see ${evidenceLabel(cmd.evidence)}).`);
   }
   if (structure.packages.length > 0) {
@@ -79,7 +93,7 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
       `Before making changes, read the repository instructions: ${instructionPaths.slice(0, 4).map((p) => `\`${p}\``).join(", ")}.`,
     );
   }
-  for (const cmd of commandsOfPurpose(commands, "install").slice(0, 1)) {
+  for (const cmd of commandsOfPurpose(rootScoped(commands, repository.scope), "install").slice(0, 1)) {
     steps.push(commandStep(cmd));
   }
   if (structure.sourceRoots.length > 0 || structure.testRoots.length > 0) {

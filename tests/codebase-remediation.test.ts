@@ -2630,3 +2630,328 @@ describe("Final-3 P1-1: cwd/path values cannot inject shell syntax", () => {
     expect(isPositionalSafeValue("packages/we b")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-3 remediation P1-2 — CI execution context is truly tri-state and
+// multiline run blocks are fail-closed
+// ---------------------------------------------------------------------------
+
+describe("Final-3 P1-2: tri-state cwd resolution", () => {
+  const build = (doc: Record<string, unknown>) =>
+    commandsFromCiWorkflows([
+      { path: ".github/workflows/ci.yml", content: yamlStringify({ name: "ci", on: "push", ...doc }) },
+    ]);
+
+  it("workflow defaults: concrete cwd applies to cwd-less steps", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "packages/web" } },
+      jobs: { b: { steps: [{ run: "npm ci" }] } },
+    });
+    expect(cmds.find((c) => c.command === "cd packages/web && npm ci")).toBeTruthy();
+  });
+
+  it("dynamic workflow default does NOT become the root (unknown, non-runnable)", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "sub/${{ matrix.dir }}" } },
+      jobs: { b: { steps: [{ run: "npm ci" }] } },
+    });
+    expect(cmds.some((c) => c.purpose === "install")).toBe(false);
+    expect(cmds.some((c) => c.command === "npm ci")).toBe(false);
+    expect(cmds.some((c) => c.command.includes("matrix"))).toBe(false);
+  });
+
+  it("non-string workflow default does NOT become the root (unknown, non-runnable)", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": { nested: "object" } } },
+      jobs: { b: { steps: [{ run: "npm ci" }] } },
+    });
+    expect(cmds.some((c) => c.purpose === "install")).toBe(false);
+    expect(cmds.some((c) => c.command === "npm ci")).toBe(false);
+  });
+
+  it("concrete job default overrides the workflow default", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "apps/api" } },
+      jobs: { b: { defaults: { run: { "working-directory": "apps/web" } }, steps: [{ run: "npm ci" }] } },
+    });
+    expect(cmds.find((c) => c.command === "cd apps/web && npm ci")).toBeTruthy();
+    expect(cmds.some((c) => c.command.includes("apps/api"))).toBe(false);
+  });
+
+  it("dynamic job default does NOT inherit the workflow default (the P1-2 scenario)", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "root-area" } },
+      jobs: {
+        test: {
+          defaults: { run: { "working-directory": "${{ matrix.package }}" } },
+          steps: [{ run: "npm ci" }],
+        },
+      },
+    });
+    // Neither `cd root-area && npm ci` nor bare root `npm ci` may exist.
+    expect(cmds.some((c) => c.command === "cd root-area && npm ci")).toBe(false);
+    expect(cmds.some((c) => c.command === "npm ci")).toBe(false);
+    expect(cmds.some((c) => c.purpose === "install")).toBe(false);
+  });
+
+  it("non-string job default does NOT inherit the workflow default", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "root-area" } },
+      jobs: {
+        test: {
+          defaults: { run: { "working-directory": 42 } },
+          steps: [{ run: "npm ci" }],
+        },
+      },
+    });
+    expect(cmds.some((c) => c.command === "cd root-area && npm ci")).toBe(false);
+    expect(cmds.some((c) => c.command === "npm ci")).toBe(false);
+  });
+
+  it("concrete step cwd overrides job and workflow defaults", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "apps/api" } },
+      jobs: {
+        b: {
+          defaults: { run: { "working-directory": "apps/web" } },
+          steps: [{ run: "npm run lint", "working-directory": "packages/lint" }],
+        },
+      },
+    });
+    expect(cmds.find((c) => c.command === "cd packages/lint && npm run lint")).toBeTruthy();
+  });
+
+  it("dynamic step cwd remains non-runnable even with concrete job/workflow defaults", () => {
+    const cmds = build({
+      defaults: { run: { "working-directory": "apps/api" } },
+      jobs: {
+        b: {
+          defaults: { run: { "working-directory": "apps/web" } },
+          steps: [{ run: "npm ci", "working-directory": "packages/${{ matrix.p }}" }],
+        },
+      },
+    });
+    expect(cmds.some((c) => c.purpose === "install")).toBe(false);
+    expect(cmds.some((c) => c.command.includes("matrix"))).toBe(false);
+  });
+
+  it("non-string step cwd remains non-runnable even with concrete defaults", () => {
+    const cmds = build({
+      jobs: { b: { steps: [{ run: "npm ci", "working-directory": ["array"] }] } },
+    });
+    expect(cmds.some((c) => c.purpose === "install")).toBe(false);
+  });
+
+  it("absent defaults everywhere still resolve to the analysis root", () => {
+    const cmds = build({ jobs: { b: { steps: [{ run: "npm ci" }] } } });
+    expect(cmds.find((c) => c.command === "npm ci")).toBeTruthy();
+  });
+});
+
+describe("Final-3 P1-2: multiline run blocks are fail-closed", () => {
+  const build = (runValue: string, extraStep: Record<string, unknown> = { run: "npm run typecheck" }) =>
+    commandsFromCiWorkflows([
+      {
+        path: ".github/workflows/ci.yml",
+        content: yamlStringify({
+          name: "ci",
+          on: "push",
+          jobs: { b: { steps: [{ run: runValue }, extraStep] } },
+        }),
+      },
+    ]);
+
+  it("cd-then-command inside one block must NOT produce root-scoped npm ci", () => {
+    const cmds = build("cd packages/web\nnpm ci\n");
+    // The multiline block is non-runnable: no `npm ci` at root, no
+    // `cd packages/web && npm ci` synthesized from a guessed line split.
+    expect(cmds.some((c) => c.command === "npm ci")).toBe(false);
+    expect(cmds.some((c) => c.command.includes("npm ci"))).toBe(false);
+    expect(cmds.some((c) => c.command.includes("packages/web"))).toBe(false);
+    // The following single-line step is unaffected.
+    expect(cmds.find((c) => c.command === "npm run typecheck")).toBeTruthy();
+  });
+
+  it("multiline blocks without state changes (npm ci; npm test) are also non-runnable", () => {
+    const cmds = build("npm ci\nnpm test\n");
+    expect(cmds.some((c) => c.command === "npm ci" || c.command === "npm test")).toBe(false);
+    // The single-line sibling still runs through the normal rules.
+    expect(cmds.find((c) => c.command === "npm run typecheck")).toBeTruthy();
+  });
+
+  it("pushd/export/source-style blocks are non-runnable (no partial shell interpretation)", () => {
+    for (const block of [
+      "|\n  pushd packages/web\n  npm ci\n",
+      "|\n  export FOO=bar\n  npm ci\n",
+      "|\n  source scripts/env.sh\n  npm ci\n",
+      "|\n  set -e\n  npm ci\n  npm test\n",
+    ]) {
+      const cmds = build(block);
+      expect(cmds.some((c) => c.command.includes("npm ci")), block).toBe(false);
+    }
+  });
+
+  it("comments and blank lines do not make a single-command block multiline", () => {
+    const cmds = build("# install deps\n\nnpm ci\n");
+    expect(cmds.find((c) => c.command === "npm ci")).toBeTruthy();
+  });
+
+  it("single-line run values are unaffected by the policy", () => {
+    const cmds = build("npm ci");
+    expect(cmds.find((c) => c.command === "npm ci")).toBeTruthy();
+  });
+
+  it("multiline fail-closed exclusions are surfaced in analysis uncertainty (never silent)", async () => {
+    const { buildRepositoryAnalysisFromFiles } = await import("../src/core/codebase/extract.js");
+    const analysis = buildRepositoryAnalysisFromFiles(
+      {
+        url: "https://github.com/acme/fixture",
+        owner: "acme",
+        name: "fixture",
+        ref: "main",
+        languages: [],
+        ecosystems: [],
+        manifests: [],
+        structure: { sourceRoots: [], testRoots: [], exampleRoots: [], packages: [] },
+        entrypoints: [],
+        importantFiles: [],
+        instructions: [],
+        ciWorkflows: [],
+        fetched: [
+          {
+            path: ".github/workflows/ci.yml",
+            content: yamlStringify({
+              name: "ci",
+              on: "push",
+              jobs: {
+                b: {
+                  steps: [
+                    { run: "|\n  cd packages/web\n  npm ci\n" },
+                    { run: "npm ci", "working-directory": "${{ matrix.p }}" },
+                  ],
+                },
+              },
+            }),
+          },
+        ],
+        selection: { candidateCount: 1, selectedCount: 1, treeBlobCount: 1, treeTruncated: false },
+      },
+      [],
+    );
+    const u = analysis.uncertainty.join(" ");
+    expect(u).toContain("more than one command line");
+    expect(u).toContain("dynamic or non-string working-directory");
+    // And no command leaked from the excluded steps.
+    expect(analysis.commands).toEqual([]);
+  });
+});
+
+describe("Final-3 P1-2: root package-manager evidence cannot come from non-root CI cwd", () => {
+  it("a nested-cwd CI install step never evidences the root manager", async () => {
+    const { buildRepositoryAnalysisFromFiles } = await import("../src/core/codebase/extract.js");
+    const analysis = buildRepositoryAnalysisFromFiles(
+      {
+        url: "https://github.com/acme/fixture",
+        owner: "acme",
+        name: "fixture",
+        ref: "main",
+        languages: [],
+        ecosystems: [],
+        manifests: [],
+        structure: { sourceRoots: [], testRoots: [], exampleRoots: [], packages: [] },
+        entrypoints: [],
+        importantFiles: [],
+        instructions: [],
+        ciWorkflows: [],
+        fetched: [
+          {
+            // pnpm install runs under packages/web — it must NOT evidence pnpm
+            // for the repository root.
+            path: ".github/workflows/ci.yml",
+            content: yamlStringify({
+              name: "ci",
+              on: "push",
+              defaults: { run: { "working-directory": "packages/web" } },
+              jobs: { b: { steps: [{ run: "pnpm install --frozen-lockfile" }] } },
+            }),
+          },
+        ],
+        selection: { candidateCount: 1, selectedCount: 1, treeBlobCount: 1, treeTruncated: false },
+      },
+      [],
+    );
+    // No root manager evidence exists → no ROOT-scoped install command.
+    expect(analysis.commands.filter((c) => c.purpose === "install" && (c.cwd ?? "") === "")).toEqual([]);
+    expect(analysis.commands.some((c) => c.command === "pnpm install --frozen-lockfile")).toBe(false);
+    // The step is still documented with its own context (never misattributed).
+    expect(analysis.commands.find((c) => c.command === "cd packages/web && pnpm install --frozen-lockfile")).toBeTruthy();
+  });
+
+  it("a scoped analysis keeps root context: scope-relative CI cwd must match the scope exactly", async () => {
+    const { buildRepositoryAnalysisFromFiles } = await import("../src/core/codebase/extract.js");
+    const base = {
+      url: "https://github.com/acme/fixture",
+      owner: "acme",
+      name: "fixture",
+      ref: "main",
+      scope: "packages/web",
+      languages: [] as never[],
+      ecosystems: [] as string[],
+      manifests: [] as never[],
+      structure: { sourceRoots: [], testRoots: [], exampleRoots: [], packages: [] },
+      entrypoints: [],
+      importantFiles: [],
+      instructions: [] as string[],
+      ciWorkflows: [] as string[],
+      selection: { candidateCount: 1, selectedCount: 1, treeBlobCount: 1, treeTruncated: false },
+    };
+    // Working-directory "packages/web" IS the analysis root (the scope).
+    const inScope = buildRepositoryAnalysisFromFiles(
+      {
+        ...base,
+        fetched: [
+          { path: ".github/workflows/ci.yml", content: yamlStringify({ name: "ci", on: "push", jobs: { b: { steps: [{ run: "pnpm install --frozen-lockfile", "working-directory": "packages/web" }] } } }) },
+        ],
+      },
+      [],
+    );
+    // The scoped analysis root is packages/web: a working-directory naming
+    // the scope itself IS root-scoped evidence (cwd == scope), rendered with
+    // its repository-root-relative cd prefix.
+    const inScopeInstall = inScope.commands.find((c) => c.purpose === "install");
+    expect(inScopeInstall?.cwd).toBe("packages/web");
+    expect(inScopeInstall?.command).toBe("cd packages/web && pnpm install --frozen-lockfile");
+    // A repository-root cwd ("") is NOT the scoped analysis root — fail closed.
+    const repoRootCwd = buildRepositoryAnalysisFromFiles(
+      {
+        ...base,
+        fetched: [
+          { path: ".github/workflows/ci.yml", content: yamlStringify({ name: "ci", on: "push", jobs: { b: { steps: [{ run: "pnpm install --frozen-lockfile" }] } } }) },
+        ],
+      },
+      [],
+    );
+    const repoRootCwdInstall = repoRootCwd.commands.find((c) => c.purpose === "install");
+    // cwd "" is the repository root — NOT the analysis root of the scoped
+    // request, so it must not be treated as root-scoped evidence (fail closed).
+    expect(repoRootCwdInstall?.cwd).toBe("");
+    // Rendered without a cd prefix (it executes at the repository root), but
+    // its cwd ("") proves it is NOT the scoped analysis root's evidence.
+    expect(repoRootCwdInstall?.command).toBe("pnpm install --frozen-lockfile");
+    expect(repoRootCwd.commands.some((c) => c.cwd === "packages/web" && c.purpose === "install")).toBe(false);
+    // Working-directory "packages/api" is NOT the analysis root.
+    const otherDir = buildRepositoryAnalysisFromFiles(
+      {
+        ...base,
+        fetched: [
+          { path: ".github/workflows/ci.yml", content: yamlStringify({ name: "ci", on: "push", jobs: { b: { steps: [{ run: "pnpm install --frozen-lockfile", "working-directory": "packages/api" }] } } }) },
+        ],
+      },
+      [],
+    );
+    // packages/api ≠ the analysis root → no ROOT-scoped install evidence
+    // (the step stays documented under its own packages/api context).
+    expect(otherDir.commands.filter((c) => c.purpose === "install" && c.cwd === "packages/web")).toEqual([]);
+    expect(otherDir.commands.find((c) => c.purpose === "install")?.cwd).toBe("packages/api");
+  });
+});

@@ -234,13 +234,16 @@ export type YarnGeneration = 1 | 2;
  * bun have plain forms. CI-observed install commands are always preferred. */
 export function syntheticInstallCommand(
   packageManager: { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration; lockfilePresent: boolean } | null,
+  rootManifestDir = "",
 ): RepositoryCommand | null {
   if (!packageManager) return null;
   const mk = (command: string, evidence: string): RepositoryCommand => ({
     purpose: "install",
     command,
     evidence,
-    cwd: "",
+    // The manager's install form runs from the analysis root's directory —
+    // which, in repository-root coordinates, is the scope itself.
+    cwd: rootManifestDir,
     synthesized: true,
   });
   const pm = packageManager.name;
@@ -513,11 +516,10 @@ function workspaceInvocationArgv(
       // `run <script>` together: npm run <key> --workspace <name>.
       return { argv: ["npm", "run", key, "--workspace", workspaceName], contextEvidence: `workspace ${workspaceName} (npm --workspace)` };
     case "bun": {
-      // --cwd is grounded relative to the analysis root (the dir an agent
-      // operates in); use the canonical root-relative form. Out-of-scope
-      // manifests (relative to a scoped analysis root) never participate.
-      const rel = pathRelativeToAnalysisRoot(manifestPath, rootManifestPath);
-      if (rel === null || rel === "") return null;
+      // --cwd uses the manifest's own repository-root-relative directory (the
+      // same cwd frame CI working-directory values use); out-of-scope
+      // manifests never participate.
+      const rel = manifestDir;
       if (!isPositionalSafeValue(rel)) return null; // unsafe path — omit
       return { argv: ["bun", "--cwd", rel, ...base.slice(1)], contextEvidence: `${rel}/ (bun --cwd)` };
     }
@@ -573,6 +575,7 @@ export function commandsFromPackageJson(
         // need a grounded workspace selector. Untrusted values (script name,
         // workspace name) are whole argv tokens or the command is omitted.
         const isRootManifest = file.path === rootManifestPath;
+        const manifestDir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
         const ws = isRootManifest
           ? null
           : workspaceInvocationArgv(packageManager?.name ?? "npm", key, file.path, workspaces, rootManifestPath);
@@ -588,7 +591,10 @@ export function commandsFromPackageJson(
               purpose,
               command,
               evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"${ws ? ` (${ws.contextEvidence})` : ""}`,
-              cwd: "",
+              // Repository-root-relative execution directory: the manifest's
+              // own directory ("" = repository root). Selector forms run from
+              // the workspace root; bun --cwd names the manifest directory.
+              cwd: isRootManifest ? (rootManifestPath.includes("/") ? rootManifestPath.slice(0, rootManifestPath.lastIndexOf("/")) : "") : manifestDir,
               synthesized: true,
             });
             continue;
@@ -685,102 +691,129 @@ export interface CiRunStep {
   line: number;
 }
 
-/** GitHub Actions defaults.run.working-directory lookup: job-level overrides
- * workflow-level. Returns "" (root) or a concrete string; anything else is
- * dynamic/unsupported. */
-function effectiveDefaults(node: unknown): string | undefined {
-  if (node === null || typeof node !== "object" || Array.isArray(node)) return "";
-  // Structure: defaults.run["working-directory"] (GitHub Actions schema).
-  const defaults = (node as Record<string, unknown>).defaults as Record<string, unknown> | undefined;
-  const run = defaults !== null && typeof defaults === "object" ? (defaults as Record<string, unknown>).run as Record<string, unknown> | undefined : undefined;
-  const wd = run !== null && typeof run === "object" ? run["working-directory"] : undefined;
-  if (wd === undefined) return "";
-  if (typeof wd !== "string") return undefined;
-  if (wd.includes("${{")) return undefined;
-  return wd.replace(/\/+$/, "");
-}
+/** GitHub Actions `defaults.run.working-directory` state (final remediation
+ * P1-2): "absent" (nothing declared → consider the next level), a concrete
+ * string, or "unknown" (dynamic `${{ … }}` / non-string — the effective
+ * directory is unknowable and must NOT inherit). Absence and unknown are
+ * distinct states. */
+type WdDefault = { state: "absent" } | { state: "concrete"; value: string } | { state: "unknown" };
 
-/** Step-level working-directory resolution, three-state (final remediation
- * P1-2): "absent" (inherit defaults), a concrete string, or "unknown"
- * (dynamic `${{ … }}` / non-string — the step is non-runnable and must NOT
- * inherit defaults). */
-type StepWorkingDirectory = { state: "absent" } | { state: "concrete"; value: string } | { state: "unknown" };
-
-function stepWorkingDirectory(step: Record<string, unknown>): StepWorkingDirectory {
-  const wd = step.workingDirectory ?? step["working-directory"];
+function defaultsWorkingDirectory(node: unknown): WdDefault {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return { state: "absent" };
+  const defaults = (node as Record<string, unknown>).defaults;
+  if (defaults === null || typeof defaults !== "object" || Array.isArray(defaults)) return { state: "absent" };
+  const run = (defaults as Record<string, unknown>).run;
+  if (run === null || typeof run !== "object" || Array.isArray(run)) return { state: "absent" };
+  const wd = (run as Record<string, unknown>)["working-directory"];
   if (wd === undefined) return { state: "absent" };
-  if (typeof wd !== "string") return { state: "unknown" };
-  if (wd.includes("${{")) return { state: "unknown" };
+  if (typeof wd !== "string" || wd.includes("${{")) return { state: "unknown" };
   return { state: "concrete", value: wd.replace(/\/+$/, "") };
 }
 
-/** Deterministic container for one CI run line. */
-function pushRunLines(
-  out: CiRunStep[],
-  raw: string,
-  cwd: string | undefined,
-  file: string,
-  line: number,
-): void {
-  for (const rawLine of raw.split("\n")) {
-    const trimmed = rawLine.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.startsWith("echo ")) continue;
-    out.push({ command: trimmed, cwd, file, line });
+/** Step-level working-directory, three-state (final remediation P1-2): a
+ * dynamic `${{ … }}` or non-string value is UNKNOWN — the step is
+ * non-runnable and must NOT inherit job/workflow defaults. */
+function stepWorkingDirectory(step: Record<string, unknown>): WdDefault {
+  const wd = step.workingDirectory ?? step["working-directory"];
+  if (wd === undefined) return { state: "absent" };
+  if (typeof wd !== "string" || wd.includes("${{")) return { state: "unknown" };
+  return { state: "concrete", value: wd.replace(/\/+$/, "") };
+}
+
+/**
+ * Effective execution-directory resolution (final remediation P1-2): step
+ * concrete > job concrete > workflow concrete > analysis root (""). An
+ * unknown value at ANY level makes the result unknown and never falls back to
+ * a lower-precedence level: a dynamic job default must not inherit the
+ * workflow default, and a dynamic workflow default must not become the root.
+ */
+function resolveStepCwd(step: WdDefault, job: WdDefault, workflow: WdDefault): string | undefined {
+  for (const level of [step, job, workflow]) {
+    if (level.state === "concrete") return level.value;
+    if (level.state === "unknown") return undefined;
   }
+  return "";
+}
+
+/**
+ * P1-2 fail-closed run-value policy. GitHub Actions executes a `run:` value
+ * as ONE shell process, so a block with multiple command lines cannot have
+ * its execution context reconstructed line-by-line (`cd`, `pushd`, `export`,
+ * `source` all change state for later lines). Policy: a run value yields a
+ * runnable command only when it contains exactly ONE non-empty, non-comment
+ * line — provably identical execution semantics to a single-line `run:`.
+ * Any other block is non-runnable evidence (counted in telemetry and
+ * surfaced as analysis uncertainty, never guessed at).
+ */
+function singleCommandRunValue(raw: string): string | null {
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"));
+  return lines.length === 1 ? lines[0]! : null;
+}
+
+/** Skipped-step accounting surfaced honestly through analysis uncertainty. */
+export interface CiExtractionTelemetry {
+  /** `run:` blocks that are not provably a single command (fail-closed). */
+  nonRunnableRunBlocks: number;
+  /** Steps whose effective cwd is dynamic/non-string (non-runnable). */
+  unknownCwdSteps: number;
+  /** Steps whose concrete cwd cannot be embedded unambiguously (P1-1). */
+  unsafeCwdSteps: number;
 }
 
 /**
  * Collect run steps with their execution context. Deterministic direct walk:
- * top-level steps (composite workflows) + jobs[].steps, resolving each step's
- * cwd as step-level working-directory ?? job defaults ?? workflow defaults.
- * Dynamic `${{ ... }}` or non-string cwds make the step non-runnable.
+ * top-level steps (composite workflow actions) + jobs[].steps, resolving each
+ * step's cwd through the tri-state chain. Multiline run blocks and
+ * unknown/unsafe execution contexts never become runnable steps.
  */
-function collectRunSteps(node: unknown, out: CiRunStep[], file: string, workflowDefaults: string | undefined): void {
+function collectRunSteps(node: unknown, out: CiRunStep[], telemetry: CiExtractionTelemetry, file: string, workflowWd: WdDefault): void {
   if (out.length >= 30) return;
   if (node === null || typeof node !== "object" || Array.isArray(node)) return;
   const root = node as Record<string, unknown>;
 
-  const collectSteps = (steps: unknown, defaults: string): void => {
+  const collectSteps = (steps: unknown, jobWd: WdDefault): void => {
     if (!Array.isArray(steps)) return;
     for (const step of steps) {
       if (out.length >= 30) return;
       if (step === null || typeof step !== "object" || Array.isArray(step)) continue;
       const s = step as Record<string, unknown>;
       if (typeof s.run !== "string") continue;
-      const stepWd = stepWorkingDirectory(s);
-      // Precedence: step-level > job/workflow defaults; an unknown step cwd
-      // (dynamic/non-string) stays unknown — never inherit.
-      const cwd =
-        stepWd.state === "concrete"
-          ? stepWd.value
-          : stepWd.state === "unknown"
-            ? undefined
-            : defaults;
-      pushRunLines(out, s.run, cwd, file, 0);
+      if (s.run.trim().length === 0) continue;
+      const runText = singleCommandRunValue(s.run);
+      if (runText === null) {
+        telemetry.nonRunnableRunBlocks++;
+        continue;
+      }
+      if (runText.startsWith("#") || runText.startsWith("echo ")) continue;
+      const cwd = resolveStepCwd(stepWorkingDirectory(s), jobWd, workflowWd);
+      if (cwd === undefined) {
+        telemetry.unknownCwdSteps++;
+        continue;
+      }
+      if (cwd !== "" && !isPositionalSafeValue(cwd)) {
+        telemetry.unsafeCwdSteps++;
+        continue;
+      }
+      out.push({ command: runText, cwd, file, line: 0 });
     }
   };
 
-  // Top-level steps (composite workflow actions).
-  collectSteps(root.steps, workflowDefaults ?? "");
+  // Top-level steps (composite workflow actions): no job level.
+  collectSteps(root.steps, { state: "absent" });
 
-  // Jobs: job-level defaults.run.working-directory override workflow-level.
+  // Jobs: job-level defaults.run.working-directory overrides workflow-level;
+  // an unknown job default stays unknown (never inherits the workflow value).
   const jobs = root.jobs;
   if (jobs !== null && typeof jobs === "object" && !Array.isArray(jobs)) {
     for (const job of Object.values(jobs as Record<string, unknown>)) {
       if (out.length >= 30) return;
       if (job === null || typeof job !== "object" || Array.isArray(job)) continue;
-      const jobDefaults = effectiveDefaults(job);
-      // effectiveDefaults returns "" for absent defaults, undefined for
-      // dynamic/non-string — resolve the effective chain explicitly.
-      const defaults = jobDefaults === "" ? (workflowDefaults ?? "") : jobDefaults === undefined ? undefined : jobDefaults;
-      collectSteps((job as Record<string, unknown>).steps, defaults ?? workflowDefaults ?? "");
+      collectSteps((job as Record<string, unknown>).steps, defaultsWorkingDirectory(job));
     }
   }
-}
-
-/** Extract workflow-level defaults.run.working-directory from the raw doc. */
-function workflowLevelDefaults(doc: unknown): string | undefined {
-  return effectiveDefaults(doc);
 }
 
 const CI_COMMAND_RULES: Array<[RegExp, RepositoryCommand["purpose"]]> = [
@@ -792,18 +825,21 @@ const CI_COMMAND_RULES: Array<[RegExp, RepositoryCommand["purpose"]]> = [
   [/(prettier|cargo fmt|gofmt|black|ruff format)/, "format"],
 ];
 
-/** Commands evidenced by CI workflow run steps (documentation only — SkillForge
- * never executes anything it reads). */
 /**
  * CI run steps → commands with preserved execution context (final remediation
- * P1-2). A concrete cwd renders the canonical `cd <dir> && <command>` form so
- * "npm ci at root" and "npm ci in packages/web" remain context-distinct; an
- * unknown/dynamic cwd keeps the command OUT of the runnable evidence (only
- * root-scoped commands may evidence root execution later, and uncertain cwd
- * must never become a runnable instruction).
+ * P1-2, telemetry-augmented). Only provably single-command steps with a
+ * concrete, safe cwd become runnable evidence; a concrete cwd renders the
+ * canonical `cd <dir> && <command>` form so "npm ci at root" and "npm ci in
+ * packages/web" remain context-distinct. The optional `telemetry` out-param
+ * records every step that was excluded fail-closed so the analysis can state
+ * the limitation honestly instead of silently dropping it.
  */
-export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand[] {
+export function commandsFromCiWorkflows(
+  files: FetchedFile[],
+  telemetry?: CiExtractionTelemetry,
+): RepositoryCommand[] {
   const commands: RepositoryCommand[] = [];
+  const tally: CiExtractionTelemetry = { nonRunnableRunBlocks: 0, unknownCwdSteps: 0, unsafeCwdSteps: 0 };
   for (const file of files) {
     if (!file.path.startsWith(".github/workflows/")) continue;
     let doc: unknown;
@@ -812,18 +848,11 @@ export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand
     } catch {
       continue; // malformed workflow degrades gracefully
     }
-    const wfDefaults = workflowLevelDefaults(doc);
+    const wfWd = defaultsWorkingDirectory(doc);
     const steps: CiRunStep[] = [];
-    collectRunSteps(doc, steps, file.path, wfDefaults);
+    collectRunSteps(doc, steps, tally, file.path, wfWd);
     for (const step of steps) {
       if (commands.length >= 30) break;
-      // Dynamic/unknown execution context: documented only, never runnable.
-      if (step.cwd === undefined) continue;
-      // Unsafe/ambiguous cwd (P1-1): a working-directory containing shell
-      // syntax, whitespace, or a leading dash must never be embedded into the
-      // synthesized `cd <cwd> && …` form — the command is omitted, never
-      // quoted-and-hoped or rewritten.
-      if (step.cwd !== "" && !isPositionalSafeValue(step.cwd)) continue;
       const purpose = CI_COMMAND_RULES.find(([re]) => re.test(step.command))?.[1];
       if (!purpose) continue;
       const rendered = step.cwd === "" ? step.command : `cd ${step.cwd} && ${step.command}`;
@@ -831,12 +860,13 @@ export function commandsFromCiWorkflows(files: FetchedFile[]): RepositoryCommand
         purpose,
         command: rendered,
         evidence: `${step.file} (CI run step${step.cwd === "" ? "" : `, working-directory: ${step.cwd}`})`,
-        // The command TEXT is directly observed; only the cwd prefix (when
+        // The command TEXT is directly observed; only the cd prefix (when
         // present) was synthesized from the workflow's own declared context.
         cwd: step.cwd,
       });
     }
   }
+  if (telemetry) Object.assign(telemetry, tally);
   return commands;
 }
 
@@ -1059,14 +1089,6 @@ export function buildRepositoryAnalysisFromFiles(
   input: AnalysisFromFilesInput,
   uncertainty: string[],
 ): RepositoryAnalysis {
-  // Package-manager evidence: CI install steps first (they may name the
-  // runner), then the PATH-AWARE tree lockfiles (only lockfiles in the
-  // analyzed root's own directory count — final remediation P1-2B) + the
-  // analysis-root package.json's packageManager field.
-  const ciCommandsRaw = commandsFromCiWorkflows(input.fetched);
-  const ciInstallCommands = ciCommandsRaw
-    .filter((c) => c.purpose === "install")
-    .map((c) => c.command);
   const rootManifestPath = input.scope ? `${input.scope}/package.json` : "package.json";
   const rootManifestDir = input.scope ?? "";
   // EXACT analysis-root manifest only (final remediation P1-1): a nested
@@ -1078,13 +1100,18 @@ export function buildRepositoryAnalysisFromFiles(
   const treeLockfiles: TreeLockfile[] = (input.treeLockfiles ?? [])
     .map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() }))
     .filter((l) => MANAGER_LOCKFILES.some(([b]) => b === l.basename));
-  // CI evidence is root-scoped only when the step's resolved working-directory
-  // is the analysis root ("" or the scope itself); CI steps inside nested
-  // directories document their own context and never become root evidence.
+  // CI extraction first (telemetry records every fail-closed exclusion).
+  const ciTelemetry: CiExtractionTelemetry = { nonRunnableRunBlocks: 0, unknownCwdSteps: 0, unsafeCwdSteps: 0 };
+  const ciCommandsRaw = commandsFromCiWorkflows(input.fetched, ciTelemetry);
+  // CI evidence is root-scoped ONLY when the step's structurally-resolved
+  // working-directory is exactly the analysis root ("" for a whole-repository
+  // analysis, the scope itself for scoped requests — working-directory values
+  // are repository-root-relative per GitHub semantics). Structural selection
+  // on the `cwd` field — never string matching on the rendered `cd …` form
+  // (final remediation P1-2).
+  const isRootScopedCi = (c: RepositoryCommand): boolean => c.cwd === rootManifestDir;
   const rootCiInstallCommands = ciCommandsRaw
-    .filter((c) => c.purpose === "install")
-    .filter((c) => c.evidence.includes("(CI run step)"))
-    .filter((c) => c.command.startsWith("cd ") === false) // rendered `cd X && …` = non-root cwd
+    .filter((c) => c.purpose === "install" && isRootScopedCi(c))
     .map((c) => c.command);
   const packageManager = detectPackageManager(treeLockfiles, rootCiInstallCommands, rootPackageJson, rootManifestDir);
   const workspaceNames = groundWorkspaceMembership({
@@ -1107,16 +1134,16 @@ export function buildRepositoryAnalysisFromFiles(
     depTesting.push(...py.testing);
   }
   // Install command precedence (P1-2): EXACT commands observed in inspected
-  // CI evidence first; only when CI shows no install step may the manager's
-  // deterministic install form be synthesized — and only when its
-  // prerequisites are provable (npm ci needs package-lock.json; Yarn needs a
-  // generation to pick its flag convention).
-  const installCommand =
-    ciInstallCommands.length > 0
-      ? ciCommandsRaw.find((c) => c.purpose === "install")!
-      : syntheticInstallCommand(packageManager);
+  // ROOT-SCOPED CI evidence first; only when root-scoped CI shows no install
+  // step may the manager's deterministic install form be synthesized — and
+  // only when its prerequisites are provable (npm ci needs
+  // package-lock.json; Yarn needs a generation to pick its flag convention).
+  // A CI install step in a nested directory (its cwd ≠ analysis root) must
+  // never become root install evidence.
+  const rootScopedCiInstall = ciCommandsRaw.find((c) => c.purpose === "install" && isRootScopedCi(c));
+  const installCommand = rootScopedCiInstall ?? syntheticInstallCommand(packageManager, rootManifestDir);
   const ciCommands = ciCommandsRaw.filter(
-    (c) => !(c.purpose === "install" && installCommand && c.command === installCommand.command),
+    (c) => !(c.purpose === "install" && installCommand && c.command === installCommand.command && c.evidence === installCommand.evidence),
   );
   // Manifest commands first (authoritative), then the evidenced install
   // command, then CI commands as corroboration.
@@ -1172,6 +1199,26 @@ export function buildRepositoryAnalysisFromFiles(
     });
   }
 
+  // Fail-closed CI exclusions are surfaced honestly (never silently dropped):
+  // multiline run blocks, dynamic-cwd steps, and unsafe-cwd steps are
+  // documented as non-runnable analysis limits (final remediation P1-2).
+  const ciLimits: string[] = [];
+  if (ciTelemetry.nonRunnableRunBlocks > 0) {
+    ciLimits.push(
+      `${ciTelemetry.nonRunnableRunBlocks} CI run block(s) contain more than one command line; SkillForge does not reconstruct shell state (cd/pushd/export) within a block, so those steps were treated as non-runnable documentation.`,
+    );
+  }
+  if (ciTelemetry.unknownCwdSteps > 0) {
+    ciLimits.push(
+      `${ciTelemetry.unknownCwdSteps} CI step(s) use a dynamic or non-string working-directory; their execution directory is unknown, so they were treated as non-runnable documentation.`,
+    );
+  }
+  if (ciTelemetry.unsafeCwdSteps > 0) {
+    ciLimits.push(
+      `${ciTelemetry.unsafeCwdSteps} CI step(s) declare a working-directory that cannot be represented unambiguously as a command argument; they were treated as non-runnable documentation.`,
+    );
+  }
+
   return {
     repository: {
       url: input.url,
@@ -1199,7 +1246,7 @@ export function buildRepositoryAnalysisFromFiles(
     },
     inspectedFiles: input.fetched.map((f) => f.path),
     selection: input.selection,
-    uncertainty: uncertainty.slice(0, 12),
+    uncertainty: [...ciLimits, ...uncertainty].slice(0, 12),
   };
 }
 
