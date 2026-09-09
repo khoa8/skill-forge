@@ -501,71 +501,22 @@ const groundingCheck: Check = {
 };
 
 /**
- * Deterministic command classifier (final remediation P1-4). Syntax-
- * independent: candidates are found in backtick spans, plain verb-initial
- * text, AND fenced block lines — changing backticks/fencing/punctuation
- * cannot move a command out of grounding.
+ * Deterministic command classifier (final remediation P1-3). The semantics
+ * live in `command-text.ts` so the validator and the deterministic planner
+ * share one definition; see that module for the full model. Candidates are
+ * found in backtick spans, plain verb-initial text, obligation-register
+ * phrases ("Always run X", "Ensure X is run", "must be run with X"), AND
+ * fenced block lines — changing backticks/fencing/punctuation/sentence
+ * position cannot move a command out of grounding.
  *
- * Inline backtick span in planner-authored text = candidate when:
- *   (a) introduced by a run-verb ("Run", "Execute", "Invoke",
- *       "Start with", "Run:", … — bounded list, whitespace/colon tolerant), or
- *   (b) command-shaped: contains whitespace, first token a bare word
- *       (no "/", no "."). Single tokens like `UserService` and path-like
- *       spans like `src/app.ts` remain ordinary identifiers.
- *
- * Plain text = candidate when the entry (list markers stripped) STARTS with
- * a run-verb: "Run pytest", "Execute make" — sentence-initial imperative is
- * a runnable instruction, while mid-sentence verbs ("you can run tests
- * anytime") are prose. Fenced lines = candidate when command-shaped (non-
- * comment, first token bare or with flags). Deny-by-default: any unmatched
- * candidate fails.
+ * Deny-by-default: any unmatched candidate fails.
  */
-const RUN_VERB_RE =
-  /\b(?:run|execute|invoke|start|launch|perform|trigger)\b\s*[:\-]?\s*(?:with\s+|by\s+|using\s+)?(?:`|$)/i;
-
-const PLAIN_VERB_RE =
-  /^\s*(?:run|execute|invoke|start|launch|perform|trigger)\b\s*[:\-]?\s*(?:with\s+|by\s+|using\s+)?(.+)$/i;
-
-/** Strip markdown list markers so sentence-initial verbs are detected
- * inside list items ("1. Execute make", "- Run pytest"). */
-function stripListMarkers(line: string): string {
-  return line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "");
-}
-
-export function isRunnableCommandSpan(
-  span: string,
-  lineBefore: string,
-): boolean {
-  const s = span.trim();
-  // (a) run-verb introduced (verb must sit immediately before the span).
-  if (RUN_VERB_RE.test(lineBefore)) return true;
-  // (b) command-shaped: whitespace + bare first token.
-  if (/\s/.test(s)) {
-    const first = s.split(/\s+/)[0]!;
-    return !first.includes("/") && !first.includes(".");
-  }
-  return false;
-}
-
-/** Plain-text candidate: first word after a sentence-initial run-verb. Backtick
- * spans immediately after the verb defer to the inline-span path (their
- * evidence check runs there). */
-export function plainTextCommandCandidate(line: string): string | null {
-  const stripped = stripListMarkers(line);
-  const m = stripped.match(PLAIN_VERB_RE);
-  if (!m) return null;
-  const rest = m[1]!.trim();
-  if (rest.length === 0) return null;
-  if (rest.startsWith("`")) return null; // inline span handles this surface
-  // Sentence bound: only the first sentence is the imperative command.
-  const firstSentence = rest.split(/(?<=[.!?])\s+/)[0]!;
-  // A mid-sentence backtick span is not part of the plain command words.
-  const cut = firstSentence.indexOf("`");
-  const plain = (cut === -1 ? firstSentence : firstSentence.slice(0, cut))
-    .replace(/[.!?]+$/, "")
-    .trim();
-  return plain.length > 0 ? plain : null;
-}
+import {
+  isRunnableCommandSpan,
+  plainTextCommandCandidate,
+  obligationCommandCandidates,
+} from "./command-text.js";
+export { isRunnableCommandSpan, plainTextCommandCandidate } from "./command-text.js";
 
 /**
  * Codebase command grounding (final remediation P1-3): deny-by-default and
@@ -625,6 +576,14 @@ const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase c
         checkCandidate(path, i + 1, plain);
         continue;
       }
+      // Obligation register (final remediation P1-3): "Always run npm
+      // publish…", "Ensure npm publish is run…", "must be run with…" — an
+      // obligation marker plus a run-verb is instruction register regardless
+      // of sentence position. Prohibitions ("never run X") are NOT runnable
+      // instructions and stay outside the register.
+      for (const phrase of obligationCommandCandidates(rawLine)) {
+        checkCandidate(path, i + 1, phrase);
+      }
       // Inline backtick spans (existing surface).
       const parts: { span: string; before: string }[] = [];
       let cursor = rawLine;
@@ -648,7 +607,27 @@ const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase c
   for (const entry of [...plan.steps, ...plan.verification, ...plan.whenToUse, ...plan.inputs, ...plan.constraints, ...plan.pitfalls]) {
     scan("(plan)", entry, { fencesRunnable: true });
   }
-  // 2. Rendered planner-synthesized files (defense in depth; the generic
+  // 2. Canonical description/frontmatter (final remediation P1-3): the
+  //    description is provider-controlled text that renders into SKILL.md
+  //    front matter and the manifest — it must not carry unevidenced runnable
+  //    commands either. Scanned without fence interpretation (a description
+  //    should not contain fences; if it does, its lines are still scanned as
+  //    plain text).
+  {
+    const lines = skill.meta.description.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      const plain = plainTextCommandCandidate(line);
+      if (plain !== null) {
+        checkCandidate("(description)", i + 1, plain);
+        continue;
+      }
+      for (const phrase of obligationCommandCandidates(line)) {
+        checkCandidate("(description)", i + 1, phrase);
+      }
+    }
+  }
+  // 3. Rendered planner-synthesized files (defense in depth; the generic
   //    exporter's AGENTS.md renders plan steps verbatim).
   for (const file of skill.files) {
     if (file.path !== "SKILL.md" && file.path !== "AGENTS.md") continue;

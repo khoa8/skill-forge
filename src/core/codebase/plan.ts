@@ -12,6 +12,7 @@ import type { RepositoryAnalysis, RepositoryCommand } from "../types.js";
 import type { SkillPlan } from "../plan.js";
 import { slugify } from "../util.js";
 import { dedupe } from "../build.js";
+import { conventionStatementIsGrounded, evidencedCommandSet } from "../command-text.js";
 
 /** Short evidence label: `package.json scripts.test = "vitest run"` →
  * `package.json scripts.test`. */
@@ -118,7 +119,20 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
   }
 
   // --- constraints (repository conventions, verbatim statements)
-  const constraints = conventions.slice(0, 12).map((c) => c.statement);
+  //
+  // Command-grounding trust boundary (final remediation P1-3): a repository
+  // convention is repository POLICY text, never an independent source of
+  // runnable-command authority. A statement containing a runnable-command
+  // phrase is promoted ONLY when every phrase exactly matches an
+  // already-grounded RepositoryCommand (linked evidence); otherwise the
+  // statement is omitted from the plan — it remains visible in the
+  // analysis record with its `path:line` provenance, and the omission is
+  // not silently convertible into a new runnable instruction. With an empty
+  // evidenced command set this denies every command-bearing convention.
+  const grounded = conventionStatementIsGrounded;
+  const evidenced = evidencedCommandSet(commands);
+  const promotableConventions = conventions.filter((c) => grounded(c.statement, evidenced));
+  const constraints = promotableConventions.slice(0, 12).map((c) => c.statement);
 
   // --- verification (evidenced test/typecheck/lint/build commands)
   const verification: string[] = [];
@@ -130,7 +144,7 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
 
   // --- pitfalls: warning-shaped conventions + honest uncertainty
   const pitfalls: string[] = [];
-  for (const c of conventions) {
+  for (const c of promotableConventions) {
     if (WARNINGISH.test(c.statement) && pitfalls.length < 6) pitfalls.push(c.statement);
   }
   for (const u of repo.uncertainty.slice(0, 4)) {

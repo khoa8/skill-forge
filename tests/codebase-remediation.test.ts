@@ -2955,3 +2955,158 @@ describe("Final-3 P1-2: root package-manager evidence cannot come from non-root 
     expect(otherDir.commands.find((c) => c.purpose === "install")?.cwd).toBe("packages/api");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-3 remediation P1-3 — convention prose cannot create runnable-command
+// authority; validator scans every planner-controlled surface
+// ---------------------------------------------------------------------------
+
+import { obligationCommandCandidates, conventionStatementIsGrounded } from "../src/core/command-text.js";
+
+describe("Final-3 P1-3: convention command bypass closed (planner)", () => {
+  const OBLIGATION_PROSE = [
+    "Always run npm publish before committing.",
+    "Before pushing, run npm publish.",
+    "You must run npm publish.",
+    "Make sure to run npm publish.",
+    "Ensure npm publish is run before release.",
+    "Tests must be run with npm publish.",
+    "Execute npm publish.",
+    "Run npm publish.",
+  ];
+
+  function planWithConvention(statement: string, commands: { command: string }[] = []) {
+    const analysis = buildRepositoryAnalysisFromCommandsFixture({
+      packageJson: JSON.stringify({ name: "x", scripts: { test: "vitest run" } }),
+      treeLockfiles: ["package-lock.json"],
+    });
+    const withConventions = {
+      ...analysis,
+      commands: commands as never,
+      conventions: [{ statement, evidence: ["AGENTS.md:1"] }],
+    };
+    const plan = PlanSchema.parse(deriveCodebasePlan(withConventions));
+    return { plan, analysis };
+  }
+
+  it("empty command set: command-bearing conventions are omitted from the plan entirely", () => {
+    for (const statement of OBLIGATION_PROSE) {
+      const { plan } = planWithConvention(statement);
+      const all = [...plan.constraints, ...plan.pitfalls, ...plan.steps, ...plan.whenToUse, ...plan.verification].join(" || ");
+      expect(all.includes("npm publish"), `${statement} must not be promoted`).toBe(false);
+    }
+  });
+
+  it("empty command set via repositoryCommands=[]: validator fails every obligation-register rendering", () => {
+    for (const statement of OBLIGATION_PROSE) {
+      const analysis = emptyRepo();
+      const { normalized, skill } = skillForCommands(analysis, (p) => {
+        p.constraints = [statement];
+      });
+      const report = validatePackage({
+        skill,
+        sourceText: normalized.text,
+        sourceType: "github-codebase",
+        repositoryCommands: [],
+      });
+      expect(report.passed, statement).toBe(false);
+      expect(report.checks.some((c) => c.id === "codebase-command-grounding" && c.status === "fail"), statement).toBe(true);
+    }
+  });
+
+  it("backticked obligation prose fails the same way", () => {
+    for (const statement of [
+      "Always run `npm publish` before committing.",
+      "Use `npm publish` before release.",
+    ]) {
+      const { normalized, skill } = skillForCommands(emptyRepo(), (p) => {
+        p.constraints = [statement];
+      });
+      const report = validatePackage({ skill, sourceText: normalized.text, sourceType: "github-codebase", repositoryCommands: [] });
+      expect(report.passed, statement).toBe(false);
+    }
+  });
+
+  it("description/frontmatter carrying command prose fails validation", () => {
+    const analysis = emptyRepo();
+    const { normalized, skill } = skillForCommands(analysis, () => {});
+    // The canonical description surface is skill.meta.description, which is
+    // rendered into the SKILL.md front matter (and mirrored into the
+    // manifest). Patch both, as a hostile provider output would.
+    skill.meta.description = "Use this skill to run npm publish before release.";
+    const skillMd = skill.files.find((f) => f.path === "SKILL.md")!;
+    skillMd.content = skillMd.content.replace(
+      /^description: .*$/m,
+      'description: "Use this skill to run npm publish before release."',
+    );
+    const report = validatePackage({ skill, sourceText: normalized.text, sourceType: "github-codebase", repositoryCommands: [] });
+    expect(report.passed).toBe(false);
+    const grounding = report.checks.filter((c) => c.id === "codebase-command-grounding" && c.status === "fail");
+    expect(grounding.length).toBeGreaterThanOrEqual(1);
+    // Both the canonical metadata and the rendered front matter are caught.
+    expect(grounding.some((c) => c.filePath === "(description)")).toBe(true);
+    expect(grounding.some((c) => c.filePath === "SKILL.md")).toBe(true);
+  });
+
+  it("a convention linked to an EXACT evidenced command is promoted (option 2)", () => {
+    const statement = "Always run `npm test` before pushing changes.";
+    const { plan } = planWithConvention(statement, [
+      { purpose: "test", command: "npm test", evidence: 'package.json scripts.test = "vitest run"', cwd: "", synthesized: true },
+    ]);
+    expect(plan.constraints).toContain(statement);
+  });
+
+  it("legitimate non-command prose stays a false-positive-free convention", () => {
+    for (const statement of [
+      "Always run tests before pushing.",
+      "Ensure TypeScript passes before merging.",
+      "Make sure the CI pipeline is green before merging.",
+      "Never commit secrets to the repository.",
+      "Use pnpm for package scripts; never npm.",
+      "Do not edit generated files; they are rebuilt on release.",
+    ]) {
+      const { plan } = planWithConvention(statement);
+      expect(plan.constraints, statement).toContain(statement);
+    }
+  });
+
+  it("harmless backticked identifiers/paths never become candidates", () => {
+    for (const statement of [
+      "Always update `package.json` before releasing.",
+      "Use the `UserService` from `src/core/` when adding features.",
+      "Run `npm test` before pushing changes.",
+    ]) {
+      const { plan } = planWithConvention(statement, [
+        { purpose: "test", command: "npm test", evidence: 'package.json scripts.test = "vitest run"', cwd: "", synthesized: true },
+      ]);
+      expect(plan.constraints, statement).toContain(statement);
+    }
+  });
+
+  it("obligationCommandCandidates is the bounded shared classifier", () => {
+    // Active/instrumental/passive voices capture the exact phrase.
+    expect(obligationCommandCandidates("Always run npm publish before committing.")).toEqual(["npm publish"]);
+    expect(obligationCommandCandidates("Tests must be run with npm publish.")).toEqual(["npm publish"]);
+    expect(obligationCommandCandidates("Ensure npm publish is run before release.")).toEqual(["npm publish"]);
+    // Prohibitions are NOT runnable instructions.
+    expect(obligationCommandCandidates("Never run npm publish on Fridays.")).toEqual([]);
+    expect(obligationCommandCandidates("Do not run the migration twice.")).toEqual([]);
+    // Generic-noun prose stays prose (multi-token requirement).
+    expect(obligationCommandCandidates("Always run tests before pushing.")).toEqual([]);
+    // No obligation marker / no run verb → nothing.
+    expect(obligationCommandCandidates("The pipeline is green.")).toEqual([]);
+    // Backticks defer to the inline-span path.
+    expect(obligationCommandCandidates("Always run `npm test` now.")).toEqual([]);
+  });
+
+  it("conventionStatementIsGrounded requires EVERY phrase to match evidence exactly", () => {
+    const evidenced = new Set(["npm test"]);
+    expect(conventionStatementIsGrounded("Always run `npm test` before pushing.", evidenced)).toBe(true);
+    expect(conventionStatementIsGrounded("Always run tests before pushing.", evidenced)).toBe(true);
+    expect(conventionStatementIsGrounded("Always run `npm publish` first.", evidenced)).toBe(false);
+    expect(conventionStatementIsGrounded("Run `npm test`; run `npm publish` after.", evidenced)).toBe(false);
+    // Empty evidence denies everything command-bearing.
+    expect(conventionStatementIsGrounded("Run `npm test`.", new Set())).toBe(false);
+    expect(conventionStatementIsGrounded("Plain prose without commands.", new Set())).toBe(true);
+  });
+});
