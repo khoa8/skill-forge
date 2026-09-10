@@ -110,11 +110,12 @@ export function commandsFromPackageJson(
   files: FetchedFile[],
   _packageManager?: unknown,
   _context?: unknown,
-): { commands: RepositoryPackageScript[]; frameworks: RepositoryClaim[]; testing: string[] } {
+): { commands: RepositoryPackageScript[]; frameworks: RepositoryClaim[]; testing: string[]; omittedCount: number } {
   const commands: RepositoryPackageScript[] = [];
   const frameworkClaims: RepositoryClaim[] = [];
   const testingFrameworks = new Set<string>();
   const frameworkEvidence = new Map<string, string[]>();
+  let omittedCount = 0;
 
   for (const file of files) {
     if ((file.path.split("/").pop() ?? "").toLowerCase() !== "package.json") continue;
@@ -127,14 +128,27 @@ export function commandsFromPackageJson(
     const scripts = raw.scripts;
     if (scripts !== null && typeof scripts === "object" && !Array.isArray(scripts)) {
       for (const [key, value] of Object.entries(scripts as Record<string, unknown>)) {
-        if (typeof value !== "string" || value.trim().length === 0) continue;
-        const name = key.trim().slice(0, 120);
-        if (name.length === 0) continue;
-        const command = value.trim().slice(0, 300);
-        if (command.length === 0) continue;
+        if (typeof value !== "string") continue;
+        const name = key.trim();
+        const command = value.trim();
+        if (name.length === 0 || command.length === 0) continue;
+
+        // Bounded metadata limits: omit oversized facts rather than silently mutating them
+        if (name.length > 120 || command.length > 300) {
+          omittedCount++;
+          continue;
+        }
+
+        const fullEv = `${file.path} scripts.${name} = "${command}"`;
+        const compactEv = `${file.path} scripts.${name}`;
+        const evidence = fullEv.length <= 300 ? fullEv : compactEv;
+        if (evidence.length > 300) {
+          omittedCount++;
+          continue;
+        }
+
         if (commands.length >= 30) break;
         const purpose = scriptPurpose(key);
-        const evidence = `${file.path} scripts.${key} = "${value.slice(0, 120)}"`.slice(0, 300);
         commands.push({
           kind: "package-script",
           purpose,
@@ -169,6 +183,7 @@ export function commandsFromPackageJson(
     commands: commands.slice(0, 30),
     frameworks: frameworkClaims.slice(0, 16),
     testing: [...testingFrameworks].sort(),
+    omittedCount,
   };
 }
 
@@ -333,8 +348,10 @@ const CI_COMMAND_RULES: Array<[RegExp, RepositoryCommand["purpose"]]> = [
 export function commandsFromCiWorkflows(
   files: FetchedFile[],
   _telemetry?: unknown,
-): RepositoryCiRun[] {
+): RepositoryCiRun[] & { omittedCount?: number } {
   const commands: RepositoryCiRun[] = [];
+  let omittedCount = 0;
+
   for (const file of files) {
     if (!file.path.startsWith(".github/workflows/")) continue;
     let doc: unknown;
@@ -348,11 +365,27 @@ export function commandsFromCiWorkflows(
     collectRunSteps(doc, steps, file.path, wfWd);
     for (const step of steps) {
       if (commands.length >= 30) break;
-      const cmdText = step.command.trim().slice(0, 300);
+      const cmdText = step.command.trim();
       if (cmdText.length === 0) continue;
+
+      // Bounded metadata limits: omit oversized facts rather than silently mutating them
+      if (cmdText.length > 300) {
+        omittedCount++;
+        continue;
+      }
+      if (step.cwd && step.cwd.trim().length > 300) {
+        omittedCount++;
+        continue;
+      }
+
+      const cwd = step.cwd ? step.cwd.trim() : undefined;
+      const evidence = `${step.file} (CI run step${cwd ? `, working-directory: ${cwd}` : ""})`;
+      if (evidence.length > 300) {
+        omittedCount++;
+        continue;
+      }
+
       const purpose = CI_COMMAND_RULES.find(([re]) => re.test(step.command))?.[1] ?? "other";
-      const cwd = step.cwd ? step.cwd.trim().slice(0, 300) : undefined;
-      const evidence = `${step.file} (CI run step${cwd ? `, working-directory: ${cwd}` : ""})`.slice(0, 300);
       commands.push({
         kind: "ci-run",
         purpose,
@@ -362,7 +395,14 @@ export function commandsFromCiWorkflows(
       });
     }
   }
-  return commands;
+
+  Object.defineProperty(commands, "omittedCount", {
+    value: omittedCount,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return commands as RepositoryCiRun[] & { omittedCount?: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -529,9 +569,13 @@ export function buildRepositoryAnalysisFromFiles(
   uncertainty: string[],
 ): RepositoryAnalysis {
   const ciCommandsRaw = commandsFromCiWorkflows(input.fetched);
-  const { commands: scriptCommands, frameworks: depFrameworks, testing: depTesting } = commandsFromPackageJson(
-    input.fetched,
-  );
+  const omittedCiCount = ciCommandsRaw.omittedCount ?? 0;
+  const {
+    commands: scriptCommands,
+    frameworks: depFrameworks,
+    testing: depTesting,
+    omittedCount: omittedScriptsCount = 0,
+  } = commandsFromPackageJson(input.fetched);
 
   // Python ecosystem evidence (pyproject.toml has no scripts; frameworks only).
   let pyFrameworks: RepositoryClaim[] = [];
@@ -589,6 +633,24 @@ export function buildRepositoryAnalysisFromFiles(
     });
   }
 
+  const omissionNotes: string[] = [];
+  if (omittedScriptsCount > 0) {
+    const s = omittedScriptsCount === 1 ? "" : "s";
+    const wasWere = omittedScriptsCount === 1 ? "was" : "were";
+    const itsTheir = omittedScriptsCount === 1 ? "its" : "their";
+    omissionNotes.push(
+      `${omittedScriptsCount} package script fact${s} ${wasWere} omitted because ${itsTheir} name or command exceeded the supported metadata length.`,
+    );
+  }
+  if (omittedCiCount > 0) {
+    const s = omittedCiCount === 1 ? "" : "s";
+    const wasWere = omittedCiCount === 1 ? "was" : "were";
+    const itsTheir = omittedCiCount === 1 ? "its" : "their";
+    omissionNotes.push(
+      `${omittedCiCount} CI run fact${s} ${wasWere} omitted because ${itsTheir} command or working-directory metadata exceeded supported bounds.`,
+    );
+  }
+
   const analysis: RepositoryAnalysis = {
     repository: {
       url: input.url.slice(0, 300),
@@ -616,7 +678,7 @@ export function buildRepositoryAnalysisFromFiles(
     },
     inspectedFiles: input.fetched.map((f) => f.path.slice(0, 300)).slice(0, 200),
     selection: input.selection,
-    uncertainty: uncertainty
+    uncertainty: [...omissionNotes, ...uncertainty]
       .map((u) => u.trim().slice(0, 300))
       .filter((u) => u.length > 0)
       .slice(0, 12),

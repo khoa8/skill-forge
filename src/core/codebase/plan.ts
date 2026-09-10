@@ -58,15 +58,16 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
       `Before making changes, read the repository instructions: ${instructionPaths.slice(0, 4).map((p) => `\`${p}\``).join(", ")}.`,
     );
   }
+  const hasCi =
+    commands.some((c) => c.kind === "ci-run") ||
+    repo.importantFiles.some((f) => f.path.startsWith(".github/workflows/") || /CI/i.test(f.reason));
+
   if (commands.length > 0) {
     const candidateManifests = fetchedManifests.length > 0 ? fetchedManifests : repo.manifests;
     const manifestPaths = candidateManifests
       .slice(0, 3)
       .map((m) => `\`${m.path}\``)
       .join(", ");
-    const hasCi =
-      commands.some((c) => c.kind === "ci-run") ||
-      repo.importantFiles.some((f) => f.path.startsWith(".github/workflows/") || /CI/i.test(f.reason));
 
     if (manifestPaths.length > 0 && hasCi) {
       steps.push(
@@ -107,13 +108,27 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
 
   // --- verification (orient toward testing evidence without runnable command promotion)
   const verification: string[] = [];
-  if (testing.frameworks.length > 0 || testing.relevantFiles.length > 0) {
+  const hasTests = testing.frameworks.length > 0 || testing.relevantFiles.length > 0;
+
+  if (hasTests && hasCi) {
     const testItems = [
       ...testing.frameworks,
       ...testing.relevantFiles.slice(0, 2).map((p) => `\`${p}\``),
     ];
     verification.push(
       `Verify changes against the repository test suites (${testItems.join(", ")}) and CI workflows before submitting.`,
+    );
+  } else if (hasTests) {
+    const testItems = [
+      ...testing.frameworks,
+      ...testing.relevantFiles.slice(0, 2).map((p) => `\`${p}\``),
+    ];
+    verification.push(
+      `Verify changes against the repository test suites (${testItems.join(", ")}) before submitting.`,
+    );
+  } else if (hasCi) {
+    verification.push(
+      `Verify changes against the repository CI workflows before submitting.`,
     );
   }
 

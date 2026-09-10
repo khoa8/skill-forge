@@ -76,7 +76,7 @@ When the source was a GitHub repository in **codebase** mode, `source.repository
 
 ### Evidenced commands (`RepositoryCommand`)
 
-The canonical source record's `commands` array stores observational command facts extracted from inspected repository files. `RepositoryCommand` is a discriminated union:
+The canonical source record's `commands` array stores observational command facts extracted from inspected repository files. Representable commands within supported metadata length bounds are stored literally without truncation or synthetic reconstruction; facts exceeding representation limits are omitted rather than truncated, with such omissions reported in `uncertainty`. `RepositoryCommand` is a discriminated union:
 
 - `RepositoryPackageScript`: `{ kind: "package-script", purpose, name, command, evidence }`. Literal script definitions observed in manifests (e.g. `package.json`).
 - `RepositoryCiRun`: `{ kind: "ci-run", purpose, command, evidence, cwd? }`. Literal `run:` steps observed in CI workflows. `cwd` is the concrete execution directory relative to the repository root (`""` = repository root) when statically declared; dynamic or unknown directories leave `cwd` undefined without dropping the command fact.
