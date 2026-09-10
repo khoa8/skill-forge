@@ -9,14 +9,14 @@
  * tests. Malformed files degrade gracefully into notes, never abort ingestion.
  */
 import { parse as parseYaml } from "yaml";
-import type {
+import {
   RepositoryAnalysis,
-  RepositoryClaim,
-  RepositoryCommand,
-  RepositoryCiRun,
-  RepositoryConvention,
-  RepositoryPackageScript,
-  RepositoryPublicInterface,
+  type RepositoryClaim,
+  type RepositoryCommand,
+  type RepositoryCiRun,
+  type RepositoryConvention,
+  type RepositoryPackageScript,
+  type RepositoryPublicInterface,
 } from "../types.js";
 import type { TreeEntryLike } from "../sources/github-codebase.js";
 
@@ -102,130 +102,6 @@ export function scriptPurpose(name: string): RepositoryCommand["purpose"] {
 }
 
 /**
- * Package-manager evidence, in priority order (P1-5): an explicit
- * `packageManager` field, the repository's lockfile(s), or the install
- * commands observed in CI run steps. Returns null when nothing evidences a
- * runner — callers must then NOT invent one.
- */
-/** Path-aware lockfile evidence: one entry per lockfile in the safe scoped
- * reconnaissance set (re-audit P1-2B — never basename-only). */
-export interface TreeLockfile {
-  path: string;
-  basename: string;
-}
-
-const MANAGER_LOCKFILES: Array<[string, "npm" | "pnpm" | "yarn" | "bun"]> = [
-  ["package-lock.json", "npm"],
-  ["pnpm-lock.yaml", "pnpm"],
-  ["yarn.lock", "yarn"],
-  ["bun.lockb", "bun"],
-  ["bun.lock", "bun"],
-];
-
-/** The manager lockfiles that live in the analyzed root's own directory —
- * nested/sibling package lockfiles never evidence the root package. */
-function rootDirLockfiles(
-  treeLockfiles: TreeLockfile[],
-  rootManifestDir: string,
-): Array<{ basename: string; manager: "npm" | "pnpm" | "yarn" | "bun" }> {
-  return treeLockfiles
-    .map((l) => {
-      const manager = MANAGER_LOCKFILES.find(([b]) => b === l.basename)?.[1];
-      const dir = l.path.includes("/") ? l.path.slice(0, l.path.lastIndexOf("/")) : "";
-      return manager ? { basename: l.basename, manager, dir } : null;
-    })
-    .filter((x): x is { basename: string; manager: "npm" | "pnpm" | "yarn" | "bun"; dir: string } => x !== null)
-    .filter((x) => x.dir === rootManifestDir);
-}
-
-export function detectPackageManager(
-  treeLockfiles: TreeLockfile[],
-  ciInstallCommands: string[],
-  packageJson: FetchedFile | undefined,
-  rootManifestDir: string,
-): { name: "npm" | "pnpm" | "yarn" | "bun"; evidence: string; yarnGeneration?: YarnGeneration; lockfilePresent: boolean } | null {
-  // Lockfiles in the analyzed root's own directory only (path-aware).
-  const rootLockfiles = rootDirLockfiles(treeLockfiles, rootManifestDir);
-  const rootManagerLockfiles = new Set(rootLockfiles.map((l) => l.manager));
-  const managerFromLockfiles =
-    rootManagerLockfiles.size === 1 ? ([...rootManagerLockfiles][0] as "npm" | "pnpm" | "yarn" | "bun") : undefined;
-
-  // 1. Explicit packageManager field (strongest evidence). For Yarn the
-  //    pinned version identifies the generation (1.x vs 2+/3+/4+).
-  if (packageJson) {
-    try {
-      const raw = JSON.parse(packageJson.content) as Record<string, unknown>;
-      const pm = typeof raw.packageManager === "string" ? raw.packageManager : "";
-      const m = pm.match(/^(npm|pnpm|yarn|bun)@/);
-      if (m) {
-        const yarnGeneration = m[1] === "yarn" ? yarnGenerationFromSpec(pm) : undefined;
-        // Yarn generation is corroborated by root-dir config files only:
-        // .yarnrc.yml is modern Yarn, .yarnrc (without .yarnrc.yml) is Yarn 1.
-        let generation = yarnGeneration;
-        if (m[1] === "yarn" && generation === undefined) {
-          const hasModern = treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc.yml" : `${rootManifestDir}/.yarnrc.yml`));
-          const hasClassic = treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc" : `${rootManifestDir}/.yarnrc`));
-          generation = hasModern ? 2 : hasClassic ? 1 : undefined;
-        }
-        return {
-          name: m[1] as "npm" | "pnpm" | "yarn" | "bun",
-          evidence: `${packageJson.path} packageManager: ${pm.slice(0, 80)}`,
-          yarnGeneration: generation,
-          lockfilePresent: m[1] === managerFromLockfiles,
-        };
-      }
-    } catch {
-      // malformed manifest — fall through to weaker evidence
-    }
-  }
-  // 2. Exactly one manager's lockfile in the root directory names the manager.
-  if (managerFromLockfiles !== undefined) {
-    const lockfile = rootLockfiles.find((l) => l.manager === managerFromLockfiles)!;
-    // Yarn generation from config-file evidence only (see above).
-    const yarnGeneration =
-      managerFromLockfiles === "yarn"
-        ? treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc.yml" : `${rootManifestDir}/.yarnrc.yml`))
-          ? (2 as YarnGeneration)
-          : treeLockfiles.some((l) => l.path === (rootManifestDir === "" ? ".yarnrc" : `${rootManifestDir}/.yarnrc`))
-            ? (1 as YarnGeneration)
-            : undefined
-        : undefined;
-    return { name: managerFromLockfiles, evidence: `${lockfile.basename} in the analyzed root directory (lockfile)`, yarnGeneration, lockfilePresent: true };
-  }
-  // 3. CI install commands (only when unambiguous).
-  const ciMatches = ciInstallCommands
-    .map((c) => c.match(/^(npm ci|npm install|pnpm install|pnpm i( |$)|yarn install|yarn( |$)|bun install|bun i( |$))/)?.[0])
-    .filter((x): x is string => x !== undefined);
-  const pmNames = new Set(
-    ciMatches.map((c) => (c.startsWith("npm") ? "npm" : c.startsWith("pnpm") ? "pnpm" : c.startsWith("yarn") ? "yarn" : "bun")),
-  );
-  if (pmNames.size === 1) {
-    const name = [...pmNames][0] as "npm" | "pnpm" | "yarn" | "bun";
-    const yarnGeneration =
-      name === "yarn" && ciMatches.some((c) => c.includes("--immutable"))
-        ? (2 as YarnGeneration)
-        : undefined;
-    return { name, evidence: `CI install step "${ciMatches[0]}"`, yarnGeneration, lockfilePresent: false };
-  }
-  return null;
-}
-
-/** Yarn generation from a `packageManager: yarn@X.Y.Z` spec. */
-function yarnGenerationFromSpec(spec: string): YarnGeneration | undefined {
-  const m = spec.match(/^yarn@(\d+)\./);
-  if (!m) return undefined;
-  return Number(m[1]) === 1 ? 1 : 2;
-}
-
-/**
- * Yarn generation from lockfile/CI evidence (P1-2): Yarn 1 (`yarn.lock`
- * classic format, `yarn install`) and modern Yarn (`yarn install --immutable`)
- * have different conventions. Returns the generation when it can be
- * determined, null when ambiguous.
- */
-export type YarnGeneration = 1 | 2;
-
-/**
  * Extract observed package.json script definitions as observational facts,
  * along with framework and test dependencies. No package-manager commands
  * or workspace invocations are synthesized.
@@ -252,14 +128,19 @@ export function commandsFromPackageJson(
     if (scripts !== null && typeof scripts === "object" && !Array.isArray(scripts)) {
       for (const [key, value] of Object.entries(scripts as Record<string, unknown>)) {
         if (typeof value !== "string" || value.trim().length === 0) continue;
+        const name = key.trim().slice(0, 120);
+        if (name.length === 0) continue;
+        const command = value.trim().slice(0, 300);
+        if (command.length === 0) continue;
         if (commands.length >= 30) break;
         const purpose = scriptPurpose(key);
+        const evidence = `${file.path} scripts.${key} = "${value.slice(0, 120)}"`.slice(0, 300);
         commands.push({
           kind: "package-script",
           purpose,
-          name: key,
-          command: value.trim().slice(0, 300),
-          evidence: `${file.path} scripts.${key} = "${value.slice(0, 120)}"`,
+          name,
+          command,
+          evidence,
         });
       }
     }
@@ -269,19 +150,19 @@ export function commandsFromPackageJson(
       for (const dep of Object.keys(deps as Record<string, unknown>)) {
         const fw = FRAMEWORK_DEPENDENCIES[dep] ?? FRAMEWORK_DEPENDENCIES[dep.split("/").pop()!];
         if (fw) {
-          const ev = `${file.path} ${depField}: ${dep}`;
+          const ev = `${file.path} ${depField}: ${dep}`.slice(0, 300);
           frameworkEvidence.set(fw, [...(frameworkEvidence.get(fw) ?? []), ev].slice(0, 8));
         }
         for (const [testDep, fwName] of Object.entries(TEST_DEPENDENCIES)) {
           if (dep === testDep || (testDep === "testing-library" && dep.startsWith("@testing-library/"))) {
-            testingFrameworks.add(fwName);
+            testingFrameworks.add(fwName.slice(0, 80));
           }
         }
       }
     }
   }
   for (const [fw, ev] of frameworkEvidence) {
-    frameworkClaims.push({ name: fw, evidence: ev });
+    frameworkClaims.push({ name: fw.slice(0, 120), evidence: ev });
   }
   frameworkClaims.sort((a, b) => a.name.localeCompare(b.name));
   return {
@@ -309,13 +190,18 @@ export function frameworksFromPyproject(file: FetchedFile): { frameworks: Reposi
         .trim()
         .toLowerCase();
       const fw = FRAMEWORK_DEPENDENCIES[name];
-      if (fw) frameworks.set(fw, [...(frameworks.get(fw) ?? []), `${file.path} dependencies: ${name}`].slice(0, 8));
-      if (TEST_DEPENDENCIES[name]) testing.add(TEST_DEPENDENCIES[name]);
+      if (fw) {
+        const ev = `${file.path} dependencies: ${name}`.slice(0, 300);
+        frameworks.set(fw, [...(frameworks.get(fw) ?? []), ev].slice(0, 8));
+      }
+      if (TEST_DEPENDENCIES[name]) testing.add(TEST_DEPENDENCIES[name].slice(0, 80));
     }
   }
   if (/\[tool\.pytest[^\]]*\]/.test(file.content)) testing.add("pytest");
   return {
-    frameworks: [...frameworks.entries()].map(([name, evidence]) => ({ name, evidence })).sort((a, b) => a.name.localeCompare(b.name)),
+    frameworks: [...frameworks.entries()]
+      .map(([name, evidence]) => ({ name: name.slice(0, 120), evidence }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
     testing: [...testing],
   };
 }
@@ -462,13 +348,17 @@ export function commandsFromCiWorkflows(
     collectRunSteps(doc, steps, file.path, wfWd);
     for (const step of steps) {
       if (commands.length >= 30) break;
+      const cmdText = step.command.trim().slice(0, 300);
+      if (cmdText.length === 0) continue;
       const purpose = CI_COMMAND_RULES.find(([re]) => re.test(step.command))?.[1] ?? "other";
+      const cwd = step.cwd ? step.cwd.trim().slice(0, 300) : undefined;
+      const evidence = `${step.file} (CI run step${cwd ? `, working-directory: ${cwd}` : ""})`.slice(0, 300);
       commands.push({
         kind: "ci-run",
         purpose,
-        command: step.command.slice(0, 300),
-        evidence: `${step.file} (CI run step${step.cwd ? `, working-directory: ${step.cwd}` : ""})`,
-        ...(step.cwd ? { cwd: step.cwd } : {}),
+        command: cmdText,
+        evidence,
+        ...(cwd ? { cwd } : {}),
       });
     }
   }
@@ -512,13 +402,15 @@ export function conventionsFromInstructionFiles(files: FetchedFile[]): Repositor
       const text = (bullet ? bullet[1]! : line).replace(/\*\*/g, "").trim();
       if (text.length < 12 || text.length > 400) continue;
       if (!CONSTRAINT_LINE_RE.test(text)) continue;
-      const existing = out.find((c) => c.statement === text);
+      const statement = text.slice(0, 500);
+      const evItem = `${file.path}:${i + 1}`.slice(0, 300);
+      const existing = out.find((c) => c.statement === statement);
       if (existing) {
-        if (!existing.evidence.includes(`${file.path}:${i + 1}`)) {
-          existing.evidence.push(`${file.path}:${i + 1}`);
+        if (existing.evidence.length < 4 && !existing.evidence.includes(evItem)) {
+          existing.evidence.push(evItem);
         }
       } else {
-        out.push({ statement: text, evidence: [`${file.path}:${i + 1}`] });
+        out.push({ statement, evidence: [evItem] });
       }
     }
   }
@@ -540,29 +432,33 @@ export function publicInterfacesFromFiles(files: FetchedFile[]): RepositoryPubli
       if (!info) continue;
       if (info.main) {
         out.push({
-          name: info.name,
-          path: file.path,
-          description: `package.json main: ${info.main}`,
+          name: info.name?.slice(0, 200),
+          path: file.path.slice(0, 300),
+          description: `package.json main: ${info.main}`.slice(0, 300),
         });
       }
       if (info.exports !== undefined && typeof info.exports === "object") {
         out.push({
-          name: info.name,
-          path: file.path,
-          description: `package.json exports field defines the public entrypoints (${Math.min(JSON.stringify(info.exports).length, 160)} bytes of export map)`,
+          name: info.name?.slice(0, 200),
+          path: file.path.slice(0, 300),
+          description: `package.json exports field defines the public entrypoints (${Math.min(JSON.stringify(info.exports).length, 160)} bytes of export map)`.slice(0, 300),
         });
       }
       if (info.types) {
         out.push({
-          name: info.types,
-          path: file.path,
-          description: `package.json types: ${info.types}`,
+          name: info.types.slice(0, 200),
+          path: file.path.slice(0, 300),
+          description: `package.json types: ${info.types}`.slice(0, 300),
         });
       }
     } else if (base === "go.mod") {
       const m = file.content.match(/^module\s+(\S+)$/m);
       if (m) {
-        out.push({ name: m[1], path: file.path, description: `Go module path: ${m[1]}` });
+        out.push({
+          name: m[1]!.slice(0, 200),
+          path: file.path.slice(0, 300),
+          description: `Go module path: ${m[1]}`.slice(0, 300),
+        });
       }
     }
   }
@@ -632,20 +528,7 @@ export function buildRepositoryAnalysisFromFiles(
   input: AnalysisFromFilesInput,
   uncertainty: string[],
 ): RepositoryAnalysis {
-  const rootManifestPath = input.scope ? `${input.scope}/package.json` : "package.json";
-  const rootManifestDir = input.scope ?? "";
-  const rootPackageJson = input.fetched.find((f) => f.path === rootManifestPath);
-  const treeLockfiles: TreeLockfile[] = (input.treeLockfiles ?? [])
-    .map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() }))
-    .filter((l) => MANAGER_LOCKFILES.some(([b]) => b === l.basename));
-
   const ciCommandsRaw = commandsFromCiWorkflows(input.fetched);
-  const rootCiInstallCommands = ciCommandsRaw
-    .filter((c) => c.purpose === "install" && (c.cwd ?? "") === rootManifestDir)
-    .map((c) => c.command);
-  const packageManager = detectPackageManager(treeLockfiles, rootCiInstallCommands, rootPackageJson, rootManifestDir);
-  void packageManager;
-
   const { commands: scriptCommands, frameworks: depFrameworks, testing: depTesting } = commandsFromPackageJson(
     input.fetched,
   );
@@ -684,12 +567,12 @@ export function buildRepositoryAnalysisFromFiles(
     if (!info) continue;
     if (info.main) {
       const manifestDir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
-      const resolved = `${manifestDir === "" ? "" : `${manifestDir}/`}${info.main.replace(/^\.\//, "")}`;
+      const resolved = `${manifestDir === "" ? "" : `${manifestDir}/`}${info.main.replace(/^\.\//, "")}`.slice(0, 300);
       const existing = entrypoints.find((e) => e.path === resolved);
       if (existing) {
-        existing.reason = `${existing.reason} + package.json main field (${file.path})`;
+        existing.reason = `${existing.reason} + package.json main field (${file.path})`.slice(0, 300);
       } else {
-        entrypoints.push({ path: resolved, reason: `package.json main field (${file.path})` });
+        entrypoints.push({ path: resolved, reason: `package.json main field (${file.path})`.slice(0, 300) });
       }
     }
   }
@@ -699,42 +582,47 @@ export function buildRepositoryAnalysisFromFiles(
   for (const path of input.instructions.slice(0, 8)) {
     if (importantFiles.some((f) => f.path === path)) continue;
     importantFiles.push({
-      path,
-      reason: /readme/i.test(path)
+      path: path.slice(0, 300),
+      reason: (/readme/i.test(path)
         ? "primary repository documentation"
-        : "repository instruction file",
+        : "repository instruction file").slice(0, 300),
     });
   }
 
-  return {
+  const analysis: RepositoryAnalysis = {
     repository: {
-      url: input.url,
-      owner: input.owner,
-      name: input.name,
-      ref: input.ref,
-      ...(input.scope ? { scope: input.scope } : {}),
+      url: input.url.slice(0, 300),
+      owner: input.owner.slice(0, 100),
+      name: input.name.slice(0, 100),
+      ref: input.ref.slice(0, 100),
+      ...(input.scope ? { scope: input.scope.slice(0, 300) } : {}),
     },
     mode: "codebase",
-    languages: input.languages,
-    ecosystems: input.ecosystems,
+    languages: input.languages.slice(0, 12),
+    ecosystems: input.ecosystems.slice(0, 12).map((e) => e.slice(0, 80)),
     frameworks: [...depFrameworks, ...pyFrameworks]
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, 16),
-    manifests: input.manifests,
+    manifests: input.manifests.slice(0, 24),
     commands: commandsOut.slice(0, 30),
     structure: input.structure,
     entrypoints: entrypoints.slice(0, 12),
     importantFiles: importantFiles.slice(0, 24),
-    conventions,
-    publicInterfaces,
+    conventions: conventions.slice(0, 20),
+    publicInterfaces: publicInterfaces.slice(0, 16),
     testing: {
-      frameworks: testing.frameworks,
-      relevantFiles: testing.relevantFiles,
+      frameworks: testing.frameworks.slice(0, 8),
+      relevantFiles: testing.relevantFiles.slice(0, 24),
     },
-    inspectedFiles: input.fetched.map((f) => f.path),
+    inspectedFiles: input.fetched.map((f) => f.path.slice(0, 300)).slice(0, 200),
     selection: input.selection,
-    uncertainty: uncertainty.slice(0, 12),
+    uncertainty: uncertainty
+      .map((u) => u.trim().slice(0, 300))
+      .filter((u) => u.length > 0)
+      .slice(0, 12),
   };
+
+  return RepositoryAnalysis.parse(analysis);
 }
 
 // Re-export for tests that want a tree-entry-shaped helper.

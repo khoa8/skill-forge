@@ -59,9 +59,32 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
     );
   }
   if (commands.length > 0) {
-    steps.push(
-      `Inspect \`package.json\`, CI workflows, and repository configuration before choosing project-specific commands.`,
-    );
+    const candidateManifests = fetchedManifests.length > 0 ? fetchedManifests : repo.manifests;
+    const manifestPaths = candidateManifests
+      .slice(0, 3)
+      .map((m) => `\`${m.path}\``)
+      .join(", ");
+    const hasCi =
+      commands.some((c) => c.kind === "ci-run") ||
+      repo.importantFiles.some((f) => f.path.startsWith(".github/workflows/") || /CI/i.test(f.reason));
+
+    if (manifestPaths.length > 0 && hasCi) {
+      steps.push(
+        `Inspect ${manifestPaths}, CI workflows, and repository configuration before choosing project-specific commands.`,
+      );
+    } else if (manifestPaths.length > 0) {
+      steps.push(
+        `Inspect ${manifestPaths} and repository configuration before choosing project-specific commands.`,
+      );
+    } else if (hasCi) {
+      steps.push(
+        `Inspect CI workflows and repository configuration before choosing project-specific commands.`,
+      );
+    } else {
+      steps.push(
+        `Inspect repository configuration before choosing project-specific commands.`,
+      );
+    }
   }
   if (structure.sourceRoots.length > 0 || structure.testRoots.length > 0) {
     const where = [

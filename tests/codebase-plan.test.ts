@@ -5,7 +5,11 @@
  * github-codebase source.
  */
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { deriveCodebasePlan } from "../src/core/codebase/plan.js";
+import { buildRepositoryAnalysisFromFiles } from "../src/core/codebase/extract.js";
 import { MockProvider } from "../src/core/providers/mock.js";
 import { OpenAICompatibleProvider } from "../src/core/providers/openai-compatible.js";
 import { PlanSchema } from "../src/core/plan.js";
@@ -14,7 +18,8 @@ import { validatePackage } from "../src/core/validate.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill } from "../src/core/build.js";
-import type { RepositoryAnalysis, SourceInput } from "../src/core/types.js";
+import { RepositoryAnalysis, type SourceInput } from "../src/core/types.js";
+import { createStore } from "../src/server/store.js";
 import { sampleRepositoryAnalysis } from "./codebase-model.test.js";
 
 /** A realistic analysis mirroring the Fixture A ingestion result. */
@@ -79,6 +84,46 @@ describe("deriveCodebasePlan", () => {
 
     // Honest uncertainty surfaces as pitfalls.
     expect(plan.pitfalls.join(" ")).toContain("were not inspected");
+  });
+
+  it("F-02: does not invent package.json when repository lacks package.json (Python / Go repos)", () => {
+    const pythonAnalysis: RepositoryAnalysis = {
+      ...fullAnalysis(),
+      manifests: [{ path: "pyproject.toml", kind: "pyproject.toml", fetched: true }],
+      commands: [
+        { kind: "ci-run", purpose: "test", command: "pytest", evidence: ".github/workflows/ci.yml (CI run step)" },
+      ],
+    };
+    const planPy = deriveCodebasePlan(pythonAnalysis);
+    expect(planPy.steps.join(" ")).not.toContain("package.json");
+    expect(planPy.steps.join(" ")).toContain("pyproject.toml");
+    expect(planPy.steps.join(" ")).toContain("CI workflows");
+
+    // Manifests only, no CI commands
+    const manifestsOnly: RepositoryAnalysis = {
+      ...fullAnalysis(),
+      manifests: [{ path: "pyproject.toml", kind: "pyproject.toml", fetched: true }],
+      commands: [
+        { kind: "package-script", purpose: "test", name: "test", command: "pytest", evidence: "scripts" },
+      ],
+      importantFiles: [{ path: "README.md", reason: "primary repository documentation" }],
+    };
+    const planManifestsOnly = deriveCodebasePlan(manifestsOnly);
+    expect(planManifestsOnly.steps.join(" ")).not.toContain("package.json");
+    expect(planManifestsOnly.steps.join(" ")).toContain("Inspect `pyproject.toml` and repository configuration");
+    expect(planManifestsOnly.steps.join(" ")).not.toContain("CI workflows");
+
+    // CI workflows only, no manifests
+    const ciOnly: RepositoryAnalysis = {
+      ...fullAnalysis(),
+      manifests: [],
+      commands: [
+        { kind: "ci-run", purpose: "test", command: "go test ./...", evidence: ".github/workflows/ci.yml (CI run step)" },
+      ],
+    };
+    const planCiOnly = deriveCodebasePlan(ciOnly);
+    expect(planCiOnly.steps.join(" ")).not.toContain("package.json");
+    expect(planCiOnly.steps.join(" ")).toContain("Inspect CI workflows and repository configuration");
   });
 
   it("never promotes package scripts or convention text to executable instructions or authoritative constraints", () => {
@@ -272,6 +317,18 @@ describe("codebase pipeline end-to-end (offline mock)", () => {
     const skillMd = skill.files.find((f) => f.path === "SKILL.md")!.content;
     expect(skillMd).toContain("acme/fixture-service");
     expect(skillMd).toContain("AGENTS.md");
+
+    // F-01: Codebase mode does not generate workflows from raw README procedures,
+    // nor does it emit procedure-execution or command-grounding evals.
+    expect(skill.files.some((f) => f.path.startsWith("workflows/"))).toBe(false);
+    expect(skillMd).not.toContain("1. Run `npm install`");
+    const evalsFile = skill.files.find((f) => f.path === "evals/evals.json");
+    if (evalsFile) {
+      const parsedEvals = JSON.parse(evalsFile.content);
+      expect(parsedEvals.items.some((i: { kind: string }) => i.kind === "procedure")).toBe(false);
+      expect(parsedEvals.items.some((i: { prompt: string }) => i.prompt.includes("Do any commands"))).toBe(false);
+    }
+
     // Validation executed and passed.
     expect(validation.executed).toBe(true);
     expect(validation.passed).toBe(true);
@@ -280,7 +337,176 @@ describe("codebase pipeline end-to-end (offline mock)", () => {
     const normalized = normalizeSource(input);
     const rebuilt = buildCanonicalSkill(normalized, analyzeSource(normalized), PlanSchema.parse({}), "mock");
     expect(rebuilt.files.length).toBeGreaterThan(3);
+    // F-01: Rebuilt package in codebase mode also skips workflows and keeps empty steps unfilled by derivePlanFromAnalysis
+    expect(rebuilt.files.some((f) => f.path.startsWith("workflows/"))).toBe(false);
+    const rebuiltSkillMd = rebuilt.files.find((f) => f.path === "SKILL.md")!.content;
+    expect(rebuiltSkillMd).not.toContain("npm install");
+    expect(rebuiltSkillMd).toContain("Not specified in the source material");
     void validatePackage({ skill: rebuilt, sourceText: normalized.text });
     void events;
+  });
+
+  it("F-01: documentation mode still generates workflows and procedure evals from procedures", () => {
+    const docInput = normalizeSource({
+      type: "text",
+      name: "guide",
+      content: [
+        "# Guide",
+        "",
+        "## Setup",
+        "",
+        "1. Install dependencies with `npm install`.",
+        "2. Run the development server with `npm run dev`.",
+        "3. Run tests with `npm test`.",
+        "",
+        "## Usage",
+        "",
+        "Detailed usage instructions go here.",
+      ].join("\n"),
+    });
+    const docAnalysis = analyzeSource(docInput);
+    const docSkill = buildCanonicalSkill(docInput, docAnalysis, PlanSchema.parse({}), "mock");
+    expect(docSkill.files.some((f) => f.path.startsWith("workflows/"))).toBe(true);
+    const evalsFile = docSkill.files.find((f) => f.path === "evals/evals.json");
+    expect(evalsFile).toBeDefined();
+    const parsedEvals = JSON.parse(evalsFile!.content);
+    expect(parsedEvals.items.some((i: { kind: string }) => i.kind === "procedure")).toBe(true);
+  });
+});
+
+describe("F-03: RepositoryAnalysis schema conformity and store persistence under boundary inputs", () => {
+  it("bounds long fields and conforms to RepositoryAnalysis schema so store persistence succeeds", async () => {
+    const longKey = "a".repeat(150); // > 120 chars
+    const longVal = "b".repeat(350); // > 300 chars
+    const longCwd = "packages/" + "sub/".repeat(60); // > 300 chars
+    const repeatedStatement = "- Always ensure data integrity across systems.";
+
+    const input = {
+      url: "https://github.com/acme/big-repo",
+      owner: "acme",
+      name: "big-repo",
+      ref: "main",
+      languages: [{ name: "TypeScript", evidence: ["10 files"] }],
+      ecosystems: ["node"],
+      manifests: [{ path: "package.json", kind: "package.json", fetched: true }],
+      structure: { sourceRoots: ["src/"], testRoots: ["tests/"], exampleRoots: [], packages: [] },
+      entrypoints: [{ path: "src/index.ts", reason: "entrypoint" }],
+      importantFiles: [{ path: "AGENTS.md", reason: "instructions" }],
+      instructions: ["AGENTS.md", "README.md", "DOCS.md", "CONTRIBUTING.md", "SECURITY.md"],
+      ciWorkflows: [".github/workflows/ci.yml"],
+      fetched: [
+        {
+          path: "package.json",
+          content: JSON.stringify({
+            name: "big-package",
+            scripts: {
+              [longKey]: longVal,
+              normal: "vitest run",
+            },
+            main: "dist/index.js",
+          }),
+        },
+        {
+          path: ".github/workflows/ci.yml",
+          content: [
+            "name: CI",
+            "jobs:",
+            "  test:",
+            "    runs-on: ubuntu-latest",
+            "    defaults:",
+            "      run:",
+            `        working-directory: ${longCwd}`,
+            "    steps:",
+            `      - run: ${longVal}`,
+            "      - run: npm test",
+          ].join("\n"),
+        },
+        {
+          path: "AGENTS.md",
+          content: Array(10).fill(repeatedStatement).join("\n"),
+        },
+        { path: "README.md", content: repeatedStatement + "\n" },
+        { path: "DOCS.md", content: repeatedStatement + "\n" },
+        { path: "CONTRIBUTING.md", content: repeatedStatement + "\n" },
+        { path: "SECURITY.md", content: repeatedStatement + "\n" },
+      ],
+      selection: { candidateCount: 7, selectedCount: 7, treeBlobCount: 10, treeTruncated: false },
+    };
+
+    const analysis = buildRepositoryAnalysisFromFiles(
+      input,
+      Array(25).fill("uncertainty note that might be overly long ".repeat(10)),
+    );
+
+    // Conforms to Zod schema directly
+    const parseResult = RepositoryAnalysis.safeParse(analysis);
+    expect(parseResult.success).toBe(true);
+
+    // Verify all fields respected bounds
+    for (const cmd of analysis.commands) {
+      if (cmd.kind === "package-script") {
+        expect(cmd.name.length).toBeLessThanOrEqual(120);
+        expect(cmd.command.length).toBeLessThanOrEqual(300);
+        expect(cmd.evidence.length).toBeLessThanOrEqual(300);
+      } else if (cmd.kind === "ci-run") {
+        expect(cmd.command.length).toBeLessThanOrEqual(300);
+        expect(cmd.evidence.length).toBeLessThanOrEqual(300);
+        if (cmd.cwd) expect(cmd.cwd.length).toBeLessThanOrEqual(300);
+      }
+    }
+    for (const conv of analysis.conventions) {
+      expect(conv.statement.length).toBeLessThanOrEqual(500);
+      expect(conv.evidence.length).toBeLessThanOrEqual(4);
+      for (const ev of conv.evidence) expect(ev.length).toBeLessThanOrEqual(300);
+    }
+    expect(analysis.uncertainty.length).toBeLessThanOrEqual(16);
+    for (const u of analysis.uncertainty) expect(u.length).toBeLessThanOrEqual(300);
+
+    // Verify persistence in store: saveSkill -> getSkill must succeed without schema failure
+    const tmp = await mkdtemp(join(tmpdir(), "skillforge-store-test-"));
+    try {
+      const store = createStore(tmp);
+      const sourceInput: SourceInput = {
+        type: "github-codebase",
+        name: "acme/big-repo",
+        content: "# big-repo\n\nA large repository used for boundary testing of structured analysis extraction.\n",
+        repository: analysis,
+      };
+      const normalized = normalizeSource(sourceInput);
+      const sourceAnalysis = analyzeSource(normalized);
+      const plan = deriveCodebasePlan(analysis);
+      const skill = buildCanonicalSkill(normalized, sourceAnalysis, plan, "mock");
+      const validation = validatePackage({ skill, sourceText: normalized.text });
+
+      await store.saveSkill({
+        id: skill.id,
+        skill,
+        analysis: {
+          title: sourceAnalysis.title,
+          lineCount: normalized.lineCount,
+          sectionCount: sourceAnalysis.sections.length,
+          commandCount: sourceAnalysis.commands.length,
+          codeBlockCount: sourceAnalysis.codeBlocks.length,
+          procedureCount: sourceAnalysis.procedures.length,
+        },
+        source: {
+          type: normalized.sourceType,
+          name: normalized.originalName,
+          text: normalized.text,
+          notes: normalized.notes,
+          repository: analysis,
+        },
+        validation,
+        createdAt: new Date().toISOString(),
+      });
+
+      const retrieved = await store.getSkill(skill.id);
+      expect(retrieved).toBeDefined();
+      expect(retrieved?.id).toBe(skill.id);
+      expect(retrieved?.source.repository).toBeDefined();
+      expect(retrieved?.source.repository?.repository.owner).toBe("acme");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });

@@ -289,13 +289,15 @@ export function buildCanonicalSkill(
       firstSentences(analysis.intro, 2, 500) ||
       `Working knowledge for ${analysis.title}, extracted by SkillForge.`).slice(0, 1024);
 
+  const isCodebase = source.sourceType === "github-codebase";
+
   const plan: SkillPlan = {
     name,
     displayName,
     description,
-    whenToUse: rawPlan.whenToUse.length > 0 ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
-    inputs: rawPlan.inputs.length > 0 ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
-    steps: rawPlan.steps.length > 0 ? rawPlan.steps : derivePlanFromAnalysis(analysis).steps,
+    whenToUse: rawPlan.whenToUse.length > 0 || isCodebase ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
+    inputs: rawPlan.inputs.length > 0 || isCodebase ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
+    steps: rawPlan.steps.length > 0 || isCodebase ? rawPlan.steps : derivePlanFromAnalysis(analysis).steps,
     constraints: rawPlan.constraints,
     verification: rawPlan.verification,
     pitfalls: rawPlan.pitfalls,
@@ -345,28 +347,32 @@ export function buildCanonicalSkill(
   }
 
   // --- Workflow files from detected ordered procedures.
+  // In codebase mode, generic README ordered procedures must NOT be promoted
+  // into executable workflow files.
   const workflowLinks: { path: string; title: string; stepCount: number }[] = [];
-  for (const proc of analysis.procedures.slice(0, 8)) {
-    let path = `workflows/${slugify(proc.title)}.md`;
-    let n = 2;
-    while (usedPaths.has(path)) path = `workflows/${slugify(proc.title)}-${n++}.md`;
-    usedPaths.add(path);
-    const endLine = proc.steps[proc.steps.length - 1]!.line;
-    const content = [
-      `# ${proc.title}`,
-      "",
-      `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
-      "",
-      ...proc.steps.map((s, i) => `${i + 1}. ${neutralizeRelativeLinks(s.text)} _(source line ${s.line})_`),
-      "",
-    ].join("\n");
-    addFile(
-      path,
-      content,
-      `Executable ${proc.steps.length}-step procedure "${proc.title}" detected in the source.`,
-      { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
-    );
-    workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+  if (!isCodebase) {
+    for (const proc of analysis.procedures.slice(0, 8)) {
+      let path = `workflows/${slugify(proc.title)}.md`;
+      let n = 2;
+      while (usedPaths.has(path)) path = `workflows/${slugify(proc.title)}-${n++}.md`;
+      usedPaths.add(path);
+      const endLine = proc.steps[proc.steps.length - 1]!.line;
+      const content = [
+        `# ${proc.title}`,
+        "",
+        `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+        "",
+        ...proc.steps.map((s, i) => `${i + 1}. ${neutralizeRelativeLinks(s.text)} _(source line ${s.line})_`),
+        "",
+      ].join("\n");
+      addFile(
+        path,
+        content,
+        `Executable ${proc.steps.length}-step procedure "${proc.title}" detected in the source.`,
+        { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
+      );
+      workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+    }
   }
 
   // --- Example files from substantial fenced code blocks.
@@ -401,21 +407,23 @@ export function buildCanonicalSkill(
       expect: `SKILL.md or ${link.path} must cover this topic (source lines ${link.range}).`,
     });
   }
-  for (const wf of workflowLinks.slice(0, 4)) {
-    evals.push({
-      id: `eval-${evals.length + 1}`,
-      kind: "procedure",
-      prompt: `Can the agent execute the "${wf.title}" procedure end to end?`,
-      expect: `${wf.path} lists ${wf.stepCount} steps matching the source.`,
-    });
-  }
-  if (analysis.commands.length > 0) {
-    evals.push({
-      id: `eval-${evals.length + 1}`,
-      kind: "grounding",
-      prompt: "Do any commands in the skill appear in the source?",
-      expect: `Commands must be traceable to the source (detected ${analysis.commands.length} command lines).`,
-    });
+  if (!isCodebase) {
+    for (const wf of workflowLinks.slice(0, 4)) {
+      evals.push({
+        id: `eval-${evals.length + 1}`,
+        kind: "procedure",
+        prompt: `Can the agent execute the "${wf.title}" procedure end to end?`,
+        expect: `${wf.path} lists ${wf.stepCount} steps matching the source.`,
+      });
+    }
+    if (analysis.commands.length > 0) {
+      evals.push({
+        id: `eval-${evals.length + 1}`,
+        kind: "grounding",
+        prompt: "Do any commands in the skill appear in the source?",
+        expect: `Commands must be traceable to the source (detected ${analysis.commands.length} command lines).`,
+      });
+    }
   }
   if (evals.length > 0) {
     const evalsPath = "evals/evals.json";

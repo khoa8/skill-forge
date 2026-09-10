@@ -396,43 +396,14 @@ describe("P2-1: inspection accounting is internally consistent", () => {
 // P1-5 — package-manager evidence grounding
 // ---------------------------------------------------------------------------
 
-import { detectPackageManager, commandsFromPackageJson, type FetchedFile } from "../src/core/codebase/extract.js";
+import { commandsFromPackageJson, type FetchedFile } from "../src/core/codebase/extract.js";
 
 const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}): FetchedFile => ({
   path: "package.json",
   content: JSON.stringify({ name: "x", scripts, ...extra }),
 });
 
-describe("P1-5: package-manager detection is evidence-only", () => {
-  const locks = (...paths: string[]) => paths.map((p) => ({ path: p, basename: (p.split("/").pop() ?? "").toLowerCase() }));
-  it("detects npm / pnpm / yarn / bun from their respective evidence", () => {
-    // packageManager field.
-    expect(detectPackageManager([], [], pkg({}, { packageManager: "pnpm@9.1.0" }), "")?.name).toBe("pnpm");
-    expect(detectPackageManager([], [], pkg({}, { packageManager: "yarn@4.1.0" }), "")?.name).toBe("yarn");
-    expect(detectPackageManager([], [], pkg({}, { packageManager: "bun@1.1.0" }), "")?.name).toBe("bun");
-    expect(detectPackageManager([], [], pkg({}, { packageManager: "npm@10.0.0" }), "")?.name).toBe("npm");
-    // Lockfile presence (path-aware: root-dir lockfiles only).
-    expect(detectPackageManager(locks("package-lock.json"), [], undefined, "")?.name).toBe("npm");
-    expect(detectPackageManager(locks("pnpm-lock.yaml"), [], undefined, "")?.name).toBe("pnpm");
-    expect(detectPackageManager(locks("yarn.lock"), [], undefined, "")?.name).toBe("yarn");
-    expect(detectPackageManager(locks("bun.lockb"), [], undefined, "")?.name).toBe("bun");
-    // CI install commands.
-    expect(detectPackageManager([], ["pnpm install --frozen-lockfile"], undefined, "")?.name).toBe("pnpm");
-    expect(detectPackageManager([], ["yarn install --immutable"], undefined, "")?.name).toBe("yarn");
-    expect(detectPackageManager([], ["bun install"], undefined, "")?.name).toBe("bun");
-  });
-
-  it("invents no runner when evidence is absent or ambiguous", () => {
-    // No evidence at all.
-    expect(detectPackageManager([], [], undefined, "")).toBeNull();
-    // Conflicting lockfiles → ambiguous → null.
-    expect(detectPackageManager(locks("package-lock.json", "yarn.lock"), [], undefined, "")).toBeNull();
-    // Conflicting CI commands → null.
-    expect(detectPackageManager([], ["npm ci", "pnpm i"], undefined, "")).toBeNull();
-    // Nested lockfiles do NOT evidence the root package (path-aware).
-    expect(detectPackageManager(locks("packages/legacy/package-lock.json"), [], pkg({}, { packageManager: undefined }), "")).toBeNull();
-    expect(detectPackageManager(locks("packages/b/pnpm-lock.yaml"), [], undefined, "")).toBeNull();
-  });
+describe("P1-5: package script extraction is evidence-only", () => {
 
   it("extracts package scripts as literal package-script facts", () => {
     const { commands } = commandsFromPackageJson(
