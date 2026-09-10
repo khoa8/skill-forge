@@ -76,12 +76,12 @@ When the source was a GitHub repository in **codebase** mode, `source.repository
 
 ### Evidenced commands (`RepositoryCommand`)
 
-The canonical source record's `commands` array is the **only** source of runnable-command authority for a codebase skill. Each entry: `{ purpose, command, evidence, cwd?, synthesized? }`.
+The canonical source record's `commands` array stores observational command facts extracted from inspected repository files. `RepositoryCommand` is a discriminated union:
 
-- `command` is the display string. For synthesized invocations (manager + script name, workspace selectors) it is rendered from structured argv; for CI steps the command text is directly observed (a concrete working directory renders the canonical `cd <dir> && …` prefix). `synthesized` distinguishes the two.
-- `cwd` is the concrete execution directory relative to the **repository root** (`""` = repository root), as declared by the evidence. For scoped analyses the analysis root is `repository.scope` — a repository-root cwd is *not* the analysis root of a scoped request. Commands with an unknown/dynamic execution directory are omitted from the array entirely, never attributed to a guessed directory.
-- Trust-boundary invariants (enforced deterministically): repository-controlled values (script names, workspace names, working directories) are whole positional tokens or the command is omitted — shell-significant characters, whitespace, and leading dashes fail closed and the underlying fact survives as non-runnable script-definition evidence; multiline CI `run:` blocks are non-runnable v1 evidence (GitHub runs one block as a single shell process, so per-line contexts are not reconstructible — this is a conservative limitation, not a bug); repository convention statements are policy text and never mint runnable commands — a convention is promoted into the generated skill only when every command phrase inside it exactly matches an already-evidenced command.
-- The deterministic validator's `codebase-command-grounding` check is deny-by-default: every runnable-command candidate in the plan, description/frontmatter, and rendered SKILL.md/AGENTS.md must belong to this command set. An empty evidenced set means zero runnable commands in the generated skill.
+- `RepositoryPackageScript`: `{ kind: "package-script", purpose, name, command, evidence }`. Literal script definitions observed in manifests (e.g. `package.json`).
+- `RepositoryCiRun`: `{ kind: "ci-run", purpose, command, evidence, cwd? }`. Literal `run:` steps observed in CI workflows. `cwd` is the concrete execution directory relative to the repository root (`""` = repository root) when statically declared; dynamic or unknown directories leave `cwd` undefined without dropping the command fact.
+
+Commands are recorded as inspection facts only, never elevated into executable instructions, synthetic package-manager/workspace commands, or authoritative agent policy. Safe structural orientation directs agents to inspect manifests and CI configuration before selecting commands.
 
 ## Provenance
 

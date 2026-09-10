@@ -40,8 +40,6 @@ const REDUCTION_LADDER: Array<keyof RepositoryContextBudgetArrays> = [
   "entrypoints",
   "frameworks",
   "manifests",
-  "commands",
-  "conventions",
   "inspectedFiles",
   "languages",
   "ecosystems",
@@ -56,8 +54,6 @@ interface RepositoryContextBudgetArrays {
   entrypoints: number;
   frameworks: number;
   manifests: number;
-  commands: number;
-  conventions: number;
   inspectedFiles: number;
   languages: number;
   ecosystems: number;
@@ -75,8 +71,8 @@ function clamp(text: string, cap: number): string {
 
 /**
  * The compact provider context. Field order is the required priority:
- * identity/scope → boundedness/selection → uncertainty → commands →
- * conventions → entrypoints/important files → stack/manifests/testing.
+ * identity/scope → boundedness/selection → uncertainty →
+ * entrypoints/important files → stack/manifests/testing.
  * Every array is capped by count, so JSON.parse on the output always
  * succeeds.
  */
@@ -107,15 +103,6 @@ export function repositoryContextForProvider(
       inspectedFilesOmitted: Math.max(0, repo.inspectedFiles.length - n("inspectedFiles")),
     },
     uncertainty: repo.uncertainty.slice(0, b.arrayCap).map((u) => clamp(u, b.stringCap)),
-    commands: repo.commands.slice(0, n("commands")).map((c) => ({
-      purpose: c.purpose,
-      command: clamp(c.command, b.stringCap),
-      evidence: clamp(c.evidence, b.stringCap),
-    })),
-    conventions: repo.conventions.slice(0, n("conventions")).map((c) => ({
-      statement: clamp(c.statement, b.stringCap),
-      evidence: c.evidence.slice(0, b.evidenceCap).map((e) => clamp(e, b.stringCap)),
-    })),
     entrypoints: repo.entrypoints.slice(0, n("entrypoints")).map((e) => ({
       path: clamp(e.path, b.stringCap),
       reason: clamp(e.reason, b.stringCap),
@@ -162,8 +149,6 @@ export function repositoryContextJson(repo: RepositoryAnalysis): string {
     entrypoints: REPOSITORY_CONTEXT_BUDGET.arrayCap,
     frameworks: REPOSITORY_CONTEXT_BUDGET.arrayCap,
     manifests: REPOSITORY_CONTEXT_BUDGET.arrayCap,
-    commands: REPOSITORY_CONTEXT_BUDGET.arrayCap,
-    conventions: REPOSITORY_CONTEXT_BUDGET.arrayCap,
     inspectedFiles: REPOSITORY_CONTEXT_BUDGET.arrayCap,
     languages: REPOSITORY_CONTEXT_BUDGET.arrayCap,
     ecosystems: REPOSITORY_CONTEXT_BUDGET.arrayCap,

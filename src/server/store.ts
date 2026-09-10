@@ -81,7 +81,6 @@ export interface SkillStore {
       skill: StoredSkill["skill"],
       sourceText: string,
       sourceType: SourceType,
-      repositoryCommands: readonly string[] | undefined,
     ) => ValidationReport,
   ): Promise<StoredSkill>;
 }
@@ -199,7 +198,6 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
       skill: StoredSkill["skill"],
       sourceText: string,
       sourceType: SourceType,
-      repositoryCommands: readonly string[] | undefined,
     ) => ValidationReport,
   ): Promise<StoredSkill> {
     const existing = await getSkill(id);
@@ -261,7 +259,6 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
       existing.skill,
       existing.source.text,
       existing.source.type,
-      existing.source.repository?.commands.map((c) => c.command).filter((c) => c.length > 0),
     );
 
     const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);

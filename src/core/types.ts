@@ -97,35 +97,39 @@ export const RepositoryCommandPurpose = z.enum([
 ]);
 export type RepositoryCommandPurpose = z.infer<typeof RepositoryCommandPurpose>;
 
-/** A command evidenced by a manifest/CI/build file — documentation, never an
- * instruction SkillForge itself executed.
- *
- * Trust model (P1-1): repository metadata is untrusted, so synthesized
- * invocations are built as structured argv (executable + whole-token
- * arguments + cwd) and rendered to the display string only at the extraction
- * boundary. `command` is that rendered form: shell-significant characters in
- * repository-controlled values are always quoted (inert), and values that
- * cannot be represented unambiguously cause the command to be OMITTED, never
- * rewritten. */
-export const RepositoryCommand = z.object({
+/**
+ * An observed command or script fact from repository inspection — documentation
+ * only, never an instruction SkillForge executed or authorizes as runnable.
+ */
+export const RepositoryPackageScript = z.object({
+  kind: z.literal("package-script"),
   purpose: RepositoryCommandPurpose,
+  name: z.string().min(1).max(120),
+  /** Literal script body from package.json (e.g. "vitest run"). */
   command: z.string().min(1).max(300),
-  /** Where the command is defined (e.g. "package.json scripts.test", ".github/workflows/ci.yml:42"). */
+  /** Where the script is defined (e.g. "package.json scripts.test"). */
   evidence: z.string().min(1).max(300),
-  /** Concrete execution directory of the command relative to the REPOSITORY
-   * root ("" = the repository root), as declared by the evidence. For scoped
-   * analyses the analysis root is `repository.scope`; consumers must compare
-   * against that explicitly (a repository-root cwd is NOT the analysis root
-   * of a scoped request). Present only when the execution context is
-   * concretely known; commands with an unknown/dynamic working directory are
-   * omitted from runnable evidence entirely (P1-2). */
-  cwd: z.string().max(300).optional(),
-  /** true = SkillForge synthesized the invocation from evidenced parts
-   * (script/workspace invocations, install forms). false/absent = the exact
-   * command text was directly observed in repository content (CI run step). */
-  synthesized: z.boolean().optional(),
 });
+export type RepositoryPackageScript = z.infer<typeof RepositoryPackageScript>;
+
+export const RepositoryCiRun = z.object({
+  kind: z.literal("ci-run"),
+  purpose: RepositoryCommandPurpose,
+  /** Literal run command text from the CI workflow step. */
+  command: z.string().min(1).max(300),
+  /** Where the command was observed (e.g. ".github/workflows/ci.yml:42"). */
+  evidence: z.string().min(1).max(300),
+  /** Concrete execution directory relative to the repository root when known. */
+  cwd: z.string().max(300).optional(),
+});
+export type RepositoryCiRun = z.infer<typeof RepositoryCiRun>;
+
+export const RepositoryCommand = z.discriminatedUnion("kind", [
+  RepositoryPackageScript,
+  RepositoryCiRun,
+]);
 export type RepositoryCommand = z.infer<typeof RepositoryCommand>;
+export type RepositoryCommandFact = RepositoryCommand;
 
 export const RepositoryManifest = z.object({
   path: z.string().min(1).max(300),

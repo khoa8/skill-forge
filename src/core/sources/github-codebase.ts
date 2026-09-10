@@ -133,7 +133,7 @@ export function isSensitivePath(path: string): boolean {
  * metadata, but never fetched — they would consume the deep-analysis budget
  * without informing an agent. */
 export const METADATA_ONLY_BASENAMES = new Set([
-  "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+  "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock",
   "cargo.lock", "poetry.lock", "pipfile.lock", "composer.lock",
   "gemfile.lock", "go.sum", "packages.lock.json",
 ]);
@@ -220,6 +220,8 @@ const MANIFEST_ECOSYSTEM: Array<[string, string]> = [
   ["package-lock.json", "node"],
   ["pnpm-lock.yaml", "node"],
   ["yarn.lock", "node"],
+  ["bun.lockb", "node"],
+  ["bun.lock", "node"],
   ["pyproject.toml", "python"],
   ["requirements.txt", "python"],
   ["pipfile", "python"],

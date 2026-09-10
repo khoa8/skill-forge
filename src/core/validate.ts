@@ -33,11 +33,6 @@ export interface ValidateContext {
    * "github-codebase", repository provenance in manifest.json is REQUIRED —
    * edits must not silently strip it (P1-4). */
   sourceType?: SourceType;
-  /** The evidenced runnable commands from the structured repository analysis
-   * (codebase mode). When present, every runnable command rendered into the
-   * generated package must belong to this set — inline `Run \`x\`` spans and
-   * SKILL.md fences are checked against it deterministically. */
-  repositoryCommands?: readonly string[];
 }
 
 type OutcomeStatus = "pass" | "fail" | "warn";
@@ -500,141 +495,6 @@ const groundingCheck: Check = {
   },
 };
 
-/**
- * Deterministic command classifier (final remediation P1-3). The semantics
- * live in `command-text.ts` so the validator and the deterministic planner
- * share one definition; see that module for the full model. Candidates are
- * found in backtick spans, plain verb-initial text, obligation-register
- * phrases ("Always run X", "Ensure X is run", "must be run with X"), AND
- * fenced block lines — changing backticks/fencing/punctuation/sentence
- * position cannot move a command out of grounding.
- *
- * Deny-by-default: any unmatched candidate fails.
- */
-import {
-  isRunnableCommandSpan,
-  plainTextCommandCandidate,
-  obligationCommandCandidates,
-} from "./command-text.js";
-export { isRunnableCommandSpan, plainTextCommandCandidate } from "./command-text.js";
-
-/**
- * Codebase command grounding (final remediation P1-3): deny-by-default and
- * syntax-independent. For codebase sources the validated surface is the
- * structured plan plus the planner-synthesized files — an inline backtick
- * span that classifies as a runnable command must belong to the evidenced
- * command set. `repositoryCommands === undefined` means no structured
- * codebase context (documentation mode — check passes); an EMPTY array means
- * the repository proves ZERO runnable commands, so any candidate command
- * fails. references/ and workflows/ are verbatim source excerpts and stay
- * under the source-text grounding check.
- */
-const codebaseCommandGrounding = check("codebase-command-grounding", "Codebase commands match repository evidence", ({ skill, repositoryCommands }) => {
-  if (repositoryCommands === undefined) return pass();
-  const evidenced = new Set(repositoryCommands.map((c) => c.trim()));
-  const outcomes: CheckOutcome[] = [];
-  const reject = (path: string, line: number, command: string): void => {
-    outcomes.push(
-      fail(
-        `Command "${command}" at ${path}:${line} is rendered as runnable but is not in the repository's evidenced command set. Ground it in inspected evidence (e.g. package.json scripts, CI steps) or remove it.`,
-        path,
-      ),
-    );
-  };
-  const checkCandidate = (path: string, line: number, command: string): void => {
-    const c = command.trim();
-    if (c.length === 0) return;
-    if (!evidenced.has(c)) reject(path, line, c);
-  };
-
-  const scan = (path: string, content: string, options: { fencesRunnable: boolean }): void => {
-    const lines = content.split("\n");
-    let inFence = false;
-    for (let i = 0; i < lines.length; i++) {
-      const rawLine = lines[i]!;
-      if (/^\s*(`{3,}|~{3,})/.test(rawLine)) {
-        inFence = !inFence;
-        continue;
-      }
-      if (inFence) {
-        // Fenced lines in planner-synthesized files are runnable commands
-        // (P1-4: fenced form cannot bypass grounding). Verbatim excerpt
-        // surfaces never reach this scan.
-        if (options.fencesRunnable) {
-          const stripped = rawLine.trim();
-          if (stripped.length === 0 || stripped.startsWith("#") || stripped.startsWith("//")) continue;
-          const first = stripped.split(/\s+/)[0]!;
-          const shaped = !first.includes("/") && !first.includes("=");
-          if (shaped) checkCandidate(path, i + 1, stripped);
-        }
-        continue;
-      }
-      // Plain-text imperative: sentence-initial run-verb (P1-4 — no backticks
-      // required). Verb mid-sentence is prose ("you can run tests anytime").
-      const plain = plainTextCommandCandidate(rawLine);
-      if (plain !== null) {
-        checkCandidate(path, i + 1, plain);
-        continue;
-      }
-      // Obligation register (final remediation P1-3): "Always run npm
-      // publish…", "Ensure npm publish is run…", "must be run with…" — an
-      // obligation marker plus a run-verb is instruction register regardless
-      // of sentence position. Prohibitions ("never run X") are NOT runnable
-      // instructions and stay outside the register.
-      for (const phrase of obligationCommandCandidates(rawLine)) {
-        checkCandidate(path, i + 1, phrase);
-      }
-      // Inline backtick spans (existing surface).
-      const parts: { span: string; before: string }[] = [];
-      let cursor = rawLine;
-      while (cursor.length > 0) {
-        const m = cursor.match(/`([^`]+)`/);
-        if (!m || m.index === undefined) break;
-        parts.push({ span: m[1]!, before: cursor.slice(0, m.index) });
-        cursor = cursor.slice(m.index + m[0].length);
-      }
-      for (const { span, before } of parts) {
-        if (!isRunnableCommandSpan(span, before)) continue;
-        checkCandidate(path, i + 1, span);
-      }
-    }
-  };
-
-  // 1. Structured plan semantics (Option A): the plan arrays are exactly what
-  //    the builder renders into SKILL.md — validate them first. Fences inside
-  //    plan strings are runnable (provider-controlled).
-  const plan = skill.plan;
-  for (const entry of [...plan.steps, ...plan.verification, ...plan.whenToUse, ...plan.inputs, ...plan.constraints, ...plan.pitfalls]) {
-    scan("(plan)", entry, { fencesRunnable: true });
-  }
-  // 2. Canonical description/frontmatter (final remediation P1-3): the
-  //    description is provider-controlled text that renders into SKILL.md
-  //    front matter and the manifest — it must not carry unevidenced runnable
-  //    commands either. Scanned without fence interpretation (a description
-  //    should not contain fences; if it does, its lines are still scanned as
-  //    plain text).
-  {
-    const lines = skill.meta.description.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!;
-      const plain = plainTextCommandCandidate(line);
-      if (plain !== null) {
-        checkCandidate("(description)", i + 1, plain);
-        continue;
-      }
-      for (const phrase of obligationCommandCandidates(line)) {
-        checkCandidate("(description)", i + 1, phrase);
-      }
-    }
-  }
-  // 3. Rendered planner-synthesized files (defense in depth; the generic
-  //    exporter's AGENTS.md renders plan steps verbatim).
-  for (const file of skill.files) {
-    if (file.path !== "SKILL.md" && file.path !== "AGENTS.md") continue;
-    scan(file.path, file.content, { fencesRunnable: true });
-  }
-  return outcomes.length === 0 ? pass() : outcomes;
-});
 
 const exportTargetKnown = check("export-target", "Export target is supported", ({ target }) => {
   if (target === undefined) return pass();
@@ -835,7 +695,6 @@ export const CHECKS: Check[] = [
   jsonParses,
   manifestConsistency,
   repositoryProvenance,
-  codebaseCommandGrounding,
   placeholders,
   duplicateEvalIds,
   evalIntegrity,

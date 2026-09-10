@@ -112,8 +112,8 @@ describe("GitHub codebase source via the API", () => {
     // Codebase-oriented SKILL.md, not a generic docs summary.
     const skillMd = result.skill.files.find((f) => f.path === "SKILL.md")!.content;
     expect(skillMd).toContain("acme/widget-service");
-    expect(skillMd).toContain("`npm test`");
-    expect(skillMd).toContain("Never commit secrets to the repository.");
+    expect(skillMd).toContain("Inspect `package.json`, CI workflows, and repository configuration");
+    expect(skillMd).toContain("vitest");
 
     // Source notes stream as events (bounded-selection honesty).
     const notes = events.filter((e) => e.type === "source-note").map((e) => (e as { note: string }).note);
@@ -128,13 +128,15 @@ describe("GitHub codebase source via the API", () => {
       mode: string;
       repository: { owner: string; name: string };
       inspectedFiles: string[];
-      commands: { purpose: string }[];
+      commands: { purpose: string; command: string }[];
+      conventions: { statement: string }[];
     };
     expect(repo.mode).toBe("codebase");
     expect(repo.repository.owner).toBe("acme");
     expect(repo.inspectedFiles).toContain("package.json");
     expect(repo.inspectedFiles).not.toContain("package-lock.json");
-    expect(repo.commands.find((c: { purpose: string }) => c.purpose === "test")).toBeTruthy();
+    expect(repo.commands.find((c) => c.purpose === "test")).toBeTruthy();
+    expect(repo.conventions.some((c) => c.statement.includes("Never commit secrets"))).toBe(true);
     return { skillId: result.skill.id as string, events };
   });
 

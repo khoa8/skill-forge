@@ -487,9 +487,6 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       sourceText: stored.source.text,
       target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
       sourceType: stored.source.type,
-      repositoryCommands: stored.source.repository?.commands
-        .map((c) => c.command)
-        .filter((c) => c.length > 0),
     });
     await updateValidationImpl(stored.id, report);
     res.json({ validation: report });
@@ -513,8 +510,8 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         req.params.id!,
         parsed.data.path,
         parsed.data.content,
-        (skill, sourceText, sourceType, repositoryCommands) =>
-          validatePackage({ skill, sourceText, target: undefined, sourceType, repositoryCommands }),
+        (skill, sourceText, sourceType) =>
+          validatePackage({ skill, sourceText, target: undefined, sourceType }),
       );
       res.json(toResponse(stored));
     } catch (err) {
@@ -556,9 +553,6 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       sourceText: stored.source.text,
       target,
       sourceType: stored.source.type,
-      repositoryCommands: stored.source.repository?.commands
-        .map((c) => c.command)
-        .filter((c) => c.length > 0),
     });
     if (!report.passed) {
       res.status(422).json({

@@ -200,9 +200,6 @@ export async function* runPipeline(
       sourceText: normalized.text,
       target: undefined,
       sourceType: normalized.sourceType,
-      repositoryCommands: normalized.repository?.commands
-        .map((c) => c.command)
-        .filter((c) => c.length > 0),
     });
     timings.push({ stage: "validate", ms: Date.now() - t0, ok: true });
     yield {

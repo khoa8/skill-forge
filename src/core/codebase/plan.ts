@@ -8,54 +8,21 @@
  * The mock provider uses this when the pipeline input is a github-codebase
  * source; remote providers receive the same RepositoryAnalysis as context.
  */
-import type { RepositoryAnalysis, RepositoryCommand } from "../types.js";
+import type { RepositoryAnalysis } from "../types.js";
 import type { SkillPlan } from "../plan.js";
 import { slugify } from "../util.js";
 import { dedupe } from "../build.js";
-import { conventionStatementIsGrounded, evidencedCommandSet } from "../command-text.js";
-
-/** Short evidence label: `package.json scripts.test = "vitest run"` →
- * `package.json scripts.test`. */
-function evidenceLabel(evidence: string): string {
-  const cut = evidence.indexOf(" = ");
-  return (cut === -1 ? evidence : evidence.slice(0, cut)).slice(0, 160);
-}
-
-function commandsOfPurpose(commands: RepositoryCommand[], purpose: RepositoryCommand["purpose"]): RepositoryCommand[] {
-  return commands.filter((c) => c.purpose === purpose);
-}
-
-/**
- * Root-scoped commands only (final remediation P1-2): a command whose
- * concrete working directory differs from the analysis root documents a
- * nested execution context (rendered `cd <dir> && …` with its own evidence)
- * and must never be presented as a repository-wide fact — most importantly as
- * "how dependencies are installed". `cwd` is repository-root-relative;
- * the analysis root is the scope for scoped requests, "" otherwise. An absent
- * cwd (provider-authored analyses) is treated as the analysis root for
- * backwards compatibility; deterministic extraction always sets it.
- */
-function rootScoped(commands: RepositoryCommand[], scope: string | undefined): RepositoryCommand[] {
-  return commands.filter((c) => (c.cwd ?? scope ?? "") === (scope ?? ""));
-}
-
-/** Render an evidenced command: the command plus where it is defined. */
-function commandStep(cmd: RepositoryCommand): string {
-  return `Run \`${cmd.command}\` — defined in ${evidenceLabel(cmd.evidence)}.`;
-}
-
-const WARNINGISH = /^(never|do not|don'?t|avoid|always|required|forbidden|prohibited|must)\b/i;
 
 export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: string): SkillPlan {
-  const { repository, languages, ecosystems, commands, structure, entrypoints, conventions, testing, selection } = repo;
+  const { repository, languages, ecosystems, commands, structure, entrypoints, testing, selection } = repo;
   const stackLabel =
     languages.slice(0, 3).map((l) => l.name).join("/") ||
     ecosystems.slice(0, 3).join("/") ||
     "unrecognized stack";
 
   // --- whenToUse
-  // Scope honesty (re-audit P2-1): a scoped request describes its subtree
-  // explicitly and must never read as whole-repository guidance.
+  // Scope honesty: a scoped request describes its subtree explicitly and
+  // must never read as whole-repository guidance.
   const scopeLabel = repository.scope
     ? ` This skill covers the \`${repository.scope}\` subtree only — it must not be treated as whole-repository guidance.`
     : "";
@@ -77,14 +44,11 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
       `A checkout of ${repository.owner}/${repository.name} at ref \`${repository.ref}\` with its manifests: ${fetchedManifests.slice(0, 6).map((m) => `\`${m.path}\``).join(", ")}.`,
     );
   }
-  for (const cmd of commandsOfPurpose(rootScoped(commands, repository.scope), "install").slice(0, 2)) {
-    inputs.push(`Dependencies are installed with \`${cmd.command}\` (see ${evidenceLabel(cmd.evidence)}).`);
-  }
   if (structure.packages.length > 0) {
     inputs.push(`Monorepo packages: ${structure.packages.slice(0, 6).map((p) => `\`${p}\``).join(", ")}.`);
   }
 
-  // --- steps (orientation → setup → development → verification)
+  // --- steps (orientation: read instructions, inspect manifests, layout, test mirrors)
   const instructionPaths = repo.importantFiles
     .filter((f) => /instruction file|primary repository documentation/.test(f.reason))
     .map((f) => f.path);
@@ -94,8 +58,10 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
       `Before making changes, read the repository instructions: ${instructionPaths.slice(0, 4).map((p) => `\`${p}\``).join(", ")}.`,
     );
   }
-  for (const cmd of commandsOfPurpose(rootScoped(commands, repository.scope), "install").slice(0, 1)) {
-    steps.push(commandStep(cmd));
+  if (commands.length > 0) {
+    steps.push(
+      `Inspect \`package.json\`, CI workflows, and repository configuration before choosing project-specific commands.`,
+    );
   }
   if (structure.sourceRoots.length > 0 || structure.testRoots.length > 0) {
     const where = [
@@ -103,11 +69,6 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
       structure.testRoots.length > 0 ? `tests under ${structure.testRoots.slice(0, 4).map((r) => `\`${r}\``).join(", ")}` : null,
     ].filter((x): x is string => x !== null);
     steps.push(`The repository is organized with ${where.join(" and ")}.`);
-  }
-  for (const purpose of ["dev", "build"] as const) {
-    for (const cmd of commandsOfPurpose(commands, purpose).slice(0, purpose === "dev" ? 2 : 1)) {
-      steps.push(commandStep(cmd));
-    }
   }
   if (testing.relevantFiles.length > 0) {
     steps.push(
@@ -118,35 +79,23 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
     steps.push(`SkillForge inspected only a bounded selection of files; consult the repository directly for areas it could not inspect (see pitfalls).`);
   }
 
-  // --- constraints (repository conventions, verbatim statements)
-  //
-  // Command-grounding trust boundary (final remediation P1-3): a repository
-  // convention is repository POLICY text, never an independent source of
-  // runnable-command authority. A statement containing a runnable-command
-  // phrase is promoted ONLY when every phrase exactly matches an
-  // already-grounded RepositoryCommand (linked evidence); otherwise the
-  // statement is omitted from the plan — it remains visible in the
-  // analysis record with its `path:line` provenance, and the omission is
-  // not silently convertible into a new runnable instruction. With an empty
-  // evidenced command set this denies every command-bearing convention.
-  const grounded = conventionStatementIsGrounded;
-  const evidenced = evidencedCommandSet(commands);
-  const promotableConventions = conventions.filter((c) => grounded(c.statement, evidenced));
-  const constraints = promotableConventions.slice(0, 12).map((c) => c.statement);
+  // --- constraints (honest gap: no policy promotion)
+  const constraints: string[] = [];
 
-  // --- verification (evidenced test/typecheck/lint/build commands)
+  // --- verification (orient toward testing evidence without runnable command promotion)
   const verification: string[] = [];
-  for (const purpose of ["test", "typecheck", "lint", "build"] as const) {
-    for (const cmd of commandsOfPurpose(commands, purpose).slice(0, purpose === "test" ? 3 : 2)) {
-      verification.push(commandStep(cmd));
-    }
+  if (testing.frameworks.length > 0 || testing.relevantFiles.length > 0) {
+    const testItems = [
+      ...testing.frameworks,
+      ...testing.relevantFiles.slice(0, 2).map((p) => `\`${p}\``),
+    ];
+    verification.push(
+      `Verify changes against the repository test suites (${testItems.join(", ")}) and CI workflows before submitting.`,
+    );
   }
 
-  // --- pitfalls: warning-shaped conventions + honest uncertainty
+  // --- pitfalls: honest uncertainty + scope limits
   const pitfalls: string[] = [];
-  for (const c of promotableConventions) {
-    if (WARNINGISH.test(c.statement) && pitfalls.length < 6) pitfalls.push(c.statement);
-  }
   for (const u of repo.uncertainty.slice(0, 4)) {
     pitfalls.push(u.endsWith(".") ? u : `${u}.`);
   }
@@ -155,7 +104,7 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
   }
 
   const name = slugify(requestedName?.trim() || `${repository.owner}-${repository.name}`, 48);
-  const description = `Coding-agent guidance for ${repository.scope ? `the \`${repository.scope}\` subtree of ` : ""}${repository.owner}/${repository.name}: ${stackLabel} project with ${commands.length} evidenced command(s) and ${conventions.length} convention(s), derived from a bounded inspection of ${selection.selectedCount} file(s)${repository.scope ? "; not whole-repository guidance" : ""}.`.slice(0, 1024);
+  const description = `Coding-agent guidance for ${repository.scope ? `the \`${repository.scope}\` subtree of ` : ""}${repository.owner}/${repository.name}: ${stackLabel} project, derived from a bounded inspection of ${selection.selectedCount} file(s)${repository.scope ? "; not whole-repository guidance" : ""}.`.slice(0, 1024);
 
   return {
     name,

@@ -93,11 +93,17 @@ describe("codebase eligibility / safety filtering", () => {
   it("treats lockfiles as metadata-only (never fetched)", () => {
     expect(codebaseExclusionReason(blob("package-lock.json"), ctx)).toBe("lockfile_metadata_only");
     expect(codebaseExclusionReason(blob("pnpm-lock.yaml"), ctx)).toBe("lockfile_metadata_only");
+    expect(codebaseExclusionReason(blob("bun.lock"), ctx)).toBe("lockfile_metadata_only");
     // Lockfiles with non-allowlisted extensions are refused just the same:
     // the invariant is that no lockfile is ever fetched.
-    for (const path of ["yarn.lock", "Cargo.lock", "go.sum", "poetry.lock"]) {
+    for (const path of ["yarn.lock", "Cargo.lock", "go.sum", "poetry.lock", "bun.lockb"]) {
       expect(codebaseExclusionReason(blob(path), ctx), path).not.toBeNull();
     }
+  });
+
+  it("detects node ecosystem from bun lockfiles", () => {
+    expect(detectEcosystems([blob("bun.lock")])).toEqual(["node"]);
+    expect(detectEcosystems([blob("bun.lockb")])).toEqual(["node"]);
   });
 
   it("never follows submodules and rejects unsafe paths", () => {

@@ -34,7 +34,7 @@ export function sampleRepositoryAnalysis(): RepositoryAnalysisType {
       { path: "package.json", kind: "package.json", fetched: true },
       { path: "package-lock.json", kind: "lockfile", fetched: false },
     ],
-    commands: [{ purpose: "test", command: "npm test", evidence: "package.json scripts.test" }],
+    commands: [{ kind: "package-script", purpose: "test", name: "test", command: "npm test", evidence: "package.json scripts.test" }],
     structure: { sourceRoots: ["src/"], testRoots: ["tests/"], exampleRoots: [], packages: [] },
     entrypoints: [{ path: "src/index.ts", reason: "package.json main field" }],
     importantFiles: [{ path: "AGENTS.md", reason: "repository instruction file" }],
@@ -60,7 +60,7 @@ describe("RepositoryAnalysis schema", () => {
 
   it("rejects commands with an unknown purpose", () => {
     const bad = sampleRepositoryAnalysis();
-    bad.commands = [{ purpose: "deploy-to-prod", command: "npm publish", evidence: "package.json" } as never];
+    bad.commands = [{ kind: "package-script", purpose: "deploy-to-prod", name: "deploy", command: "npm publish", evidence: "package.json" } as never];
     expect(RepositoryAnalysis.safeParse(bad).success).toBe(false);
   });
 
