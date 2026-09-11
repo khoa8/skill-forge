@@ -78,18 +78,22 @@ async function run() {
   const port = await ephemeralPort();
   const workDir = mkdtempSync(join(tmpdir(), "skillforge-smoke-"));
   const dataRoot = join(workDir, ".data-store");
-  // Scrub every inherited runtime variable that could interfere, then pin
-  // exactly what the smoke needs. The developer's repository .env is never
-  // touched — if it is malformed, startup fails as a real npm start would.
+  // Scrub every inherited SkillForge runtime configuration variable that could
+  // interfere, then pin exactly what the smoke needs. The developer's
+  // repository .env is never touched — if it is malformed, startup fails as
+  // a real npm start would.
   const childEnv = { ...process.env };
   for (const key of [
     "PORT",
     "HOST",
+    "SKILLFORGE_ALLOWED_HOSTS",
     "SKILLFORGE_PROVIDER",
     "SKILLFORGE_API_KEY",
     "SKILLFORGE_BASE_URL",
     "SKILLFORGE_MODEL",
     "SKILLFORGE_DATA_ROOT",
+    "SKILLFORGE_DOCS_ROOT",
+    "SKILLFORGE_GITHUB_TOKEN",
     "SKILLFORGE_ACKNOWLEDGE_EXPOSURE",
   ]) {
     delete childEnv[key];

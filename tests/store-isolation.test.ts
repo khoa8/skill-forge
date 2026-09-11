@@ -73,7 +73,7 @@ describe("store/test isolation", () => {
         const res = await fetch(`http://127.0.0.1:${port}/api/generate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sourceType: "sample", sampleId: "fastforge-cli" }),
+          body: JSON.stringify({ sourceType: "sample", sampleId: "scaffoldcraft-cli" }),
           signal: AbortSignal.abort(),
         }).catch(() => null);
         expect(res).toBeNull(); // request failed client-side (aborted)
