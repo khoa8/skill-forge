@@ -7,7 +7,7 @@ Exporters are the only place vendor-specific format differences live (AGENTS.md 
 | Target | Label | Layout | Format basis |
 | --- | --- | --- | --- |
 | `claude-code` | Claude Code | `<skill-id>/SKILL.md` with `name` + `description` YAML front matter, plus canonical supporting files (`references/`, `workflows/`, `examples/`, `evals/`, `manifest.json`) | Anthropic Agent Skills format: `name` ≤64 chars lowercase-hyphen, `description` ≤1024 chars. The exporter enforces these constraints and rewrites front matter if the id drifted. Structure verified by this repo's tests. |
-| `generic` | Generic (AGENTS.md) | Same as canonical plus a root `AGENTS.md` orientation wrapper | The AGENTS.md convention: a root markdown instruction file any agent can read. The wrapper is synthesized from the canonical plan (grounded). Verified by this repo's tests. |
+| `generic` | Generic (AGENTS.md) | Same as canonical plus a root `AGENTS.md` orientation wrapper | The AGENTS.md convention: a root markdown instruction file any agent can read. The wrapper orients agents toward the authoritative `SKILL.md` and canonical package files. Verified by this repo's tests. |
 
 **Honesty rule:** we claim only what is tested. Both exporters are covered by unit + end-to-end tests (structure, front-matter constraints, manifest resync, ZIP round-trip). Package-structure tests do not guarantee runtime behavior inside Claude Code or other agent runtimes; validate compatibility in the target runtime.
 

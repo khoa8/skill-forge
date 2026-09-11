@@ -24,6 +24,7 @@ import {
   getSkill as loadSkill,
   EditError,
   toResponse,
+  normalizeStoredSource,
 } from "./store.js";
 import type { ExportTarget, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
@@ -444,7 +445,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     }
     let normalized;
     try {
-      normalized = normalizeSource({ type: stored.source.type, name: stored.source.name, content: stored.source.text });
+      normalized = normalizeStoredSource(stored.source);
     } catch (err) {
       res.status(409).json({
         error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
@@ -485,9 +486,19 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       res.status(404).json({ error: `No skill with id "${req.params.id}".` });
       return;
     }
+    let normalized;
+    try {
+      normalized = normalizeStoredSource(stored.source);
+    } catch (err) {
+      res.status(409).json({
+        error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        code: "source_renormalization_failed",
+      });
+      return;
+    }
     const report = validatePackage({
       skill: stored.skill,
-      sourceText: stored.source.text,
+      sourceText: normalized.text,
       target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
       sourceType: stored.source.type,
     });
@@ -550,10 +561,21 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     }
     const target = parsed.data.target;
 
+    let normalized;
+    try {
+      normalized = normalizeStoredSource(stored.source);
+    } catch (err) {
+      res.status(409).json({
+        error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        code: "source_renormalization_failed",
+      });
+      return;
+    }
+
     // Validation gate: never export a package that fails deterministic checks.
     const report = validatePackage({
       skill: stored.skill,
-      sourceText: stored.source.text,
+      sourceText: normalized.text,
       target,
       sourceType: stored.source.type,
     });

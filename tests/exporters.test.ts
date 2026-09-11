@@ -64,16 +64,20 @@ describe("exporters", () => {
   });
 
   it("generic export adds an AGENTS.md wrapper and updates the manifest", () => {
-    const exported = exportPackage(skill(), "generic");
+    const s = skill();
+    const exported = exportPackage(s, "generic");
     const agents = exported.files.find((f) => f.path === "AGENTS.md");
     expect(agents).toBeDefined();
     expect(agents!.content).toContain("## How to use this skill");
+    expect(agents!.content).toContain("`SKILL.md` is the authoritative skill definition");
+    expect(agents!.content).not.toContain("## Purpose");
+    expect(agents!.content).not.toContain("## Constraints");
     const manifest = JSON.parse(exported.files.find((f) => f.path === "manifest.json")!.content);
     const listed = manifest.files.map((f: { path: string }) => f.path);
     expect(listed).toContain("AGENTS.md");
     expect(manifest.exportNotes.length).toBeGreaterThan(0);
     // Exported package must still pass deterministic validation.
-    const report = validatePackage({ skill: { ...skill(), files: exported.files } });
+    const report = validatePackage({ skill: { ...s, files: exported.files } });
     expect(report.passed).toBe(true);
   });
 

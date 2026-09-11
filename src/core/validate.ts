@@ -19,7 +19,7 @@ import type {
   ValidationCheck,
   ValidationReport,
 } from "./types.js";
-import { safePackagePath } from "./util.js";
+import { safePackagePath, sha256 } from "./util.js";
 
 export const VALIDATOR_VERSION = "1.0.0";
 
@@ -266,7 +266,7 @@ const jsonParses = check("json-parse", "JSON files parse", ({ skill }) => {
   return outcomes.length === 0 ? pass() : outcomes;
 });
 
-const manifestConsistency = check("manifest-consistency", "Manifest matches package contents", ({ skill }) => {
+const manifestConsistency = check("manifest-consistency", "Manifest matches package contents", ({ skill, sourceText }) => {
   const manifestFile = skill.files.find((f) => f.path === "manifest.json");
   if (!manifestFile) return pass();
   let manifest: unknown;
@@ -277,22 +277,104 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
   }
   const m = manifest as {
     schema?: string;
-    source?: { sha256?: string; name?: string };
-    files?: { path?: string; bytes?: number; sha256?: string }[];
+    source?: { sha256?: unknown; name?: unknown };
+    files?: unknown;
     gaps?: unknown;
   };
   const outcomes: CheckOutcome[] = [];
   if (m.schema !== "skillforge.manifest/1") {
     outcomes.push(warn(`manifest.json has unrecognized schema "${String(m.schema)}".`, "manifest.json"));
   }
-  const listed = new Map<string, { bytes?: number; sha256?: string }>();
-  for (const f of m.files ?? []) {
-    if (typeof f.path !== "string") continue;
-    if (listed.has(f.path)) {
-      outcomes.push(fail(`manifest.json lists "${f.path}" more than once.`, "manifest.json"));
+
+  // --- Source hash validation
+  const sourceInfo = m.source;
+  if (!sourceInfo || typeof sourceInfo !== "object" || Array.isArray(sourceInfo)) {
+    outcomes.push(fail("manifest.json is missing the required `source` object.", "manifest.json"));
+  } else {
+    const srcSha = sourceInfo.sha256;
+    if (typeof srcSha !== "string" || !/^[a-f0-9]{64}$/.test(srcSha)) {
+      outcomes.push(
+        fail(
+          `manifest.json source.sha256 (${JSON.stringify(srcSha ?? null)}) is missing or not a 64-character lowercase hex string.`,
+          "manifest.json",
+        ),
+      );
+    } else if (sourceText !== undefined) {
+      const expectedSourceHash = sha256(sourceText);
+      if (srcSha !== expectedSourceHash) {
+        outcomes.push(
+          fail(
+            `manifest.json source.sha256 "${srcSha}" does not match the SHA-256 of the normalized source text ("${expectedSourceHash}").`,
+            "manifest.json",
+          ),
+        );
+      }
+    } else {
+      outcomes.push(
+        warn(
+          "Source text unavailable; manifest.source.sha256 could not be verified against source text. This check was skipped, not passed.",
+          "manifest.json",
+        ),
+      );
     }
-    listed.set(f.path, { bytes: f.bytes, sha256: f.sha256 });
   }
+
+  // --- Files array validation
+  if (!Array.isArray(m.files)) {
+    outcomes.push(fail("manifest.json `files` is missing or not an array.", "manifest.json"));
+    return outcomes;
+  }
+
+  const listed = new Map<string, { bytes: number; sha256: string }>();
+  for (const f of m.files as { path?: unknown; bytes?: unknown; sha256?: unknown }[]) {
+    if (typeof f !== "object" || f === null || Array.isArray(f)) {
+      outcomes.push(fail("manifest.json `files` contains a non-object entry.", "manifest.json"));
+      continue;
+    }
+    const path = f.path;
+    if (typeof path !== "string" || path.trim().length === 0) {
+      outcomes.push(fail("manifest.json file entry is missing a valid `path`.", "manifest.json"));
+      continue;
+    }
+    if (path === "manifest.json") {
+      outcomes.push(fail("manifest.json cannot list itself in `files`.", "manifest.json"));
+      continue;
+    }
+    const safe = safePackagePath(path);
+    if (safe === null || safe !== path) {
+      outcomes.push(fail(`manifest.json lists unsafe or non-normalized file path "${path}".`, "manifest.json"));
+    }
+    if (listed.has(path)) {
+      outcomes.push(fail(`manifest.json lists "${path}" more than once.`, "manifest.json"));
+      continue;
+    }
+
+    let validEntry = true;
+    if (typeof f.bytes !== "number" || !Number.isInteger(f.bytes) || f.bytes < 0) {
+      outcomes.push(
+        fail(
+          `manifest.json records invalid bytes for "${path}" (expected non-negative integer, got ${JSON.stringify(f.bytes ?? null)}).`,
+          "manifest.json",
+        ),
+      );
+      validEntry = false;
+    }
+
+    if (typeof f.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(f.sha256)) {
+      outcomes.push(
+        fail(
+          `manifest.json records invalid sha256 for "${path}" (expected 64-character lowercase hex, got ${JSON.stringify(f.sha256 ?? null)}).`,
+          "manifest.json",
+        ),
+      );
+      validEntry = false;
+    }
+
+    if (validEntry) {
+      listed.set(path, { bytes: f.bytes as number, sha256: f.sha256 as string });
+    }
+  }
+
   const actual = new Set(skill.files.map((f) => f.path));
   for (const [path, info] of listed) {
     if (!actual.has(path)) {
@@ -300,17 +382,23 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
       continue;
     }
     const file = skill.files.find((f) => f.path === path)!;
-    const bytes = Buffer.byteLength(file.content, "utf8");
-    if (typeof info.bytes === "number" && info.bytes !== bytes) {
-      outcomes.push(fail(`manifest.json records ${info.bytes} bytes for "${path}" but the file is ${bytes}.`, "manifest.json"));
+    const actualBytes = Buffer.byteLength(file.content, "utf8");
+    if (info.bytes !== actualBytes) {
+      outcomes.push(fail(`manifest.json records ${info.bytes} bytes for "${path}" but the file is ${actualBytes}.`, "manifest.json"));
+    }
+    const actualHash = sha256(file.content);
+    if (info.sha256 !== actualHash) {
+      outcomes.push(fail(`manifest.json records sha256 "${info.sha256}" for "${path}" but the file hash is "${actualHash}".`, "manifest.json"));
     }
   }
+
   for (const path of actual) {
     // manifest.json cannot list itself; only flag other unlisted files.
     if (path !== "manifest.json" && !listed.has(path)) {
       outcomes.push(fail(`File "${path}" exists in the package but is not listed in manifest.json.`, "manifest.json"));
     }
   }
+
   return outcomes.length === 0 ? pass() : outcomes;
 });
 
