@@ -268,17 +268,34 @@ export async function apiFetch(
   return res;
 }
 
+/**
+ * Format the epoch-seconds timestamp from GitHub's x-ratelimit-reset header
+ * into a human-readable UTC time string (e.g. "14:32 UTC"). Returns null if
+ * the header is missing, non-numeric, non-positive, or yields an invalid date.
+ */
+export function formatRateLimitResetTime(headerValue: string | null): string | null {
+  if (!headerValue) return null;
+  const trimmed = headerValue.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const seconds = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return null;
+  const hours = String(date.getUTCHours()).padStart(2, "0");
+  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${hours}:${minutes} UTC`;
+}
+
 function throwForApiStatus(res: Response, url: string): void {
   if (res.ok) return;
   const remaining = res.headers.get("x-ratelimit-remaining");
   if (res.status === 403 || res.status === 429) {
     if (remaining === "0" || res.status === 429) {
-      const reset = res.headers.get("x-ratelimit-reset");
-      const when = reset ? new Date(Number.parseInt(reset, 10) * 1000).toISOString() : "later";
-      throw new GithubSourceError(
-        `GitHub API rate limit reached while calling ${url}. Unauthenticated requests are limited to 60/hour; set SKILLFORGE_GITHUB_TOKEN to raise it. Limit resets at ${when}.`,
-        "github_rate_limited",
-      );
+      const resetTime = formatRateLimitResetTime(res.headers.get("x-ratelimit-reset"));
+      const message = resetTime
+        ? `GitHub API rate limit reached. Try again after ${resetTime} or configure an optional GitHub token for higher public-repository limits.`
+        : "GitHub API rate limit reached. Try again later or configure an optional GitHub token for higher public-repository limits.";
+      throw new GithubSourceError(message, "github_rate_limited");
     }
   }
   if (res.status === 404) {
@@ -357,6 +374,90 @@ export function docPriority(path: string): number {
   return 3;
 }
 
+export interface GithubRepoMetadata {
+  default_branch?: string;
+  private?: boolean;
+  visibility?: string;
+}
+
+/**
+ * Assert that repository metadata positively confirms the repository is public.
+ * Truly fail-closed:
+ * 1. Rejects private or non-public visibility explicitly (code: github_private_repo).
+ * 2. Rejects if private === false is not positively confirmed (code: github_fetch_failed).
+ */
+export function assertPublicRepository(meta: GithubRepoMetadata, repoLabel: string): void {
+  if (meta.private === true || (typeof meta.visibility === "string" && meta.visibility.toLowerCase() !== "public")) {
+    throw new GithubSourceError(
+      "Private GitHub repositories are not supported. SkillForge reads public repositories only.",
+      "github_private_repo",
+    );
+  }
+  if (meta.private !== false) {
+    throw new GithubSourceError(
+      `GitHub did not confirm public status for ${repoLabel}. SkillForge reads public repositories only.`,
+      "github_fetch_failed",
+    );
+  }
+}
+
+export interface ResolvedGithubRepo {
+  owner: string;
+  repo: string;
+  ref: string;
+  defaultBranchUsed: boolean;
+}
+
+/**
+ * Perform repository metadata discovery and verify publicness before any tree
+ * traversal or raw file requests. Used by both documentation and codebase modes.
+ */
+export async function resolvePublicGithubRepo(
+  fetchImpl: typeof fetch,
+  ref0: GithubRepoRef,
+  opts: {
+    timeoutMs: number;
+    token?: string;
+    signal: AbortSignal;
+    maxJsonBytes?: number;
+  },
+): Promise<ResolvedGithubRepo> {
+  const apiBase = `https://${API_HOST}/repos/${ref0.owner}/${ref0.repo}`;
+  const res = await apiFetch(fetchImpl, apiBase, {
+    timeoutMs: opts.timeoutMs,
+    token: opts.token,
+    signal: opts.signal,
+  });
+  const meta = (await readBodyWithDeadline(
+    res,
+    opts.signal,
+    "json",
+    opts.maxJsonBytes ?? MAX_GITHUB_JSON_BYTES,
+  )) as GithubRepoMetadata;
+
+  assertPublicRepository(meta, `${ref0.owner}/${ref0.repo}`);
+
+  let ref = ref0.ref;
+  let defaultBranchUsed = false;
+  if (ref === undefined) {
+    if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
+      throw new GithubSourceError(
+        `GitHub did not report a default branch for ${ref0.owner}/${ref0.repo}.`,
+        "github_fetch_failed",
+      );
+    }
+    ref = meta.default_branch;
+    defaultBranchUsed = true;
+  }
+
+  return {
+    owner: ref0.owner,
+    repo: ref0.repo,
+    ref,
+    defaultBranchUsed,
+  };
+}
+
 /** Fetch a bounded documentation tree from a GitHub repository. */
 export async function fetchGithubSource(
   rawUrl: string,
@@ -377,27 +478,15 @@ export async function fetchGithubSource(
   const apiBase = `https://${API_HOST}/repos/${ref0.owner}/${ref0.repo}`;
   const notes: string[] = [];
 
-  // Resolve the default branch when the URL omits a ref.
-  let ref = ref0.ref;
-  let defaultBranchUsed = false;
-  if (ref === undefined) {
-    const res = await apiFetch(fetchImpl, `${apiBase}`, { timeoutMs, token, signal: deadline });
-    const meta = (await readBodyWithDeadline(res, deadline, "json", MAX_GITHUB_JSON_BYTES)) as { default_branch?: string };
-    if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
-      throw new GithubSourceError(
-        `GitHub did not report a default branch for ${ref0.owner}/${ref0.repo}.`,
-        "github_fetch_failed",
-      );
-    }
-    ref = meta.default_branch;
-    defaultBranchUsed = true;
-  }
-  const repoRef: { owner: string; repo: string; ref: string; defaultBranchUsed: boolean } = {
-    owner: ref0.owner,
-    repo: ref0.repo,
-    ref,
-    defaultBranchUsed,
-  };
+  // Resolve repository metadata & verify publicness before any tree traversal.
+  const repoRef = await resolvePublicGithubRepo(fetchImpl, ref0, {
+    timeoutMs,
+    token,
+    signal: deadline,
+    maxJsonBytes: MAX_GITHUB_JSON_BYTES,
+  });
+  const ref = repoRef.ref;
+  const defaultBranchUsed = repoRef.defaultBranchUsed;
 
   // One bounded recursive tree request.
   const treeRes = await apiFetch(fetchImpl, `${apiBase}/git/trees/${encodeURIComponent(ref)}?recursive=1`, {

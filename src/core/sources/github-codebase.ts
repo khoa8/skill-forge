@@ -593,6 +593,7 @@ import {
   fetchRawFile,
   combinedChunkBytes,
   combinedFileChunk,
+  resolvePublicGithubRepo,
 } from "./github.js";
 import { buildRepositoryAnalysisFromFiles } from "../codebase/extract.js";
 
@@ -655,24 +656,18 @@ export async function fetchGithubCodebaseSource(
   const apiBase = `https://${API_HOST}/repos/${ref0.owner}/${ref0.repo}`;
   const notes: string[] = [];
 
-  // 1. Repository metadata (default-branch resolution).
-  let ref = ref0.ref;
-  let defaultBranchUsed = false;
+  // 1. Repository metadata discovery + publicness verification before any tree traversal.
+  let ref: string;
+  let defaultBranchUsed: boolean;
   try {
-    if (ref === undefined) {
-      const res = await apiFetch(fetchImpl, apiBase, { timeoutMs, token, signal: deadline });
-      const meta = (await readBodyWithDeadline(res, deadline, "json", MAX_CODEBASE_TREE_BYTES)) as {
-        default_branch?: string;
-      };
-      if (typeof meta.default_branch !== "string" || meta.default_branch.length === 0) {
-        throw new GithubCodebaseError(
-          `GitHub did not report a default branch for ${ref0.owner}/${ref0.repo}.`,
-          "codebase_fetch_failed",
-        );
-      }
-      ref = meta.default_branch;
-      defaultBranchUsed = true;
-    }
+    const repoRef = await resolvePublicGithubRepo(fetchImpl, ref0, {
+      timeoutMs,
+      token,
+      signal: deadline,
+      maxJsonBytes: MAX_CODEBASE_TREE_BYTES,
+    });
+    ref = repoRef.ref;
+    defaultBranchUsed = repoRef.defaultBranchUsed;
 
     // 2. One bounded recursive tree request.
     const treeRes = await apiFetch(

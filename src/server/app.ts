@@ -109,6 +109,8 @@ const GITHUB_ERROR_STATUS: Record<string, number> = {
   github_no_docs: 422,
   github_rate_limited: 429,
   github_fetch_failed: 502,
+  github_deadline_exceeded: 504,
+  github_private_repo: 400,
   // Codebase mode reuses the docs adapter's URL grammar, so URL-level codes
   // arrive in the docs spelling; status mapping is shared.
   codebase_invalid_url: 400,
@@ -119,6 +121,7 @@ const GITHUB_ERROR_STATUS: Record<string, number> = {
   codebase_rate_limited: 429,
   codebase_fetch_failed: 502,
   codebase_deadline_exceeded: 504,
+  codebase_private_repo: 400,
 };
 
 /** Map an API sourceType to the canonical SourceInput type kept in the store. */

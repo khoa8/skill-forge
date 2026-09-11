@@ -35,7 +35,7 @@ function codebaseFetch(o: {
     if (o.failUrls?.some((f) => url.includes(f))) throw new TypeError("network unreachable");
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       const status = typeof o.repo === "number" ? o.repo : 200;
-      const body = typeof o.repo === "number" ? { message: "Not Found" } : (o.repo ?? { default_branch: "main" });
+      const body = typeof o.repo === "number" ? { message: "Not Found" } : (o.repo ?? { default_branch: "main", private: false, visibility: "public" });
       return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     }
     if (url.includes("/git/trees/")) {
@@ -460,22 +460,100 @@ describe("codebase ingestion safety", () => {
   it("maps ref-not-found distinctly", async () => {
     await expect(
       fetchGithubCodebaseSource("https://github.com/acme/widgets", {
-        fetchImpl: codebaseFetch({ repo: { default_branch: "main" }, tree: 404 }),
+        fetchImpl: codebaseFetch({ repo: { default_branch: "main", private: false, visibility: "public" }, tree: 404 }),
       }),
     ).rejects.toMatchObject({ code: "codebase_ref_not_found" });
   });
 
-  it("maps rate limiting to a typed error", async () => {
+  it("rejects private repositories at root URLs before tree or raw fetching", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubCodebaseSource("https://github.com/acme/private-repo", {
+        fetchImpl: codebaseFetch({ repo: { default_branch: "main", private: true, visibility: "private" }, log }),
+      }),
+    ).rejects.toMatchObject({
+      code: "codebase_private_repo",
+      message: expect.stringContaining("Private GitHub repositories are not supported"),
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/private-repo"]);
+  });
+
+  it("rejects private repositories at explicit /tree/ URLs before tree or raw fetching", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubCodebaseSource("https://github.com/acme/private-repo/tree/main/packages/app", {
+        fetchImpl: codebaseFetch({ repo: { default_branch: "main", private: true, visibility: "private" }, log }),
+      }),
+    ).rejects.toMatchObject({
+      code: "codebase_private_repo",
+      message: expect.stringContaining("Private GitHub repositories are not supported"),
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/private-repo"]);
+  });
+
+  it("rejects private repositories in codebase mode when token is provided", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubCodebaseSource("https://github.com/acme/private-repo", {
+        fetchImpl: codebaseFetch({ repo: { default_branch: "main", private: true }, log }),
+        token: "ghp_codebase_secret",
+      }),
+    ).rejects.toMatchObject({
+      code: "codebase_private_repo",
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/private-repo"]);
+    expect(log.apiHeaders.authorization).toBe("Bearer ghp_codebase_secret");
+  });
+
+  it("fails closed in codebase mode when repository metadata omits private status", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubCodebaseSource("https://github.com/acme/unconfirmed-repo", {
+        fetchImpl: codebaseFetch({ repo: { default_branch: "main" }, log }),
+      }),
+    ).rejects.toMatchObject({
+      code: "codebase_fetch_failed",
+      message: expect.stringContaining("did not confirm public status"),
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/unconfirmed-repo"]);
+  });
+
+  it("maps rate limiting to a typed error with formatted UTC reset time", async () => {
     const limited = new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
       status: 403,
       headers: { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1735689600" },
     });
     const alwaysLimited = (async () => limited) as unknown as typeof fetch;
-    await expect(
-      fetchGithubCodebaseSource("https://github.com/acme/widgets", {
+    try {
+      await fetchGithubCodebaseSource("https://github.com/acme/widgets", {
         fetchImpl: alwaysLimited,
-      }),
-    ).rejects.toMatchObject({ code: "codebase_rate_limited" });
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as GithubCodebaseError;
+      expect(e.code).toBe("codebase_rate_limited");
+      expect(e.message).toContain("Try again after 00:00 UTC");
+      expect(e.message).toContain("optional GitHub token for higher public-repository limits");
+    }
+  });
+
+  it("maps rate limiting with missing reset to clean fallback in codebase mode", async () => {
+    const limited = new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+      status: 429,
+      headers: { "content-type": "application/json" },
+    });
+    const alwaysLimited = (async () => limited) as unknown as typeof fetch;
+    try {
+      await fetchGithubCodebaseSource("https://github.com/acme/widgets", {
+        fetchImpl: alwaysLimited,
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as GithubCodebaseError;
+      expect(e.code).toBe("codebase_rate_limited");
+      expect(e.message).toContain("Try again later or configure an optional GitHub token for higher public-repository limits.");
+      expect(e.message).not.toContain("Invalid Date");
+    }
   });
 
   it("errors honestly when nothing analyzable exists", async () => {

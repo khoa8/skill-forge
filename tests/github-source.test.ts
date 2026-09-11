@@ -34,7 +34,7 @@ function githubFetch(o: {
     if (o.failUrls?.some((f) => url.includes(f))) throw new TypeError("network unreachable");
     if (isApi && !url.includes("/git/trees/")) {
       const status = typeof o.repo === "number" ? o.repo : 200;
-      const body = typeof o.repo === "number" ? { message: "Not Found" } : (o.repo ?? { default_branch: "main" });
+      const body = typeof o.repo === "number" ? { message: "Not Found" } : (o.repo ?? { default_branch: "main", private: false, visibility: "public" });
       return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     }
     if (url.includes("/git/trees/")) {
@@ -173,14 +173,15 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(log.urls.some((u) => u.startsWith("https://raw.githubusercontent.com/acme/widgets/main/"))).toBe(true);
   });
 
-  it("uses an explicit ref from tree URLs without resolving the default branch", async () => {
+  it("uses an explicit ref from tree URLs while validating publicness via metadata", async () => {
     const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
     const result = await fetchGithubSource("https://github.com/acme/widgets/tree/v2/docs", {
       fetchImpl: githubFetch({ tree: stdTree(), raw: stdRaw(), log }),
     });
     expect(result.repo.defaultBranchUsed).toBe(false);
     expect(result.repo.ref).toBe("v2");
-    expect(log.urls.every((u) => !u.endsWith("api.github.com/repos/acme/widgets"))).toBe(true);
+    expect(log.urls[0]).toBe("https://api.github.com/repos/acme/widgets");
+    expect(log.urls[1]).toContain("/git/trees/v2?");
   });
 
   it("combines documentation with path headers and README first, in deterministic order", async () => {
@@ -463,21 +464,129 @@ describe("fetchGithubSource (injected fetch)", () => {
   it("distinguishes ref-not-found from repository-not-found", async () => {
     await expect(
       fetchGithubSource("https://github.com/acme/widgets", {
-        fetchImpl: githubFetch({ repo: { default_branch: "main" }, tree: 404 }),
+        fetchImpl: githubFetch({ repo: { default_branch: "main", private: false, visibility: "public" }, tree: 404 }),
       }),
     ).rejects.toMatchObject({ code: "github_ref_not_found" });
   });
 
-  it("maps GitHub rate-limit responses to a typed error", async () => {
+  it("rejects private repositories at root URLs before tree or raw fetching", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubSource("https://github.com/acme/private-repo", {
+        fetchImpl: githubFetch({ repo: { default_branch: "main", private: true, visibility: "private" }, log }),
+      }),
+    ).rejects.toMatchObject({
+      code: "github_private_repo",
+      message: expect.stringContaining("Private GitHub repositories are not supported"),
+    });
+    // Metadata was fetched, but tree and raw were NEVER requested.
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/private-repo"]);
+  });
+
+  it("rejects private repositories at explicit /tree/ URLs before tree or raw fetching", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubSource("https://github.com/acme/private-repo/tree/v1/docs", {
+        fetchImpl: githubFetch({ repo: { default_branch: "main", private: true, visibility: "private" }, log }),
+      }),
+    ).rejects.toMatchObject({
+      code: "github_private_repo",
+      message: expect.stringContaining("Private GitHub repositories are not supported"),
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/private-repo"]);
+  });
+
+  it("rejects private repositories when a token is provided without leaking token or fetching tree", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubSource("https://github.com/acme/private-repo", {
+        fetchImpl: githubFetch({ repo: { default_branch: "main", private: true }, log }),
+        token: "ghp_secret_token_123",
+      }),
+    ).rejects.toMatchObject({
+      code: "github_private_repo",
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/private-repo"]);
+    expect(log.apiHeaders.authorization).toBe("Bearer ghp_secret_token_123");
+  });
+
+  it("fails closed when repository metadata omits private status", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    await expect(
+      fetchGithubSource("https://github.com/acme/unconfirmed-repo", {
+        fetchImpl: githubFetch({ repo: { default_branch: "main" }, log }),
+      }),
+    ).rejects.toMatchObject({
+      code: "github_fetch_failed",
+      message: expect.stringContaining("did not confirm public status"),
+    });
+    expect(log.urls).toEqual(["https://api.github.com/repos/acme/unconfirmed-repo"]);
+  });
+
+  it("rejects repositories where visibility is non-public", async () => {
+    await expect(
+      fetchGithubSource("https://github.com/acme/internal-repo", {
+        fetchImpl: githubFetch({ repo: { default_branch: "main", private: false, visibility: "internal" } }),
+      }),
+    ).rejects.toMatchObject({
+      code: "github_private_repo",
+    });
+  });
+
+  it("maps GitHub rate-limit responses with valid reset to typed error and formatted UTC message", async () => {
+    // 1735689600 = 2025-01-01T00:00:00Z -> 00:00 UTC
     const limited = new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
       status: 403,
       headers: { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1735689600" },
     });
-    await expect(
-      fetchGithubSource("https://github.com/acme/widgets", {
+    try {
+      await fetchGithubSource("https://github.com/acme/widgets", {
         fetchImpl: githubFetch({ firstResponse: limited }),
-      }),
-    ).rejects.toMatchObject({ code: "github_rate_limited" });
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as GithubSourceError;
+      expect(e.code).toBe("github_rate_limited");
+      expect(e.message).toContain("Try again after 00:00 UTC");
+      expect(e.message).toContain("optional GitHub token for higher public-repository limits");
+      expect(e.message).not.toContain("api.github.com");
+    }
+  });
+
+  it("maps GitHub rate-limit responses with missing reset to fallback message", async () => {
+    const limited = new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+      status: 429,
+      headers: { "content-type": "application/json" },
+    });
+    try {
+      await fetchGithubSource("https://github.com/acme/widgets", {
+        fetchImpl: githubFetch({ firstResponse: limited }),
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as GithubSourceError;
+      expect(e.code).toBe("github_rate_limited");
+      expect(e.message).toContain("Try again later or configure an optional GitHub token for higher public-repository limits.");
+      expect(e.message).not.toContain("Invalid Date");
+    }
+  });
+
+  it("handles malformed/invalid reset headers gracefully without throwing Invalid Date", async () => {
+    const limited = new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+      status: 403,
+      headers: { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "not-a-number" },
+    });
+    try {
+      await fetchGithubSource("https://github.com/acme/widgets", {
+        fetchImpl: githubFetch({ firstResponse: limited }),
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as GithubSourceError;
+      expect(e.code).toBe("github_rate_limited");
+      expect(e.message).toContain("Try again later");
+      expect(e.message).not.toContain("Invalid Date");
+    }
   });
 
   it("maps network failures to a typed error", async () => {
@@ -550,7 +659,7 @@ describe("fetchGithubSource (injected fetch)", () => {
                     { path: "docs/guide.md", type: "blob", size: GUIDE.length },
                   ],
                 }
-              : { default_branch: "main" },
+              : { default_branch: "main", private: false, visibility: "public" },
           ),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -581,7 +690,7 @@ describe("fetchGithubSource (injected fetch)", () => {
           JSON.stringify(
             url.includes("/git/trees/")
               ? { sha: "x", truncated: false, tree: [{ path: "README.md", type: "blob", size: README.length }] }
-              : { default_branch: "main" },
+              : { default_branch: "main", private: false, visibility: "public" },
           ),
           { status: 200, headers: { "content-type": "application/json" } },
         );

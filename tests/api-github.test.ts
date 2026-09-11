@@ -34,7 +34,7 @@ function stubFetch(options: {
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       const status = typeof options.repo === "number" ? options.repo : 200;
       const body =
-        typeof options.repo === "number" ? { message: "Not Found" } : (options.repo ?? { default_branch: "main" });
+        typeof options.repo === "number" ? { message: "Not Found" } : (options.repo ?? { default_branch: "main", private: false, visibility: "public" });
       return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     }
     if (url.includes("/git/trees/")) {
@@ -130,13 +130,23 @@ afterAll(async () => {
     expect(res.body.code).toBe("github_not_found");
   });
 
-  it("maps rate limiting to 429 with the typed code", async () => {
+  it("maps private repositories to 400 with the typed code", async () => {
+    stubFetch({ repo: { default_branch: "main", private: true, visibility: "private" } });
+    const res = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "github", repo: "https://github.com/acme/private-widgets" })
+      .expect(400);
+    expect(res.body.code).toBe("github_private_repo");
+    expect(res.body.error).toContain("Private GitHub repositories are not supported");
+  });
+
+  it("maps rate limiting to 429 with the typed code and optional token copy", async () => {
     vi.stubGlobal(
       "fetch",
       (async () =>
         new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
           status: 403,
-          headers: { "content-type": "application/json", "x-ratelimit-remaining": "0" },
+          headers: { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1735689600" },
         })) as unknown as typeof fetch,
     );
     const res = await request(app)
@@ -144,6 +154,36 @@ afterAll(async () => {
       .send({ sourceType: "github", repo: "https://github.com/acme/widgets" })
       .expect(429);
     expect(res.body.code).toBe("github_rate_limited");
+    expect(res.body.error).toContain("00:00 UTC");
+    expect(res.body.error).toContain("optional GitHub token for higher public-repository limits");
+  });
+
+  it("maps documentation deadline exceeded to 504 with the typed code (G-01)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      (async () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      }) as unknown as typeof fetch,
+    );
+    // When deadline fires, github.ts throws github_deadline_exceeded
+    // Simulate by injecting an immediate deadline abort in the route
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    const deadlineApp = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+    // Stub fetch to simulate deadline exceeded
+    const { GithubSourceError } = await import("../src/core/sources/github.js");
+    const githubModule = await import("../src/core/sources/github.js");
+    const spy = vi.spyOn(githubModule, "fetchGithubSource").mockRejectedValueOnce(
+      new GithubSourceError("GitHub ingestion exceeded its overall time budget.", "github_deadline_exceeded"),
+    );
+    const res = await request(deadlineApp)
+      .post("/api/generate")
+      .send({ sourceType: "github", repo: "https://github.com/acme/slow-repo" })
+      .expect(504);
+    expect(res.body.code).toBe("github_deadline_exceeded");
+    spy.mockRestore();
+    await cleanup();
   });
 
   it("maps missing documentation to 422 with the typed code", async () => {
