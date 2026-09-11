@@ -212,7 +212,7 @@ describe("provider credential routing (F-02)", () => {
         {
           provider: "glm",
           hasApiKey: true,
-          apiKey: "GLM_TEST_KEY_12345",
+          apiKey: "mock-test-key",
         },
         { storeRoot },
       );
@@ -231,7 +231,7 @@ describe("provider credential routing (F-02)", () => {
       // Verify that configured GLM endpoint was called
       expect(calledUrls.some((u) => u.startsWith("https://open.bigmodel.cn/"))).toBe(true);
       // Verify that GLM key was only sent to the GLM endpoint
-      expect(authHeaders).toEqual(["Bearer GLM_TEST_KEY_12345"]);
+      expect(authHeaders).toEqual(["Bearer mock-test-key"]);
 
       // Verify resulting skill generator is configured provider (glm), not request provider (openai)
       const events = res.text.trim().split("\n").map((l) => JSON.parse(l));
