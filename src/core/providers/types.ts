@@ -3,12 +3,15 @@
  * providers turn (normalized source, analysis) into a validated SkillPlan,
  * and the shared builder produces the canonical package.
  */
-import type { SourceAnalysis, NormalizedSource } from "../types.js";
+import type { SourceAnalysis, NormalizedSource, RepositoryAnalysis } from "../types.js";
 import type { SkillPlan } from "../plan.js";
 
 export interface GenerateInput {
   source: NormalizedSource;
   analysis: SourceAnalysis;
+  /** Structured repository analysis — present only for github-codebase
+   * sources; providers must ground repository claims in it. */
+  repository?: RepositoryAnalysis;
   /** Optional user hint for naming the skill. */
   requestedName?: string;
   /** Optional caller cancellation (e.g. HTTP client disconnect). Remote

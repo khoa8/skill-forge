@@ -35,8 +35,8 @@ export const GITHUB_OVERALL_TIMEOUT_MS = 60_000;
  * a legitimate response carries, so hitting it means the host is misbehaving. */
 const MAX_GITHUB_JSON_BYTES = 10_000_000;
 
-const API_HOST = "api.github.com";
-const RAW_HOSTS = new Set(["raw.githubusercontent.com", "objects.githubusercontent.com"]);
+export const API_HOST = "api.github.com";
+export const RAW_HOSTS = new Set(["raw.githubusercontent.com", "objects.githubusercontent.com"]);
 /** Directories that never hold primary documentation. */
 const SKIP_DIRS = new Set(["node_modules", "vendor", "dist", "build", "out", "coverage", ".git"]);
 
@@ -71,7 +71,7 @@ function assertOverallAlive(overallSignal: AbortSignal): void {
  * refused mid-read instead of being buffered to completion first.
  * Network/body failures keep their existing typed error.
  */
-async function readBodyWithDeadline(
+export async function readBodyWithDeadline(
   res: Response,
   overallSignal: AbortSignal,
   kind: "text" | "json",
@@ -188,8 +188,9 @@ export function parseGithubRepoUrl(raw: string): GithubRepoRef {
   return { owner, repo, ref, path };
 }
 
-/** Refuse tree paths that could escape the repository namespace. */
-function isSafeRepoPath(path: string): boolean {
+/** Refuse tree paths that could escape the repository namespace. Shared by
+ * the documentation and codebase ingestion modes. */
+export function isSafeRepoPath(path: string): boolean {
   if (path.length === 0) return true;
   if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return false;
   return path.split("/").every((seg) => seg.length > 0 && seg !== "." && seg !== "..");
@@ -234,7 +235,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
-async function apiFetch(
+export async function apiFetch(
   fetchImpl: typeof fetch,
   url: string,
   opts: Required<Pick<FetchGithubOptions, "timeoutMs">> & { token?: string; signal: AbortSignal },
@@ -297,13 +298,13 @@ function throwForApiStatus(res: Response, url: string): void {
 /** Read one documentation file from raw.githubusercontent.com (CDN redirect allowed). */
 /** Outcome of a raw content fetch — distinguishable so the caller can report
  * each skip reason honestly instead of a generic "could not be fetched". */
-type RawFetchResult =
+export type RawFetchResult =
   | { kind: "ok"; content: string }
   | { kind: "too_large" }
   | { kind: "unreachable" }
   | { kind: "deadline_exceeded" };
 
-async function fetchRawFile(
+export async function fetchRawFile(
   fetchImpl: typeof fetch,
   rawUrl: string,
   maxFileBytes: number,
@@ -529,13 +530,13 @@ function extensionOf(path: string): string {
  * so the projected bytes always equal the returned representation
  * (trailing whitespace trimmed, synthetic "# path" header included).
  */
-function combinedFileChunk(path: string, content: string): string {
+export function combinedFileChunk(path: string, content: string): string {
   return `# ${path}\n\n${content.trimEnd()}\n`;
 }
 
 /** Exact byte length a file adds to the combined source (including its join
  * separator when it is not the first chunk). */
-function combinedChunkBytes(path: string, content: string, isFirst: boolean): number {
+export function combinedChunkBytes(path: string, content: string, isFirst: boolean): number {
   const chunk = Buffer.byteLength(combinedFileChunk(path, content), "utf8");
   return isFirst ? chunk : chunk + Buffer.byteLength("\n\n", "utf8");
 }

@@ -15,6 +15,7 @@ import type {
   CanonicalSkill,
   ExportTarget,
   Severity,
+  SourceType,
   ValidationCheck,
   ValidationReport,
 } from "./types.js";
@@ -28,6 +29,10 @@ export interface ValidateContext {
   sourceText?: string;
   /** Validate against a specific export target's constraints. */
   target?: ExportTarget;
+  /** The canonical source type the package was generated from. When
+   * "github-codebase", repository provenance in manifest.json is REQUIRED —
+   * edits must not silently strip it (P1-4). */
+  sourceType?: SourceType;
 }
 
 type OutcomeStatus = "pass" | "fail" | "warn";
@@ -490,6 +495,7 @@ const groundingCheck: Check = {
   },
 };
 
+
 const exportTargetKnown = check("export-target", "Export target is supported", ({ target }) => {
   if (target === undefined) return pass();
   const supported: ExportTarget[] = ["claude-code", "generic"];
@@ -571,6 +577,111 @@ const canonicalMetadataConsistency = check(
   },
 );
 
+// Repository provenance (codebase mode). Two layers:
+// 1. A manifest that DECLARES a source.repository block must be internally
+//    consistent (mode, counts, unique inspected files).
+// 2. A package generated from a github-codebase source MUST declare the
+//    block at all — a codebase package silently losing its repository
+//    provenance (e.g. through edit/regeneration) is an error, not a pass.
+const repositoryProvenance = check("repository-provenance", "Repository provenance is present and consistent", ({ skill, sourceType }) => {
+  const manifestFile = skill.files.find((f) => f.path === "manifest.json");
+  if (!manifestFile) return pass();
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(manifestFile.content);
+  } catch {
+    return pass(); // json-parse already failed; avoid duplicate noise
+  }
+  const repo = (manifest as { source?: { repository?: unknown } })?.source?.repository;
+  if (repo === undefined || repo === null) {
+    if (sourceType === "github-codebase") {
+      return fail(
+        'This skill was generated from a github-codebase source, but manifest.json has no source.repository provenance. Repository provenance must survive edits and regeneration.',
+        "manifest.json",
+      );
+    }
+    return pass();
+  }
+  if (typeof repo !== "object" || Array.isArray(repo)) {
+    return fail("manifest.json source.repository is present but malformed.", "manifest.json");
+  }
+  const r = repo as Record<string, unknown>;
+  const outcomes: CheckOutcome[] = [];
+  for (const field of ["url", "owner", "name", "ref", "mode"]) {
+    if (typeof r[field] !== "string" || (r[field] as string).length === 0) {
+      outcomes.push(fail(`manifest.json source.repository.${field} is missing or not a non-empty string.`, "manifest.json"));
+    }
+  }
+  if (typeof r.mode === "string" && r.mode !== "codebase") {
+    outcomes.push(fail(`manifest.json source.repository.mode must be "codebase" (got "${r.mode}").`, "manifest.json"));
+  }
+  if (!Array.isArray(r.inspectedFiles)) {
+    outcomes.push(fail("manifest.json source.repository.inspectedFiles must be an array of inspected file paths.", "manifest.json"));
+  } else {
+    if (r.inspectedFiles.length === 0) {
+      outcomes.push(warn("manifest.json source.repository.inspectedFiles is empty; no repository files were recorded as inspected.", "manifest.json"));
+    }
+    const seen = new Set<string>();
+    for (const p of r.inspectedFiles) {
+      if (typeof p !== "string") {
+        outcomes.push(fail("manifest.json source.repository.inspectedFiles contains a non-string entry.", "manifest.json"));
+        break;
+      }
+      if (seen.has(p)) {
+        outcomes.push(fail(`manifest.json source.repository.inspectedFiles contains duplicate entry "${p}".`, "manifest.json"));
+        break;
+      }
+      seen.add(p);
+    }
+  }
+  // Required count fields (re-audit P2-3): for a codebase manifest the
+  // boundedness record is mandatory, not optional — a missing field fails,
+  // it does not silently skip the consistency rules.
+  for (const [field, type] of [
+    ["treeBlobCount", "number"],
+    ["candidateCount", "number"],
+    ["selectedCount", "number"],
+  ] as const) {
+    const v = r[field];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+      outcomes.push(
+        fail(
+          `manifest.json source.repository.${field} is required and must be a non-negative integer (got ${JSON.stringify(v ?? null)}).`,
+          "manifest.json",
+        ),
+      );
+    }
+  }
+  if (typeof r.treeTruncated !== "boolean") {
+    outcomes.push(fail("manifest.json source.repository.treeTruncated is required and must be a boolean.", "manifest.json"));
+  }
+  if (!Array.isArray(r.inspectedFiles)) {
+    outcomes.push(fail("manifest.json source.repository.inspectedFiles is required and must be an array.", "manifest.json"));
+  }
+
+  // Count consistency: selectedCount is the actually-inspected count.
+  const numeric = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+  if (numeric(r.selectedCount) && Array.isArray(r.inspectedFiles) && r.selectedCount !== r.inspectedFiles.length) {
+    outcomes.push(
+      fail(
+        `manifest.json source.repository.selectedCount (${r.selectedCount}) does not match inspectedFiles.length (${r.inspectedFiles.length}).`,
+        "manifest.json",
+      ),
+    );
+  }
+  if (numeric(r.candidateCount) && numeric(r.selectedCount) && r.candidateCount < r.selectedCount) {
+    outcomes.push(
+      fail(`manifest.json source.repository.candidateCount (${r.candidateCount}) is smaller than selectedCount (${r.selectedCount}).`, "manifest.json"),
+    );
+  }
+  if (numeric(r.treeBlobCount) && numeric(r.candidateCount) && r.treeBlobCount < r.candidateCount) {
+    outcomes.push(
+      fail(`manifest.json source.repository.treeBlobCount (${r.treeBlobCount}) is smaller than candidateCount (${r.candidateCount}).`, "manifest.json"),
+    );
+  }
+  return outcomes.length === 0 ? pass() : outcomes;
+});
+
 export const CHECKS: Check[] = [
   exportTargetKnown,
   requiredFiles,
@@ -583,6 +694,7 @@ export const CHECKS: Check[] = [
   brokenLinks,
   jsonParses,
   manifestConsistency,
+  repositoryProvenance,
   placeholders,
   duplicateEvalIds,
   evalIntegrity,

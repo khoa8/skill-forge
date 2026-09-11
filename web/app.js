@@ -213,7 +213,11 @@ async function runGenerate() {
       : state.activeTab === "url"
         ? { sourceType: "url", url: $("#source-url").value.trim() }
         : state.activeTab === "github"
-          ? { sourceType: "github", repo: $("#source-repo").value.trim() }
+          ? {
+              sourceType: "github",
+              repo: $("#source-repo").value.trim(),
+              mode: document.querySelector('input[name="github-mode"]:checked')?.value ?? "docs",
+            }
           : state.activeTab === "file"
             ? {
                 sourceType: "file",
@@ -227,6 +231,7 @@ async function runGenerate() {
               };
   const requestedName = $("#requested-name").value.trim();
   if (requestedName) body.requestedName = requestedName;
+  state.sourceType = body.sourceType === "github" && body.mode === "codebase" ? "github-codebase" : body.sourceType;
 
   try {
     const res = await fetch("/api/generate", {
@@ -328,6 +333,9 @@ function renderResults(skill, validation) {
   const badges = $("#skill-badges");
   badges.innerHTML = "";
   addBadge(badges, skill.meta.generator === "mock" ? "offline demo provider" : `provider: ${skill.meta.generator}`, "ok");
+  if (state.sourceType === "github-codebase") {
+    addBadge(badges, "GitHub codebase mode — bounded, prioritized repository inspection", "ok");
+  }
   addBadge(badges, `${skill.meta.gaps.length} gap(s) marked`, skill.meta.gaps.length > 0 ? "warn" : "ok");
   const editedCount = (skill.files ?? []).filter((f) => f.userEdited).length;
   if (editedCount > 0) {

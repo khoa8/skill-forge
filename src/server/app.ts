@@ -25,7 +25,8 @@ import {
   EditError,
   toResponse,
 } from "./store.js";
-import type { ExportTarget, SourceType } from "../core/types.js";
+import type { ExportTarget, SourceType, RepositoryAnalysis } from "../core/types.js";
+import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 
 const VERSION = "0.1.0";
@@ -70,6 +71,10 @@ const GenerateBody = z.object({
   path: z.string().max(1024).optional(),
   /** For `github`: a github.com repository or tree URL. */
   repo: z.string().max(2048).optional(),
+  /** For `github`: what the repository means. "docs" (default) reads
+   * documentation-like files; "codebase" analyzes the repository as a
+   * software project for coding agents. */
+  mode: z.enum(["docs", "codebase"]).optional(),
   recursive: z.boolean().optional(),
   name: z.string().max(200).optional(),
   requestedName: z.string().max(80).optional(),
@@ -104,6 +109,16 @@ const GITHUB_ERROR_STATUS: Record<string, number> = {
   github_no_docs: 422,
   github_rate_limited: 429,
   github_fetch_failed: 502,
+  // Codebase mode reuses the docs adapter's URL grammar, so URL-level codes
+  // arrive in the docs spelling; status mapping is shared.
+  codebase_invalid_url: 400,
+  codebase_unsupported_host: 400,
+  codebase_not_found: 404,
+  codebase_ref_not_found: 404,
+  codebase_no_candidates: 422,
+  codebase_rate_limited: 429,
+  codebase_fetch_failed: 502,
+  codebase_deadline_exceeded: 504,
 };
 
 /** Map an API sourceType to the canonical SourceInput type kept in the store. */
@@ -185,6 +200,10 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       return;
     }
     const body = parsed.data;
+    if (body.mode !== undefined && body.sourceType !== "github") {
+      res.status(400).json({ error: "`mode` is only supported for sourceType 'github' (docs | codebase)." });
+      return;
+    }
 
     let content: string;
     let name: string;
@@ -193,6 +212,8 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     let inputType: SourceType = "text";
     /** Adapter notes (truncation, redirects, skipped files) — persisted with the skill. */
     let adapterNotes: string[] = [];
+    /** Structured repository analysis for codebase-mode GitHub sources. */
+    let repository: RepositoryAnalysis | undefined = undefined;
     if (body.sourceType === "sample") {
       if (!body.sampleId) {
         res.status(400).json({ error: "sourceType 'sample' requires `sampleId`." });
@@ -232,15 +253,36 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         res.status(400).json({ error: "sourceType 'github' requires `repo` (a github.com repository or tree URL)." });
         return;
       }
+      const mode = body.mode ?? "docs";
       try {
-        const fetched = await fetchGithubSource(body.repo);
-        content = fetched.input.content;
-        name = body.name?.trim() || fetched.input.name;
-        sourceNotes = fetched.notes;
-        adapterNotes = fetched.notes;
+        if (mode === "codebase") {
+          const fetched = await fetchGithubCodebaseSource(body.repo);
+          content = fetched.input.content;
+          name = body.name?.trim() || fetched.input.name;
+          sourceNotes = fetched.notes;
+          adapterNotes = fetched.notes;
+          repository = fetched.input.repository;
+        } else {
+          const fetched = await fetchGithubSource(body.repo);
+          content = fetched.input.content;
+          name = body.name?.trim() || fetched.input.name;
+          sourceNotes = fetched.notes;
+          adapterNotes = fetched.notes;
+        }
       } catch (err) {
-        const code = err instanceof GithubSourceError ? err.code : "github_fetch_failed";
-        const status = err instanceof GithubSourceError ? (GITHUB_ERROR_STATUS[code] ?? 502) : 502;
+        const isCodebase = err instanceof GithubCodebaseError;
+        const code = isCodebase
+          ? err.code
+          : err instanceof GithubSourceError
+            ? err.code
+            : mode === "codebase"
+              ? "codebase_fetch_failed"
+              : "github_fetch_failed";
+        const status = isCodebase
+          ? (GITHUB_ERROR_STATUS[code] ?? 502)
+          : err instanceof GithubSourceError
+            ? (GITHUB_ERROR_STATUS[code] ?? 502)
+            : 502;
         res.status(status).json({
           error: err instanceof Error ? err.message : String(err),
           code,
@@ -286,7 +328,10 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     res.flushHeaders();
 
     const started = Date.now();
-    const pipelineSourceType = PIPELINE_SOURCE_TYPE[body.sourceType];
+    const pipelineSourceType: SourceType =
+      body.sourceType === "github" && (body.mode ?? "docs") === "codebase"
+        ? "github-codebase"
+        : PIPELINE_SOURCE_TYPE[body.sourceType];
     // Client disconnects surface as EPIPE/ECONNRESET 'error' events on the
     // response; an unhandled 'error' event would crash the process. Swallow
     // them here — the abort below stops further work instead.
@@ -304,7 +349,13 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     void (async () => {
       try {
         for await (const event of runPipeline(
-          { type: pipelineSourceType, name, content, notes: adapterNotes },
+          {
+            type: pipelineSourceType,
+            name,
+            content,
+            notes: adapterNotes,
+            ...(repository ? { repository } : {}),
+          },
           {
             provider: body.provider ?? (config.provider as (typeof PROVIDER_IDS)[number]) ?? "mock",
             apiKey: config.hasApiKey ? process.env.SKILLFORGE_API_KEY : undefined,
@@ -327,7 +378,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
                 codeBlockCount: event.analysis.codeBlocks.length,
                 lineCount: event.analysis.lineCount,
               },
-              source: { name, type: pipelineSourceType, text: content, notes: adapterNotes },
+              source: { name, type: pipelineSourceType, text: content, notes: adapterNotes, ...(repository ? { repository } : {}) },
               validation: event.validation,
               createdAt: new Date().toISOString(),
             });
@@ -435,6 +486,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       skill: stored.skill,
       sourceText: stored.source.text,
       target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
+      sourceType: stored.source.type,
     });
     await updateValidationImpl(stored.id, report);
     res.json({ validation: report });
@@ -454,8 +506,12 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       return;
     }
     try {
-      const stored = await updateFileContentImpl(req.params.id!, parsed.data.path, parsed.data.content, (skill, sourceText) =>
-        validatePackage({ skill, sourceText, target: undefined }),
+      const stored = await updateFileContentImpl(
+        req.params.id!,
+        parsed.data.path,
+        parsed.data.content,
+        (skill, sourceText, sourceType) =>
+          validatePackage({ skill, sourceText, target: undefined, sourceType }),
       );
       res.json(toResponse(stored));
     } catch (err) {
@@ -492,7 +548,12 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     const target = parsed.data.target;
 
     // Validation gate: never export a package that fails deterministic checks.
-    const report = validatePackage({ skill: stored.skill, sourceText: stored.source.text, target });
+    const report = validatePackage({
+      skill: stored.skill,
+      sourceText: stored.source.text,
+      target,
+      sourceType: stored.source.type,
+    });
     if (!report.passed) {
       res.status(422).json({
         error: `Export blocked: deterministic validation found ${report.errorCount} error(s). Inspect the validation panel, repair the source or plan, and try again.`,

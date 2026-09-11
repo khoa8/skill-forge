@@ -127,12 +127,15 @@ export async function* runPipeline(
   try {
     analysis = analyzeSource(normalized);
     timings.push({ stage: "analyze", ms: Date.now() - t0, ok: true });
+    const repoDetail = normalized.repository
+      ? ` · repository: ${normalized.repository.commands.length} evidenced command(s), ${normalized.repository.conventions.length} convention(s), ${normalized.repository.inspectedFiles.length} inspected file(s)`
+      : "";
     yield {
       type: "stage",
       stage: "analyze",
       status: "done",
       ms: timings[timings.length - 1]!.ms,
-      detail: `${analysis.sections.length} sections, ${analysis.procedures.length} procedures, ${analysis.commands.length} commands, ${analysis.codeBlocks.length} code blocks`,
+      detail: `${analysis.sections.length} sections, ${analysis.procedures.length} procedures, ${analysis.commands.length} commands, ${analysis.codeBlocks.length} code blocks${repoDetail}`,
     };
   } catch (err) {
     timings.push({ stage: "analyze", ms: Date.now() - t0, ok: false });
@@ -143,7 +146,14 @@ export async function* runPipeline(
 
   // --- generate
   t0 = Date.now();
-  yield { type: "stage", stage: "generate", status: "start", detail: `provider: ${options.provider}` };
+  yield {
+    type: "stage",
+    stage: "generate",
+    status: "start",
+    detail: normalized.repository
+      ? `provider: ${options.provider} · planning coding-agent skill (codebase mode)`
+      : `provider: ${options.provider}`,
+  };
   let skill: CanonicalSkill;
   try {
     // Cancellation check before starting the stage.
@@ -159,6 +169,7 @@ export async function* runPipeline(
     const plan = await provider.generate({
       source: normalized,
       analysis,
+      repository: normalized.repository,
       requestedName: options.requestedName,
       signal: options.signal,
     });
@@ -188,6 +199,7 @@ export async function* runPipeline(
       skill,
       sourceText: normalized.text,
       target: undefined,
+      sourceType: normalized.sourceType,
     });
     timings.push({ stage: "validate", ms: Date.now() - t0, ok: true });
     yield {

@@ -19,6 +19,7 @@ import type {
   CodeBlock,
   NormalizedSource,
   Provenance,
+  RepositoryAnalysis,
   SkillFile,
   SkillMeta,
   SourceAnalysis,
@@ -281,20 +282,48 @@ export function buildCanonicalSkill(
   rawPlan: SkillPlan,
   generatorId: string,
 ): CanonicalSkill {
-  const name = slugify(rawPlan.name?.trim() || analysis.title, 48);
-  const displayName = (rawPlan.displayName?.trim() || analysis.title).slice(0, 120);
-  const description =
-    (rawPlan.description?.trim() ||
+  const isCodebase = source.sourceType === "github-codebase";
+
+  let name: string;
+  let displayName: string;
+  let description: string;
+
+  if (isCodebase) {
+    const repo = source.repository;
+    const ownerName = repo ? `${repo.repository.owner}-${repo.repository.name}` : source.originalName;
+    const repoIdentity = repo ? `${repo.repository.owner}/${repo.repository.name}` : source.originalName;
+    name = slugify(rawPlan.name?.trim() || ownerName, 48);
+    displayName = (rawPlan.displayName?.trim() || `${repoIdentity} — coding agent guide`).slice(0, 120);
+
+    if (rawPlan.description?.trim()) {
+      description = rawPlan.description.trim().slice(0, 1024);
+    } else {
+      const stackLabel = repo
+        ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
+          repo.ecosystems.slice(0, 3).join("/") ||
+          "unrecognized stack"
+        : "project";
+      const scopeLabel = repo?.repository.scope ? `the \`${repo.repository.scope}\` subtree of ` : "";
+      const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
+      description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
+    }
+  } else {
+    name = slugify(rawPlan.name?.trim() || analysis.title, 48);
+    displayName = (rawPlan.displayName?.trim() || analysis.title).slice(0, 120);
+    description = (
+      rawPlan.description?.trim() ||
       firstSentences(analysis.intro, 2, 500) ||
-      `Working knowledge for ${analysis.title}, extracted by SkillForge.`).slice(0, 1024);
+      `Working knowledge for ${analysis.title}, extracted by SkillForge.`
+    ).slice(0, 1024);
+  }
 
   const plan: SkillPlan = {
     name,
     displayName,
     description,
-    whenToUse: rawPlan.whenToUse.length > 0 ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
-    inputs: rawPlan.inputs.length > 0 ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
-    steps: rawPlan.steps.length > 0 ? rawPlan.steps : derivePlanFromAnalysis(analysis).steps,
+    whenToUse: rawPlan.whenToUse.length > 0 || isCodebase ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
+    inputs: rawPlan.inputs.length > 0 || isCodebase ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
+    steps: rawPlan.steps.length > 0 || isCodebase ? rawPlan.steps : derivePlanFromAnalysis(analysis).steps,
     constraints: rawPlan.constraints,
     verification: rawPlan.verification,
     pitfalls: rawPlan.pitfalls,
@@ -344,28 +373,32 @@ export function buildCanonicalSkill(
   }
 
   // --- Workflow files from detected ordered procedures.
+  // In codebase mode, generic README ordered procedures must NOT be promoted
+  // into executable workflow files.
   const workflowLinks: { path: string; title: string; stepCount: number }[] = [];
-  for (const proc of analysis.procedures.slice(0, 8)) {
-    let path = `workflows/${slugify(proc.title)}.md`;
-    let n = 2;
-    while (usedPaths.has(path)) path = `workflows/${slugify(proc.title)}-${n++}.md`;
-    usedPaths.add(path);
-    const endLine = proc.steps[proc.steps.length - 1]!.line;
-    const content = [
-      `# ${proc.title}`,
-      "",
-      `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
-      "",
-      ...proc.steps.map((s, i) => `${i + 1}. ${neutralizeRelativeLinks(s.text)} _(source line ${s.line})_`),
-      "",
-    ].join("\n");
-    addFile(
-      path,
-      content,
-      `Executable ${proc.steps.length}-step procedure "${proc.title}" detected in the source.`,
-      { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
-    );
-    workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+  if (!isCodebase) {
+    for (const proc of analysis.procedures.slice(0, 8)) {
+      let path = `workflows/${slugify(proc.title)}.md`;
+      let n = 2;
+      while (usedPaths.has(path)) path = `workflows/${slugify(proc.title)}-${n++}.md`;
+      usedPaths.add(path);
+      const endLine = proc.steps[proc.steps.length - 1]!.line;
+      const content = [
+        `# ${proc.title}`,
+        "",
+        `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+        "",
+        ...proc.steps.map((s, i) => `${i + 1}. ${neutralizeRelativeLinks(s.text)} _(source line ${s.line})_`),
+        "",
+      ].join("\n");
+      addFile(
+        path,
+        content,
+        `Executable ${proc.steps.length}-step procedure "${proc.title}" detected in the source.`,
+        { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
+      );
+      workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+    }
   }
 
   // --- Example files from substantial fenced code blocks.
@@ -400,21 +433,23 @@ export function buildCanonicalSkill(
       expect: `SKILL.md or ${link.path} must cover this topic (source lines ${link.range}).`,
     });
   }
-  for (const wf of workflowLinks.slice(0, 4)) {
-    evals.push({
-      id: `eval-${evals.length + 1}`,
-      kind: "procedure",
-      prompt: `Can the agent execute the "${wf.title}" procedure end to end?`,
-      expect: `${wf.path} lists ${wf.stepCount} steps matching the source.`,
-    });
-  }
-  if (analysis.commands.length > 0) {
-    evals.push({
-      id: `eval-${evals.length + 1}`,
-      kind: "grounding",
-      prompt: "Do any commands in the skill appear in the source?",
-      expect: `Commands must be traceable to the source (detected ${analysis.commands.length} command lines).`,
-    });
+  if (!isCodebase) {
+    for (const wf of workflowLinks.slice(0, 4)) {
+      evals.push({
+        id: `eval-${evals.length + 1}`,
+        kind: "procedure",
+        prompt: `Can the agent execute the "${wf.title}" procedure end to end?`,
+        expect: `${wf.path} lists ${wf.stepCount} steps matching the source.`,
+      });
+    }
+    if (analysis.commands.length > 0) {
+      evals.push({
+        id: `eval-${evals.length + 1}`,
+        kind: "grounding",
+        prompt: "Do any commands in the skill appear in the source?",
+        expect: `Commands must be traceable to the source (detected ${analysis.commands.length} command lines).`,
+      });
+    }
   }
   if (evals.length > 0) {
     const evalsPath = "evals/evals.json";
@@ -549,6 +584,7 @@ export function buildCanonicalSkill(
       sha256: source.sha256,
       lineCount: source.lineCount,
       notes: source.notes,
+      ...(source.repository ? { repository: manifestRepositoryBlock(source.repository) } : {}),
     }),
     purpose: "Machine-readable package manifest: source identity, gap list, file inventory with hashes.",
   });
@@ -581,6 +617,47 @@ export interface ManifestSourceInfo {
   sha256: string;
   lineCount: number;
   notes: string[];
+  /** Repository provenance for codebase-mode sources (manifest only — the
+   * full structured analysis lives in the persisted record, not the package). */
+  repository?: ManifestRepositoryBlock;
+}
+
+/** The compact repository provenance block embedded in manifest.json. */
+export interface ManifestRepositoryBlock {
+  url: string;
+  owner: string;
+  name: string;
+  ref: string;
+  mode: "codebase";
+  /** Subpath scope the analysis covers; absent = whole repository. */
+  scope?: string;
+  inspectedFiles: string[];
+  /** Blob count in the tree vs how many were inspected. */
+  treeBlobCount: number;
+  candidateCount: number;
+  selectedCount: number;
+  treeTruncated: boolean;
+}
+
+/**
+ * Derive the manifest repository block from a persisted RepositoryAnalysis.
+ * Shared by the initial build and by post-edit manifest regeneration so the
+ * two can never drift (P1-4): edits must keep codebase provenance intact.
+ */
+export function manifestRepositoryBlock(repository: RepositoryAnalysis): ManifestRepositoryBlock {
+  return {
+    url: repository.repository.url,
+    owner: repository.repository.owner,
+    name: repository.repository.name,
+    ref: repository.repository.ref,
+    mode: repository.mode,
+    ...(repository.repository.scope ? { scope: repository.repository.scope } : {}),
+    inspectedFiles: repository.inspectedFiles,
+    treeBlobCount: repository.selection.treeBlobCount,
+    candidateCount: repository.selection.candidateCount,
+    selectedCount: repository.selection.selectedCount,
+    treeTruncated: repository.selection.treeTruncated,
+  };
 }
 
 /**
@@ -605,6 +682,7 @@ export function manifestFor(
       sha256: source.sha256,
       lineCount: source.lineCount,
       notes: source.notes,
+      ...(source.repository ? { repository: source.repository } : {}),
     },
     gaps: meta.gaps,
     files: files

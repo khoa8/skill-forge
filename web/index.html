@@ -73,7 +73,24 @@
       </div>
 
       <div class="tab-body hidden" id="tab-github">
-        <p class="hint">Read documentation files from a public GitHub repository through the GitHub API. SkillForge fetches bounded docs (Markdown/RST/text, max 40 files, 1.4 MB total) and never clones, executes, or installs repository code. Public repositories only — private repositories are not supported. Unauthenticated GitHub API rate limits apply (60 requests/hour); SKILLFORGE_GITHUB_TOKEN, if configured on the server, only raises that limit.</p>
+        <p class="hint">Read a public GitHub repository through the GitHub API. SkillForge never clones, executes, or installs repository code. Public repositories only — private repositories are not supported. Unauthenticated GitHub API rate limits apply (60 requests/hour); SKILLFORGE_GITHUB_TOKEN, if configured on the server, only raises that limit.</p>
+        <fieldset class="mode-select">
+          <legend>GitHub repository mode</legend>
+          <label class="mode-option">
+            <input type="radio" name="github-mode" value="docs" checked />
+            <span>
+              <strong>Documentation</strong>
+              <small>Create a skill from the repository's documentation (Markdown/RST/text only; source code is not read).</small>
+            </span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="github-mode" value="codebase" />
+            <span>
+              <strong>Codebase</strong>
+              <small>Create a skill for coding agents working in this repository — structure, commands, conventions, tests (bounded, deterministic file selection).</small>
+            </span>
+          </label>
+        </fieldset>
         <label class="field-label" for="source-repo">Repository URL</label>
         <input id="source-repo" type="url" placeholder="https://github.com/owner/repo  ·  …/tree/main/docs" />
       </div>
