@@ -402,6 +402,7 @@ documents (project state lives in Git/PRs/issues, not in the tree).
 - Do not execute generated commands automatically.
 - Do not execute imported repository code merely to analyze documentation.
 - Bound file sizes and parsing.
+- Inbound HTTP `Host` headers must be validated strictly against an explicit local or configured allowlist before static files, body parsers, or API routes execute (DNS-rebinding protection; no wildcard or catch-all configuration permitted; non-loopback binds require explicit allowlists).
 
 ---
 
