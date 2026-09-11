@@ -198,7 +198,7 @@ afterAll(async () => {
       (async (input: string | URL) => {
         const url = String(input);
         if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
-          return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "content-type": "application/json" } });
+          return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
         }
         if (url.includes("/git/trees/")) {
           return new Response(JSON.stringify({ sha: "x", truncated: false, tree: files }), { status: 200, headers: { "content-type": "application/json" } });

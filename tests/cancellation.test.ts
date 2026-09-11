@@ -100,8 +100,7 @@ describe("HTTP disconnect cancels the in-flight provider request end to end", ()
     // The generate route reads the key from the environment (never logs it);
     // set a test key so the provider resolves and actually issues its fetch.
     const originalKey = process.env.SKILLFORGE_API_KEY;
-    process.env.SKILLFORGE_API_KEY = "sk-test-cancellation-key";
-    const app = createApp({ provider: "glm", hasApiKey: true, baseUrl: "https://example.invalid/v1", model: "m" }, { storeRoot });
+    const app = createApp({ provider: "glm", hasApiKey: true, apiKey: "sk-test-cancellation-key", baseUrl: "https://example.invalid/v1", model: "m" }, { storeRoot });
     const server = createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const { port } = server.address() as AddressInfo;

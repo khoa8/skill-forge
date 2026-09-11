@@ -32,7 +32,7 @@ function stubCodebaseFetch(o: { repo?: number; tree?: Record<string, unknown> | 
     const url = String(input);
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       const status = typeof o.repo === "number" ? o.repo : 200;
-      const body = typeof o.repo === "number" ? { message: "Not Found" } : { default_branch: "main" };
+      const body = typeof o.repo === "number" ? { message: "Not Found" } : { default_branch: "main", private: false, visibility: "public" };
       return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     }
     if (url.includes("/git/trees/")) {
@@ -178,6 +178,30 @@ describe("GitHub codebase source via the API", () => {
       .send({ sourceType: "github", repo: "https://github.com/acme/ghost", mode: "codebase" })
       .expect(404);
     expect(res.body.code).toBe("codebase_not_found");
+  });
+
+  it("maps private repositories to 400 in codebase mode with typed code", async () => {
+    stubCodebaseFetch({ repo: 200, tree: 200 });
+    // Stub fetch returning private: true for repo metadata
+    vi.stubGlobal(
+      "fetch",
+      (async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
+          return new Response(JSON.stringify({ default_branch: "main", private: true, visibility: "private" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("unexpected", { status: 500 });
+      }) as unknown as typeof fetch,
+    );
+    const res = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "github", repo: "https://github.com/acme/secret-corp", mode: "codebase" })
+      .expect(400);
+    expect(res.body.code).toBe("codebase_private_repo");
+    expect(res.body.error).toContain("Private GitHub repositories are not supported");
   });
 
   it("blocks nothing at export: the codebase skill exports a real ZIP", async () => {

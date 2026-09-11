@@ -36,6 +36,7 @@ try {
 const config: AppConfig = {
   provider: runtime.provider,
   hasApiKey: runtime.apiKey !== undefined,
+  apiKey: runtime.apiKey,
   baseUrl: runtime.baseUrl,
   model: runtime.model,
 };
