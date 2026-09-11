@@ -15,6 +15,12 @@ export interface HostParseResult {
   reason?: string;
 }
 
+export type HostTokenResult = HostParseResult;
+
+export interface ParseHostOptions {
+  allowPort?: boolean;
+}
+
 const CANONICAL_LOOPBACK_HOSTS = new Set([
   "localhost",
   "127.0.0.1",
@@ -25,31 +31,56 @@ const CANONICAL_LOOPBACK_HOSTS = new Set([
 ]);
 
 /**
- * Strictly parse the inbound HTTP Host header into a lowercase host and optional port.
- * Inspects only the actual Host header (never proxy-forwarded headers).
+ * Strictly parse and validate a host token (with optional port support).
+ * Shared by runtime Host header parsing and startup allowed-host configuration.
  */
-export function parseHostHeader(raw: string | undefined): HostParseResult {
+export function parseHostToken(
+  raw: string | undefined,
+  options: ParseHostOptions = {},
+): HostTokenResult {
   if (raw === undefined || typeof raw !== "string") {
-    return { ok: false, host: "", reason: "Host header is missing or not a string" };
+    return { ok: false, host: "", reason: "Host is missing or not a string" };
   }
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
-    return { ok: false, host: "", reason: "Host header is empty" };
+    return { ok: false, host: "", reason: "Host is empty" };
   }
-  // Multiple Host headers or comma-separated values are invalid in HTTP/1.1
   if (trimmed.includes(",")) {
     return { ok: false, host: "", reason: "Multiple or comma-separated Host headers" };
   }
-  // Disallow characters that have no place in a valid Host header
+  if (trimmed.includes("*")) {
+    return {
+      ok: false,
+      host: "",
+      reason: "wildcard '*' is not permitted. Specify explicit hostnames or IP addresses",
+    };
+  }
+  if (trimmed.includes("://") || trimmed.startsWith("http:") || trimmed.startsWith("https:")) {
+    return {
+      ok: false,
+      host: "",
+      reason: "schemes and URLs are not permitted (expected hostname or IP only)",
+    };
+  }
+  if (trimmed.includes("/")) {
+    return {
+      ok: false,
+      host: "",
+      reason: "paths are not permitted (expected hostname or IP only)",
+    };
+  }
   if (/[\s/\\<>'"@\x00-\x1F\x7F]/.test(trimmed)) {
     return { ok: false, host: "", reason: "Host header contains invalid characters" };
+  }
+  if (!/^[a-zA-Z0-9.:[\]-]+$/.test(trimmed)) {
+    return { ok: false, host: "", reason: "contains invalid characters" };
   }
 
   // Bracketed IPv6 reference (RFC 3986 / RFC 7230): [::1] or [::1]:8787
   if (trimmed.startsWith("[")) {
     const closeBracket = trimmed.indexOf("]");
     if (closeBracket === -1) {
-      return { ok: false, host: "", reason: "Unclosed IPv6 bracket in Host header" };
+      return { ok: false, host: "", reason: "unclosed IPv6 bracket" };
     }
     const ipv6Content = trimmed.slice(1, closeBracket);
     if (ipv6Content.length === 0 || !/^[0-9a-fA-F:.]+$/.test(ipv6Content)) {
@@ -59,6 +90,9 @@ export function parseHostHeader(raw: string | undefined): HostParseResult {
     const rest = trimmed.slice(closeBracket + 1);
     if (rest.length === 0) {
       return { ok: true, host };
+    }
+    if (!options.allowPort) {
+      return { ok: false, host: "", reason: "ports are not permitted in allowed hosts" };
     }
     if (!rest.startsWith(":")) {
       return { ok: false, host: "", reason: "Invalid syntax after IPv6 closing bracket" };
@@ -85,6 +119,9 @@ export function parseHostHeader(raw: string | undefined): HostParseResult {
   }
 
   if (colonCount === 1) {
+    if (!options.allowPort) {
+      return { ok: false, host: "", reason: "ports are not permitted in allowed hosts" };
+    }
     const [h, portStr] = trimmed.split(":");
     if (!h || !portStr || !/^[0-9]+$/.test(portStr)) {
       return { ok: false, host: "", reason: "Invalid host or port syntax" };
@@ -106,6 +143,14 @@ export function parseHostHeader(raw: string | undefined): HostParseResult {
   }
 
   return { ok: false, host: "", reason: "IPv6 literals with ports must use bracketed syntax [host]:port" };
+}
+
+/**
+ * Strictly parse the inbound HTTP Host header into a lowercase host and optional port.
+ * Inspects only the actual Host header (never proxy-forwarded headers).
+ */
+export function parseHostHeader(raw: string | undefined): HostParseResult {
+  return parseHostToken(raw, { allowPort: true });
 }
 
 export interface HostGuardOptions {

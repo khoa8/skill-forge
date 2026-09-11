@@ -321,5 +321,10 @@ describe("parseHostHeader pure parser", () => {
     expect(parseHostHeader("[::1").ok).toBe(false);
     expect(parseHostHeader("[::1]:").ok).toBe(false);
     expect(parseHostHeader("::1:8787").ok).toBe(false);
+    expect(parseHostHeader("my_server").ok).toBe(false);
+    expect(parseHostHeader("my_server:8787").ok).toBe(false);
+    expect(parseHostHeader("bad..domain").ok).toBe(false);
+    expect(parseHostHeader(".leading").ok).toBe(false);
+    expect(parseHostHeader("trailing.").ok).toBe(false);
   });
 });

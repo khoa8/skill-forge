@@ -218,9 +218,37 @@ describe("parseAllowedHosts", () => {
     }
   });
 
-  it("rejects invalid characters", () => {
-    for (const bad of ["host name", "host$name", "host#name"]) {
+  it("rejects invalid characters including underscores (F-02 parity)", () => {
+    for (const bad of ["host name", "host$name", "host#name", "my_server", "sub_domain.lan"]) {
       expect(() => parseAllowedHosts(bad), `invalid char: ${bad}`).toThrow(ConfigError);
+    }
+  });
+
+  it("F-02 parity: rejects invalid host tokens at config startup matching runtime host parser rules", () => {
+    // Malformed domain labels
+    for (const bad of ["bad..domain", ".leading", "trailing.", "..", "my_server"]) {
+      expect(() => parseAllowedHosts(bad), `bad label: ${bad}`).toThrow(ConfigError);
+      try {
+        parseAllowedHosts(bad);
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConfigError);
+        expect((err as ConfigError).code).toBe("config_allowed_hosts_invalid");
+      }
+    }
+
+    // Ports rejected in allowlist
+    for (const bad of ["hostname:3000", "my-server.lan:8787", "[::1]:8787"]) {
+      expect(() => parseAllowedHosts(bad), `port forbidden: ${bad}`).toThrow(ConfigError);
+    }
+
+    // Schemes and paths rejected
+    for (const bad of ["http://example.com", "https://example.com", "example.com/path"]) {
+      expect(() => parseAllowedHosts(bad), `url/path forbidden: ${bad}`).toThrow(ConfigError);
+    }
+
+    // Malformed IPv6
+    for (const bad of ["[::1", "[", "[]", "[invalid:ipv6!z]"]) {
+      expect(() => parseAllowedHosts(bad), `malformed ipv6: ${bad}`).toThrow(ConfigError);
     }
   });
 });
