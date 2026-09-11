@@ -199,9 +199,87 @@ export function resolveRuntimeConfig(
 export interface ServerBind {
   port: number;
   host: string;
+  allowedHosts: string[];
 }
 
-/** Validate and resolve the server bind address (PORT / HOST). */
+/** True when the bind host only exposes the server to the local machine. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "::ffff:127.0.0.1" || h === "[::1]";
+}
+
+/**
+ * Parse and validate SKILLFORGE_ALLOWED_HOSTS.
+ *
+ * Contract:
+ * - comma-separated hostnames or IP addresses (no schemes, no paths, no ports);
+ * - empty tokens (e.g. leading/trailing comma or ,,) throw ConfigError;
+ * - schemes (http://, https://, ://) and paths (/) throw ConfigError;
+ * - ports (e.g. :8787 in a non-IPv6 token) throw ConfigError;
+ * - wildcard '*' is permitted;
+ * - entries are trimmed and lowercased.
+ */
+export function parseAllowedHosts(raw?: string): string[] {
+  if (raw === undefined || raw.trim().length === 0) {
+    return [];
+  }
+  const parts = raw.split(",");
+  const out: string[] = [];
+  for (const part of parts) {
+    const token = part.trim();
+    if (token.length === 0) {
+      throw new ConfigError(
+        `Invalid SKILLFORGE_ALLOWED_HOSTS: empty host entry in "${raw}".`,
+        "config_allowed_hosts_invalid",
+      );
+    }
+    if (token.includes("://") || token.startsWith("http:") || token.startsWith("https:")) {
+      throw new ConfigError(
+        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": schemes and URLs are not permitted (expected hostname or IP only).`,
+        "config_allowed_hosts_invalid",
+      );
+    }
+    if (token.includes("/")) {
+      throw new ConfigError(
+        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": paths are not permitted (expected hostname or IP only).`,
+        "config_allowed_hosts_invalid",
+      );
+    }
+    if (token.startsWith("[")) {
+      const close = token.indexOf("]");
+      if (close === -1) {
+        throw new ConfigError(
+          `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": unclosed IPv6 bracket.`,
+          "config_allowed_hosts_invalid",
+        );
+      }
+      if (token.slice(close + 1).length > 0) {
+        throw new ConfigError(
+          `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": ports are not permitted in allowed hosts.`,
+          "config_allowed_hosts_invalid",
+        );
+      }
+    } else {
+      const colons = (token.match(/:/g) || []).length;
+      if (colons === 1) {
+        throw new ConfigError(
+          `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": ports are not permitted in allowed hosts.`,
+          "config_allowed_hosts_invalid",
+        );
+      }
+    }
+    if (token !== "*" && !/^[a-zA-Z0-9.:_\[\]-]+$/.test(token)) {
+      throw new ConfigError(
+        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": contains invalid characters.`,
+        "config_allowed_hosts_invalid",
+      );
+    }
+    out.push(token.toLowerCase());
+  }
+  return out;
+}
+
+/** Validate and resolve the server bind address (PORT / HOST / SKILLFORGE_ALLOWED_HOSTS). */
 export function resolveServerBind(
   env: Record<string, string | undefined> = process.env,
 ): ServerBind {
@@ -213,5 +291,13 @@ export function resolveServerBind(
       "config_port_invalid",
     );
   }
-  return { port, host: env.HOST?.trim() || "127.0.0.1" };
+  const host = env.HOST?.trim() || "127.0.0.1";
+  const allowedHosts = parseAllowedHosts(env.SKILLFORGE_ALLOWED_HOSTS);
+  if (!isLoopbackHost(host) && allowedHosts.length === 0) {
+    throw new ConfigError(
+      `Binding to non-loopback host "${host}" requires an explicit SKILLFORGE_ALLOWED_HOSTS configuration (e.g. SKILLFORGE_ALLOWED_HOSTS=${host}). For local loopback use, leave HOST=127.0.0.1.`,
+      "config_bind_exposed_without_allowed_hosts",
+    );
+  }
+  return { port, host, allowedHosts };
 }

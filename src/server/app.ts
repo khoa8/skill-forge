@@ -29,6 +29,7 @@ import {
 import type { ExportTarget, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
+import { createHostValidationMiddleware } from "./host-guard.js";
 
 const VERSION = "0.1.0";
 
@@ -139,6 +140,8 @@ export interface AppConfig {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  bindHost?: string;
+  allowedHosts?: string[];
 }
 
 /** Narrow dependency overrides, mainly for tests. `storeRoot` isolates
@@ -164,6 +167,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
   const updateFileContentImpl = store.updateFileContent;
   const app = express();
   app.disable("x-powered-by");
+  app.use(createHostValidationMiddleware({ bindHost: config.bindHost, allowedHosts: config.allowedHosts }));
   app.use(express.json({ limit: "3mb" }));
   app.use(express.static(WEB_DIR));
 
