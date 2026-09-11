@@ -25,6 +25,7 @@ import {
   EditError,
   toResponse,
   normalizeStoredSource,
+  SourceRenormalizationError,
 } from "./store.js";
 import type { ExportTarget, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
@@ -163,7 +164,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
   const saveSkillImpl = store.saveSkill;
   const loadSkillImpl = overrides.loadSkill ?? store.getSkill;
   const listSkillsImpl = store.listSkills;
-  const updateValidationImpl = store.updateValidation;
+  const revalidateSkillImpl = store.revalidateSkill;
   const updateFileContentImpl = store.updateFileContent;
   const app = express();
   app.disable("x-powered-by");
@@ -485,29 +486,28 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
 
   // Re-run deterministic validation on demand.
   app.post("/api/skills/:id/validate", asyncRoute(async (req, res) => {
-    const stored = await loadSkillImpl(req.params.id!);
-    if (!stored) {
-      res.status(404).json({ error: `No skill with id "${req.params.id}".` });
-      return;
-    }
-    let normalized;
+    const target = typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined;
     try {
-      normalized = normalizeStoredSource(stored.source);
+      const report = await revalidateSkillImpl(
+        req.params.id!,
+        (skill, sourceText, sourceType) =>
+          validatePackage({ skill, sourceText, target, sourceType }),
+      );
+      res.json({ validation: report });
     } catch (err) {
-      res.status(409).json({
-        error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
-        code: "source_renormalization_failed",
-      });
-      return;
+      if (err instanceof EditError && err.code === "skill_not_found") {
+        res.status(404).json({ error: `No skill with id "${req.params.id}".` });
+        return;
+      }
+      if (err instanceof SourceRenormalizationError) {
+        res.status(409).json({
+          error: err.message,
+          code: "source_renormalization_failed",
+        });
+        return;
+      }
+      throw err;
     }
-    const report = validatePackage({
-      skill: stored.skill,
-      sourceText: normalized.text,
-      target: typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined,
-      sourceType: stored.source.type,
-    });
-    await updateValidationImpl(stored.id, report);
-    res.json({ validation: report });
   }));
 
   // Edit one generated text file before export. The stored skill is updated
@@ -541,6 +541,13 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
               ? 413
               : 400;
         res.status(status).json({ error: err.message, code: err.code });
+        return;
+      }
+      if (err instanceof SourceRenormalizationError) {
+        res.status(409).json({
+          error: err.message,
+          code: "source_renormalization_failed",
+        });
         return;
       }
       res.status(500).json({ error: err instanceof Error ? err.message : String(err), code: "edit_failed" });

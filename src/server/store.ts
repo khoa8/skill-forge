@@ -57,6 +57,57 @@ export type StoredSkill = z.infer<typeof StoredSkillSchema>;
 
 const STORE_VERSION = 1;
 
+/**
+ * Per-key async serialization lock.
+ * Ensures operations on the same key execute strictly in lock-acquisition order.
+ * Operations on different keys run concurrently.
+ * Unhandled/rejected operations do not block subsequent operations.
+ * Idle entries are cleaned up to prevent an unbounded map.
+ */
+export class AsyncKeyLock {
+  private chains = new Map<string, Promise<void>>();
+
+  async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.chains.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = prev.then(
+      () => gate,
+      () => gate,
+    );
+    this.chains.set(key, chained);
+
+    try {
+      await prev;
+    } catch {
+      // Ignore failures of prior operations; this operation gets its turn.
+    }
+
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.chains.get(key) === chained) {
+        this.chains.delete(key);
+      }
+    }
+  }
+}
+
+export class SourceRenormalizationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SourceRenormalizationError";
+  }
+}
+
+export interface StoreTestHooks {
+  afterLoad?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
+  beforePersist?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
+}
+
 export interface SkillStore {
   /** Absolute path of this store's skills directory. */
   readonly root: string;
@@ -72,7 +123,14 @@ export interface SkillStore {
   listSkills(): Promise<
     { id: string; name: string; description: string; generator: string; createdAt: string; validationPassed: boolean; fileCount: number }[]
   >;
-  updateValidation(id: string, validation: ValidationReport): Promise<void>;
+  revalidateSkill(
+    id: string,
+    revalidate: (
+      skill: StoredSkill["skill"],
+      sourceText: string,
+      sourceType: SourceType,
+    ) => ValidationReport,
+  ): Promise<ValidationReport>;
   updateFileContent(
     id: string,
     path: string,
@@ -83,9 +141,15 @@ export interface SkillStore {
       sourceType: SourceType,
     ) => ValidationReport,
   ): Promise<StoredSkill>;
+  readonly _testHooks?: StoreTestHooks;
 }
 
-export function createStore(root: string = defaultSkillsRoot()): SkillStore {
+export function createStore(
+  root: string = defaultSkillsRoot(),
+  testHooks?: StoreTestHooks,
+): SkillStore {
+  const lock = new AsyncKeyLock();
+
   function skillDir(id: string): string {
     // Defense in depth: id must be a plain slug — no slashes, dots, or escapes.
     if (!/^[a-z0-9-]{1,80}$/.test(id)) {
@@ -181,13 +245,45 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     return out.filter((x): x is NonNullable<typeof x> => x !== null);
   }
 
-  async function updateValidation(id: string, validation: ValidationReport): Promise<void> {
-    const existing = await getSkill(id);
-    if (!existing) return;
-    existing.validation = validation;
-    const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);
-    await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
-    await rename(tmp, join(skillDir(id), "skill.json"));
+  async function revalidateSkill(
+    id: string,
+    revalidate: (
+      skill: StoredSkill["skill"],
+      sourceText: string,
+      sourceType: SourceType,
+    ) => ValidationReport,
+  ): Promise<ValidationReport> {
+    return lock.withLock(id, async () => {
+      const existing = await getSkill(id);
+      if (!existing) {
+        throw new EditError(`No skill with id "${id}".`, "skill_not_found");
+      }
+      if (testHooks?.afterLoad) {
+        await testHooks.afterLoad(id, "revalidateSkill");
+      }
+      let normalized;
+      try {
+        normalized = normalizeStoredSource(existing.source);
+      } catch (err) {
+        throw new SourceRenormalizationError(
+          `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const report = revalidate(
+        existing.skill,
+        normalized.text,
+        existing.source.type,
+      );
+      existing.validation = report;
+      if (testHooks?.beforePersist) {
+        await testHooks.beforePersist(id, "revalidateSkill");
+      }
+      const dir = skillDir(id);
+      const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
+      await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
+      await rename(tmp, join(dir, "skill.json"));
+      return report;
+    });
   }
 
   async function updateFileContent(
@@ -200,66 +296,92 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
       sourceType: SourceType,
     ) => ValidationReport,
   ): Promise<StoredSkill> {
-    const existing = await getSkill(id);
-    if (!existing) throw new EditError(`No skill with id "${id}".`, "skill_not_found");
-    if (!isEditablePath(path)) {
-      throw new EditError(
-        `"${path}" is regenerated from the package inventory and cannot be edited directly.`,
-        "file_not_editable",
+    return lock.withLock(id, async () => {
+      const existing = await getSkill(id);
+      if (!existing) throw new EditError(`No skill with id "${id}".`, "skill_not_found");
+      if (!isEditablePath(path)) {
+        throw new EditError(
+          `"${path}" is regenerated from the package inventory and cannot be edited directly.`,
+          "file_not_editable",
+        );
+      }
+      const file = existing.skill.files.find((f) => f.path === path);
+      if (!file) {
+        throw new EditError(`No file "${path}" in skill "${id}". Only existing files can be edited.`, "file_not_found");
+      }
+      if (Buffer.byteLength(content, "utf8") > MAX_EDIT_BYTES) {
+        throw new EditError(
+          `Edit is ${Buffer.byteLength(content, "utf8")} bytes; the per-file limit is ${MAX_EDIT_BYTES}.`,
+          "edit_too_large",
+        );
+      }
+
+      if (testHooks?.afterLoad) {
+        await testHooks.afterLoad(id, "updateFileContent");
+      }
+
+      file.content = content;
+      file.userEdited = true;
+      existing.skill.provenance = existing.skill.provenance.filter((p) => p.filePath !== path);
+
+      // Regenerate manifest.json from the new inventory (bytes + hashes resync).
+      // Codebase provenance must survive edits: the compact manifest repository
+      // block is rebuilt from the PERSISTED repository analysis (P1-4).
+      let normalizedSource;
+      try {
+        normalizedSource = normalizeStoredSource(existing.source);
+      } catch (err) {
+        throw new SourceRenormalizationError(
+          `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const manifestFile = existing.skill.files.find((f) => f.path === "manifest.json");
+      if (manifestFile) {
+        manifestFile.content = manifestFor(
+          existing.skill.files.filter((f) => f.path !== "manifest.json"),
+          existing.skill.meta,
+          {
+            name: existing.source.name,
+            sha256: normalizedSource.sha256,
+            lineCount: normalizedSource.lineCount,
+            notes: normalizedSource.notes,
+            ...(existing.source.repository
+              ? { repository: manifestRepositoryBlock(existing.source.repository) }
+              : {}),
+          },
+        );
+      }
+
+      // Validation reflects the edited content before anything is served; the
+      // source type rides along so codebase packages cannot lose their
+      // repository provenance silently.
+      existing.validation = revalidate(
+        existing.skill,
+        normalizedSource.text,
+        existing.source.type,
       );
-    }
-    const file = existing.skill.files.find((f) => f.path === path);
-    if (!file) {
-      throw new EditError(`No file "${path}" in skill "${id}". Only existing files can be edited.`, "file_not_found");
-    }
-    if (Buffer.byteLength(content, "utf8") > MAX_EDIT_BYTES) {
-      throw new EditError(
-        `Edit is ${Buffer.byteLength(content, "utf8")} bytes; the per-file limit is ${MAX_EDIT_BYTES}.`,
-        "edit_too_large",
-      );
-    }
 
-    file.content = content;
-    file.userEdited = true;
-    existing.skill.provenance = existing.skill.provenance.filter((p) => p.filePath !== path);
+      if (testHooks?.beforePersist) {
+        await testHooks.beforePersist(id, "updateFileContent");
+      }
 
-    // Regenerate manifest.json from the new inventory (bytes + hashes resync).
-    // Codebase provenance must survive edits: the compact manifest repository
-    // block is rebuilt from the PERSISTED repository analysis (P1-4).
-    const normalizedSource = normalizeStoredSource(existing.source);
-    const manifestFile = existing.skill.files.find((f) => f.path === "manifest.json");
-    if (manifestFile) {
-      manifestFile.content = manifestFor(
-        existing.skill.files.filter((f) => f.path !== "manifest.json"),
-        existing.skill.meta,
-        {
-          name: existing.source.name,
-          sha256: normalizedSource.sha256,
-          lineCount: normalizedSource.lineCount,
-          notes: normalizedSource.notes,
-          ...(existing.source.repository
-            ? { repository: manifestRepositoryBlock(existing.source.repository) }
-            : {}),
-        },
-      );
-    }
-
-    // Validation reflects the edited content before anything is served; the
-    // source type rides along so codebase packages cannot lose their
-    // repository provenance silently.
-    existing.validation = revalidate(
-      existing.skill,
-      normalizedSource.text,
-      existing.source.type,
-    );
-
-    const tmp = join(skillDir(id), `skill.json.${randomUUID()}.tmp`);
-    await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
-    await rename(tmp, join(skillDir(id), "skill.json"));
-    return existing;
+      const dir = skillDir(id);
+      const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
+      await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
+      await rename(tmp, join(dir, "skill.json"));
+      return existing;
+    });
   }
 
-  return { root, saveSkill, getSkill, listSkills, updateValidation, updateFileContent };
+  return {
+    root,
+    saveSkill,
+    getSkill,
+    listSkills,
+    revalidateSkill,
+    updateFileContent,
+    _testHooks: testHooks,
+  };
 }
 
 let defaultStoreSingleton: SkillStore | undefined;
