@@ -126,11 +126,6 @@ export function isAllowedHost(host: string, opts: HostGuardOptions = {}): boolea
   const allowed = opts.allowedHosts ?? [];
   const normalizedHost = host.toLowerCase();
 
-  // If explicit allowed hosts contains wildcard, permit all
-  if (allowed.includes("*")) {
-    return true;
-  }
-
   // Check explicit allowed hosts
   for (const a of allowed) {
     const normA = a.toLowerCase();

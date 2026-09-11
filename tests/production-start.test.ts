@@ -156,4 +156,16 @@ async function waitHealthy(port: number, budgetMs = 15_000): Promise<{ ok: boole
     expect(running.stderr()).toContain("SKILLFORGE_ALLOWED_HOSTS");
     expect(running.stdout()).not.toContain("listening");
   });
+
+  it("refuses wildcard in SKILLFORGE_ALLOWED_HOSTS at startup", async () => {
+    const running = startServer({
+      PORT: String(await ephemeralPort()),
+      HOST: "0.0.0.0",
+      SKILLFORGE_ALLOWED_HOSTS: "*",
+    });
+    const exit = await Promise.race([running.exited, new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 10_000))]);
+    expect(exit).not.toBe("timeout");
+    expect(running.stderr()).toContain("wildcard '*' is not permitted");
+    expect(running.stdout()).not.toContain("listening");
+  });
 });

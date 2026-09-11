@@ -181,9 +181,17 @@ describe("parseAllowedHosts", () => {
     ]);
   });
 
-  it("accepts wildcard '*'", () => {
-    expect(parseAllowedHosts("*")).toEqual(["*"]);
-    expect(parseAllowedHosts("localhost, *")).toEqual(["localhost", "*"]);
+  it("rejects wildcard '*'", () => {
+    expect(() => parseAllowedHosts("*")).toThrow(ConfigError);
+    expect(() => parseAllowedHosts("localhost, *")).toThrow(ConfigError);
+    try {
+      parseAllowedHosts("*");
+      expect.unreachable("expected ConfigError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).code).toBe("config_allowed_hosts_invalid");
+      expect((err as ConfigError).message).toContain("wildcard '*' is not permitted");
+    }
   });
 
   it("rejects empty tokens (e.g. trailing comma, double comma)", () => {

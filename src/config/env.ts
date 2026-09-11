@@ -216,7 +216,7 @@ export function isLoopbackHost(host: string): boolean {
  * - empty tokens (e.g. leading/trailing comma or ,,) throw ConfigError;
  * - schemes (http://, https://, ://) and paths (/) throw ConfigError;
  * - ports (e.g. :8787 in a non-IPv6 token) throw ConfigError;
- * - wildcard '*' is permitted;
+ * - wildcard '*' is not permitted (throws ConfigError);
  * - entries are trimmed and lowercased.
  */
 export function parseAllowedHosts(raw?: string): string[] {
@@ -268,7 +268,13 @@ export function parseAllowedHosts(raw?: string): string[] {
         );
       }
     }
-    if (token !== "*" && !/^[a-zA-Z0-9.:_\[\]-]+$/.test(token)) {
+    if (token.includes("*")) {
+      throw new ConfigError(
+        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": wildcard '*' is not permitted. Specify explicit hostnames or IP addresses.`,
+        "config_allowed_hosts_invalid",
+      );
+    }
+    if (!/^[a-zA-Z0-9.:_\[\]-]+$/.test(token)) {
       throw new ConfigError(
         `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": contains invalid characters.`,
         "config_allowed_hosts_invalid",
