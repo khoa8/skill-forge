@@ -14,11 +14,12 @@ import {
   loadEnvFile,
   resolveRuntimeConfig,
   resolveServerBind,
+  parseAllowedHosts,
   ConfigError,
   MAX_ENV_FILE_BYTES,
 } from "../src/config/env.js";
 
-const touchedKeys = ["SKILLFORGE_PROVIDER", "SKILLFORGE_API_KEY", "SKILLFORGE_BASE_URL", "SKILLFORGE_MODEL", "PORT", "HOST"];
+const touchedKeys = ["SKILLFORGE_PROVIDER", "SKILLFORGE_API_KEY", "SKILLFORGE_BASE_URL", "SKILLFORGE_MODEL", "PORT", "HOST", "SKILLFORGE_ALLOWED_HOSTS"];
 const saved = new Map<string, string | undefined>();
 
 afterEach(() => {
@@ -133,10 +134,93 @@ describe("resolveRuntimeConfig", () => {
 
 describe("resolveServerBind", () => {
   it("defaults to loopback 8787 and validates explicit values", () => {
-    expect(resolveServerBind({})).toEqual({ port: 8787, host: "127.0.0.1" });
-    expect(resolveServerBind({ PORT: "3000", HOST: "0.0.0.0" })).toEqual({ port: 3000, host: "0.0.0.0" });
+    expect(resolveServerBind({})).toEqual({ port: 8787, host: "127.0.0.1", allowedHosts: [] });
+    expect(
+      resolveServerBind({ PORT: "3000", HOST: "0.0.0.0", SKILLFORGE_ALLOWED_HOSTS: "192.168.1.50" }),
+    ).toEqual({ port: 3000, host: "0.0.0.0", allowedHosts: ["192.168.1.50"] });
     for (const bad of ["0", "-1", "70000", "abc", "8.5"]) {
       expect(() => resolveServerBind({ PORT: bad }), `PORT=${bad}`).toThrow(ConfigError);
+    }
+  });
+
+  it("fails closed when bound to non-loopback address without explicit SKILLFORGE_ALLOWED_HOSTS", () => {
+    for (const nonLoopback of ["0.0.0.0", "::", "192.168.1.10", "10.0.0.5"]) {
+      try {
+        resolveServerBind({ HOST: nonLoopback });
+        expect.unreachable(`expected ConfigError for HOST=${nonLoopback}`);
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConfigError);
+        expect((err as ConfigError).code).toBe("config_bind_exposed_without_allowed_hosts");
+      }
+    }
+  });
+
+  it("accepts non-loopback bind when SKILLFORGE_ALLOWED_HOSTS is provided", () => {
+    const bind = resolveServerBind({
+      HOST: "0.0.0.0",
+      SKILLFORGE_ALLOWED_HOSTS: "192.168.1.50, my-server.lan",
+    });
+    expect(bind.host).toBe("0.0.0.0");
+    expect(bind.allowedHosts).toEqual(["192.168.1.50", "my-server.lan"]);
+  });
+});
+
+describe("parseAllowedHosts", () => {
+  it("returns empty array for empty or undefined input", () => {
+    expect(parseAllowedHosts(undefined)).toEqual([]);
+    expect(parseAllowedHosts("")).toEqual([]);
+    expect(parseAllowedHosts("   ")).toEqual([]);
+  });
+
+  it("parses valid comma-separated hostnames and IPs", () => {
+    expect(parseAllowedHosts("localhost, 127.0.0.1, [::1], my-host.example.com")).toEqual([
+      "localhost",
+      "127.0.0.1",
+      "[::1]",
+      "my-host.example.com",
+    ]);
+  });
+
+  it("rejects wildcard '*'", () => {
+    expect(() => parseAllowedHosts("*")).toThrow(ConfigError);
+    expect(() => parseAllowedHosts("localhost, *")).toThrow(ConfigError);
+    try {
+      parseAllowedHosts("*");
+      expect.unreachable("expected ConfigError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).code).toBe("config_allowed_hosts_invalid");
+      expect((err as ConfigError).message).toContain("wildcard '*' is not permitted");
+    }
+  });
+
+  it("rejects empty tokens (e.g. trailing comma, double comma)", () => {
+    for (const bad of [",", "a,,b", "a,", ",b"]) {
+      expect(() => parseAllowedHosts(bad), `bad: ${bad}`).toThrow(ConfigError);
+    }
+  });
+
+  it("rejects schemes/URLs", () => {
+    for (const bad of ["http://localhost", "https://example.com", "ftp://foo"]) {
+      expect(() => parseAllowedHosts(bad), `scheme: ${bad}`).toThrow(ConfigError);
+    }
+  });
+
+  it("rejects paths", () => {
+    for (const bad of ["example.com/api", "localhost/"]) {
+      expect(() => parseAllowedHosts(bad), `path: ${bad}`).toThrow(ConfigError);
+    }
+  });
+
+  it("rejects ports", () => {
+    for (const bad of ["localhost:8787", "127.0.0.1:8787", "[::1]:8787", "example.com:3000"]) {
+      expect(() => parseAllowedHosts(bad), `port: ${bad}`).toThrow(ConfigError);
+    }
+  });
+
+  it("rejects invalid characters", () => {
+    for (const bad of ["host name", "host$name", "host#name"]) {
+      expect(() => parseAllowedHosts(bad), `invalid char: ${bad}`).toThrow(ConfigError);
     }
   });
 });

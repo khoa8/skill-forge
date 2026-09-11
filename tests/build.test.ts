@@ -26,7 +26,7 @@ describe("buildCanonicalSkill", () => {
   });
 
   it("is deterministic: identical input yields byte-identical files", () => {
-    const source = getSample("fastforge-cli").content;
+    const source = getSample("scaffoldcraft-cli").content;
     const a = build(source).skill;
     const b = build(source).skill;
     expect(a.files).toEqual(b.files);
@@ -101,7 +101,7 @@ describe("buildCanonicalSkill", () => {
   });
 
   it("manifest inventories match actual files with byte counts", () => {
-    const { skill } = build(getSample("fastforge-cli").content);
+    const { skill } = build(getSample("scaffoldcraft-cli").content);
     const manifest = JSON.parse(skill.files.find((f) => f.path === "manifest.json")!.content);
     const actual = skill.files.filter((f) => f.path !== "manifest.json");
     expect(manifest.files).toHaveLength(actual.length);

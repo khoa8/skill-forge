@@ -26,10 +26,10 @@ const SAMPLE_LIST: SampleMeta[] = [
     fileName: "meridian-payments-api.md",
   },
   {
-    id: "fastforge-cli",
-    title: "FastForge CLI",
-    description: "Guide for a TypeScript project toolchain CLI: install, scaffold, configure, build, test, deploy, troubleshoot.",
-    fileName: "fastforge-cli.md",
+    id: "scaffoldcraft-cli",
+    title: "ScaffoldCraft CLI",
+    description: "Guide for a TypeScript project toolchain CLI: scaffold, configure, build, test, deploy, troubleshoot.",
+    fileName: "scaffoldcraft-cli.md",
   },
 ];
 

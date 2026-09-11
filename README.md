@@ -41,7 +41,11 @@ npm start              # node dist/server/index.js — no dev dependencies requi
 
 ## Deployment scope (read before binding beyond loopback)
 
-SkillForge is built for **local / trusted self-hosted use**. It has **no built-in authentication, authorization, or tenant isolation**: anyone who can reach the server can generate skills, read stored skills (including their full sources), edit generated files, and export packages. The default `HOST=127.0.0.1` binding restricts it to your machine. Binding to a non-loopback address (e.g. `HOST=0.0.0.0`) exposes the unauthenticated service to your network — SkillForge prints a startup warning for that case, which you can only silence by explicitly setting `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`. Putting the server on the public Internet as a multi-user service is not a supported configuration without adding an external authentication/isolation layer in front of it.
+SkillForge is built for **local / trusted self-hosted use**. It has **no built-in authentication, authorization, or tenant isolation**: anyone who can reach the server can generate skills, read stored skills (including their full sources), edit generated files, and export packages.
+
+- **Default loopback binding (`HOST=127.0.0.1`):** Restricts socket access to your machine. SkillForge enforces server-side inbound `Host` header validation before serving static files or API routes, accepting only canonical local loopback forms (`localhost`, `127.0.0.1`, `[::1]`, `::1`). Requests with unexpected `Host` headers (such as `attacker.example:8787`) are rejected with HTTP 403, closing browser-based DNS-rebinding attacks.
+- **Non-loopback binding (`HOST=0.0.0.0` or LAN IPs):** To prevent accidental exposure of the unauthenticated service and maintain rebinding protection, binding to a non-loopback host **fails closed at startup** unless an explicit list of permitted hosts is configured via `SKILLFORGE_ALLOWED_HOSTS` (e.g. `SKILLFORGE_ALLOWED_HOSTS=192.168.1.50,my-server.lan`). A startup warning is also printed unless explicitly acknowledged with `SKILLFORGE_ACKNOWLEDGE_EXPOSURE=1`.
+- Putting the server on the public Internet as a multi-user service is not a supported configuration without adding an external authentication and isolation layer in front of it.
 
 ## Sources
 
@@ -98,8 +102,16 @@ The report states `passed`, `executed`, per-check status, file locations, and ac
 
 ## Providers
 
-- `mock` (default): deterministic, offline, no key. Same source ⇒ byte-identical package.
+- `mock` (default): deterministic, offline demo provider that requires no API key. The mock provider makes no remote model/provider network requests (note that source ingestion adapters such as URL fetch or GitHub repository reading still perform outbound network requests according to their respective source policies). Same source ⇒ byte-identical package.
 - `glm` / `openai`: OpenAI-compatible chat-completions adapters. Model output must parse against the skill-plan schema; malformed output fails with an actionable error instead of entering the package. Configure via `.env` (see `.env.example`). The adapters are covered by deterministic tests with injected transport; actual compatibility depends on the configured endpoint and model — use `npm run verify:provider` with your credentials to validate a live configuration.
+
+### Remote provider source-data egress and privacy
+
+When configuring a remote model provider (`glm` or `openai`), source material leaves your machine:
+
+- **Egress scope for ordinary sources:** Generation requests for pasted text, bundled samples, URLs, local files, and GitHub documentation-mode inputs transmit up to the first 60,000 characters of normalized source text, plus prompt metadata (the source name and optional requested skill name), to the configured provider endpoint (`SKILLFORGE_BASE_URL` or the provider's default URL). Do not point a remote provider at sensitive, proprietary, or confidential source material unless you intend to disclose that material to that provider.
+- **Narrower contract for GitHub codebase mode:** In codebase mode, remote providers receive only bounded, structured repository analysis metadata (detected frameworks, entrypoints, manifest metadata without script definitions, testing evidence, capped at 16 KB JSON total). Command bodies, manifest script definitions, convention text, and raw inspected source code are excluded and not transmitted to the remote model.
+- **Provider URL and credentials:** `SKILLFORGE_BASE_URL` defines the configured provider destination. The `SKILLFORGE_API_KEY` is used as the Bearer credential in the `Authorization` header for requests to the configured provider URL.
 
 ### Verifying a provider
 

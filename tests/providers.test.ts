@@ -8,7 +8,7 @@ import { getSample } from "../src/core/samples.js";
 import type { GenerateInput } from "../src/core/providers/types.js";
 
 function makeInput(): GenerateInput {
-  const source = normalizeSource({ type: "text", name: "doc", content: getSample("fastforge-cli").content });
+  const source = normalizeSource({ type: "text", name: "doc", content: getSample("scaffoldcraft-cli").content });
   return { source, analysis: analyzeSource(source) };
 }
 
@@ -23,7 +23,7 @@ describe("MockProvider (bundled demo path)", () => {
     const a = await provider.generate(makeInput());
     const b = await provider.generate(makeInput());
     expect(a).toEqual(b);
-    expect(a.name).toBe("fastforge-cli");
+    expect(a.name).toBe("scaffoldcraft-cli");
     expect(a.steps.length).toBeGreaterThan(0);
   });
 });

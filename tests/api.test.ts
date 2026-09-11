@@ -91,14 +91,14 @@ describe("generation pipeline (streaming)", () => {
   });
 
   it("works with pasted text sources", async () => {
-    const content = getSample("fastforge-cli").content;
+    const content = getSample("scaffoldcraft-cli").content;
     const res = await request(app)
       .post("/api/generate")
-      .send({ sourceType: "text", name: "Pasted FastForge", content })
+      .send({ sourceType: "text", name: "Pasted ScaffoldCraft", content })
       .expect(200);
     const events = res.text.trim().split("\n").map((l) => JSON.parse(l));
     const result = events.find((e: { type: string }) => e.type === "result");
-    expect(result.skill.meta.name).toBe("fastforge-cli");
+    expect(result.skill.meta.name).toBe("scaffoldcraft-cli");
   });
 });
 
@@ -106,14 +106,14 @@ describe("skill inspection, validation, export", () => {
   let skillId: string;
 
   beforeAll(async () => {
-    const { result } = await generateSkill("fastforge-cli");
+    const { result } = await generateSkill("scaffoldcraft-cli");
     skillId = result.skill.id;
   });
 
   it("serves the stored skill with source and validation", async () => {
     const res = await request(app).get(`/api/skills/${skillId}`).expect(200);
     expect(res.body.id).toBe(skillId);
-    expect(res.body.source.text).toContain("FastForge");
+    expect(res.body.source.text).toContain("ScaffoldCraft");
     expect(res.body.validation.executed).toBe(true);
   });
 
@@ -138,9 +138,9 @@ describe("skill inspection, validation, export", () => {
 
     const zip = await JSZip.loadAsync(body);
     const names = Object.keys(zip.files).filter((n) => !n.endsWith("/"));
-    expect(names).toContain("fastforge-cli/SKILL.md");
-    const skillMd = await zip.files["fastforge-cli/SKILL.md"]!.async("string");
-    expect(skillMd).toContain("name: fastforge-cli");
+    expect(names).toContain("scaffoldcraft-cli/SKILL.md");
+    const skillMd = await zip.files["scaffoldcraft-cli/SKILL.md"]!.async("string");
+    expect(skillMd).toContain("name: scaffoldcraft-cli");
   });
 
   it("refuses unsupported export targets with 400", async () => {
@@ -212,7 +212,7 @@ describe("provider credential routing (F-02)", () => {
         {
           provider: "glm",
           hasApiKey: true,
-          apiKey: "GLM_TEST_KEY_12345",
+          apiKey: "mock-test-key",
         },
         { storeRoot },
       );
@@ -231,7 +231,7 @@ describe("provider credential routing (F-02)", () => {
       // Verify that configured GLM endpoint was called
       expect(calledUrls.some((u) => u.startsWith("https://open.bigmodel.cn/"))).toBe(true);
       // Verify that GLM key was only sent to the GLM endpoint
-      expect(authHeaders).toEqual(["Bearer GLM_TEST_KEY_12345"]);
+      expect(authHeaders).toEqual(["Bearer mock-test-key"]);
 
       // Verify resulting skill generator is configured provider (glm), not request provider (openai)
       const events = res.text.trim().split("\n").map((l) => JSON.parse(l));

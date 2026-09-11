@@ -17,7 +17,7 @@ import { getSample } from "../src/core/samples.js";
 import type { GenerateInput } from "../src/core/providers/types.js";
 
 function makeInput(signal?: AbortSignal): GenerateInput {
-  const source = normalizeSource({ type: "text", name: "doc", content: getSample("fastforge-cli").content });
+  const source = normalizeSource({ type: "text", name: "doc", content: getSample("scaffoldcraft-cli").content });
   return { source, analysis: analyzeSource(source), signal };
 }
 

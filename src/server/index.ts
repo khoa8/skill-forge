@@ -39,6 +39,8 @@ const config: AppConfig = {
   apiKey: runtime.apiKey,
   baseUrl: runtime.baseUrl,
   model: runtime.model,
+  bindHost: bind.host,
+  allowedHosts: bind.allowedHosts,
 };
 
 const app = createApp(config);

@@ -9,6 +9,7 @@ import request from "supertest";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp, isLoopbackHost, terminalErrorHandler } from "../src/server/app.js";
+import { parseHostHeader, isAllowedHost } from "../src/server/host-guard.js";
 import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 import type { Request, Response, NextFunction } from "express";
 
@@ -198,5 +199,127 @@ describe("isLoopbackHost (binding-warning classifier)", () => {
     expect(isLoopbackHost("192.168.1.10")).toBe(false);
     expect(isLoopbackHost("10.0.0.5")).toBe(false);
     expect(isLoopbackHost("skillforge.example.com")).toBe(false);
+  });
+});
+
+describe("Inbound Host validation (PUB-01 DNS-rebinding protection)", () => {
+  it("accepts valid local loopback Host headers on loopback bind", async () => {
+    for (const validHost of ["127.0.0.1", "127.0.0.1:8787", "localhost", "localhost:8787", "[::1]", "[::1]:8787", "::1"]) {
+      const res = await request(app).get("/api/health").set("Host", validHost).expect(200);
+      expect(res.body.ok).toBe(true);
+    }
+  });
+
+  it("rejects hostile Host headers on loopback bind with 403 (DNS-rebinding protection)", async () => {
+    for (const badHost of ["attacker.example", "attacker.example:8787", "evil.com", "sub.domain.org:3000"]) {
+      const res = await request(app).get("/api/health").set("Host", badHost).expect(403);
+      expect(res.headers["content-type"]).toContain("application/json");
+      expect(res.body.code).toBe("disallowed_host");
+      expect(res.body.error).toBe("Disallowed Host header.");
+    }
+  });
+
+  it("enforces Host rejection on the root / static UI path", async () => {
+    const res = await request(app).get("/").set("Host", "attacker.example:8787").expect(403);
+    expect(res.body.code).toBe("disallowed_host");
+  });
+
+  it("enforces Host rejection on sensitive /api endpoints", async () => {
+    const genRes = await request(app)
+      .post("/api/generate")
+      .set("Host", "attacker.example:8787")
+      .send({ sourceType: "text", content: "hello" })
+      .expect(403);
+    expect(genRes.body.code).toBe("disallowed_host");
+
+    const skillsRes = await request(app)
+      .get("/api/skills")
+      .set("Host", "attacker.example:8787")
+      .expect(403);
+    expect(skillsRes.body.code).toBe("disallowed_host");
+  });
+
+  it("rejects malformed Host headers with 400 Bad Request", async () => {
+    for (const malformed of [
+      "localhost:notaport",
+      "localhost:99999",
+      "localhost:-1",
+      "localhost:",
+      "[::1",
+      "[::1]:",
+      "[::1]:notaport",
+      "host name with spaces",
+      "attacker.example, localhost",
+      "host/with/path",
+    ]) {
+      const res = await request(app).get("/api/health").set("Host", malformed).expect(400);
+      expect(res.body.code).toBe("invalid_host");
+      expect(res.body.error).toBe("Invalid Host header.");
+    }
+  });
+
+  it("respects explicit allowedHosts configuration", async () => {
+    const customApp = createApp({
+      provider: "mock",
+      hasApiKey: false,
+      bindHost: "127.0.0.1",
+      allowedHosts: ["custom.internal", "my-workstation.lan"],
+    });
+
+    const ok1 = await request(customApp).get("/api/health").set("Host", "custom.internal:8787").expect(200);
+    expect(ok1.body.ok).toBe(true);
+
+    const ok2 = await request(customApp).get("/api/health").set("Host", "my-workstation.lan").expect(200);
+    expect(ok2.body.ok).toBe(true);
+
+    // Loopback hosts still work
+    const ok3 = await request(customApp).get("/api/health").set("Host", "localhost:8787").expect(200);
+    expect(ok3.body.ok).toBe(true);
+
+    // Unlisted host rejected
+    const bad = await request(customApp).get("/api/health").set("Host", "attacker.example:8787").expect(403);
+    expect(bad.body.code).toBe("disallowed_host");
+  });
+
+  it("supports non-loopback bindHost with allowedHosts", async () => {
+    const nonLoopbackApp = createApp({
+      provider: "mock",
+      hasApiKey: false,
+      bindHost: "192.168.1.100",
+      allowedHosts: ["192.168.1.100", "my-server.lan"],
+    });
+
+    const res1 = await request(nonLoopbackApp).get("/api/health").set("Host", "192.168.1.100:8787").expect(200);
+    expect(res1.body.ok).toBe(true);
+
+    const res2 = await request(nonLoopbackApp).get("/api/health").set("Host", "my-server.lan").expect(200);
+    expect(res2.body.ok).toBe(true);
+
+    const bad = await request(nonLoopbackApp).get("/api/health").set("Host", "attacker.example:8787").expect(403);
+    expect(bad.body.code).toBe("disallowed_host");
+  });
+});
+
+describe("parseHostHeader pure parser", () => {
+  it("safely extracts host and port", () => {
+    expect(parseHostHeader("localhost")).toEqual({ ok: true, host: "localhost" });
+    expect(parseHostHeader("localhost:8787")).toEqual({ ok: true, host: "localhost", port: 8787 });
+    expect(parseHostHeader("127.0.0.1")).toEqual({ ok: true, host: "127.0.0.1" });
+    expect(parseHostHeader("127.0.0.1:3000")).toEqual({ ok: true, host: "127.0.0.1", port: 3000 });
+    expect(parseHostHeader("[::1]")).toEqual({ ok: true, host: "[::1]" });
+    expect(parseHostHeader("[::1]:8787")).toEqual({ ok: true, host: "[::1]", port: 8787 });
+    expect(parseHostHeader("::1")).toEqual({ ok: true, host: "::1" });
+  });
+
+  it("rejects missing, empty, or malformed inputs", () => {
+    expect(parseHostHeader(undefined).ok).toBe(false);
+    expect(parseHostHeader("").ok).toBe(false);
+    expect(parseHostHeader("   ").ok).toBe(false);
+    expect(parseHostHeader("a, b").ok).toBe(false);
+    expect(parseHostHeader("localhost:abc").ok).toBe(false);
+    expect(parseHostHeader("localhost:70000").ok).toBe(false);
+    expect(parseHostHeader("[::1").ok).toBe(false);
+    expect(parseHostHeader("[::1]:").ok).toBe(false);
+    expect(parseHostHeader("::1:8787").ok).toBe(false);
   });
 });
