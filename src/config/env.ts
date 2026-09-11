@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROVIDER_IDS, type ProviderId } from "../core/providers/index.js";
+import { parseHostToken } from "../server/host-guard.js";
 
 export class ConfigError extends Error {
   constructor(
@@ -233,54 +234,14 @@ export function parseAllowedHosts(raw?: string): string[] {
         "config_allowed_hosts_invalid",
       );
     }
-    if (token.includes("://") || token.startsWith("http:") || token.startsWith("https:")) {
+    const result = parseHostToken(token, { allowPort: false });
+    if (!result.ok) {
       throw new ConfigError(
-        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": schemes and URLs are not permitted (expected hostname or IP only).`,
+        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": ${result.reason}.`,
         "config_allowed_hosts_invalid",
       );
     }
-    if (token.includes("/")) {
-      throw new ConfigError(
-        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": paths are not permitted (expected hostname or IP only).`,
-        "config_allowed_hosts_invalid",
-      );
-    }
-    if (token.startsWith("[")) {
-      const close = token.indexOf("]");
-      if (close === -1) {
-        throw new ConfigError(
-          `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": unclosed IPv6 bracket.`,
-          "config_allowed_hosts_invalid",
-        );
-      }
-      if (token.slice(close + 1).length > 0) {
-        throw new ConfigError(
-          `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": ports are not permitted in allowed hosts.`,
-          "config_allowed_hosts_invalid",
-        );
-      }
-    } else {
-      const colons = (token.match(/:/g) || []).length;
-      if (colons === 1) {
-        throw new ConfigError(
-          `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": ports are not permitted in allowed hosts.`,
-          "config_allowed_hosts_invalid",
-        );
-      }
-    }
-    if (token.includes("*")) {
-      throw new ConfigError(
-        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": wildcard '*' is not permitted. Specify explicit hostnames or IP addresses.`,
-        "config_allowed_hosts_invalid",
-      );
-    }
-    if (!/^[a-zA-Z0-9.:_\[\]-]+$/.test(token)) {
-      throw new ConfigError(
-        `Invalid SKILLFORGE_ALLOWED_HOSTS entry "${token}": contains invalid characters.`,
-        "config_allowed_hosts_invalid",
-      );
-    }
-    out.push(token.toLowerCase());
+    out.push(result.host);
   }
   return out;
 }
