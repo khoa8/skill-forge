@@ -4,6 +4,13 @@ import request from "supertest";
 import JSZip from "jszip";
 import { createApp } from "../src/server/app.js";
 import { sha256 } from "../src/core/util.js";
+import { createStore } from "../src/server/store.js";
+import { normalizeSource } from "../src/core/ingest.js";
+import { analyzeSource } from "../src/core/analyze.js";
+import { buildCanonicalSkill, derivePlanFromAnalysis } from "../src/core/build.js";
+import { validatePackage } from "../src/core/validate.js";
+import type { RepositoryAnalysis } from "../src/core/types.js";
+import { sampleRepositoryAnalysis } from "./codebase-model.test.js";
 
 /** Edit-before-export: edits persist, are validation-aware, keep the manifest
  * honest, and never allow exporting an unvalidated or failing package. */
@@ -250,4 +257,275 @@ afterAll(async () => {
     expect(manifest.source.notes).toEqual(originalNotes);
     expect(manifest.source.notes.some((n: string) => n.includes("file limit"))).toBe(true);
   }, 20000);
+});
+
+describe("F-01 regression: generic export does not resurrect stale instructions or description after edit", () => {
+  let app: ReturnType<typeof createApp>;
+  let cleanupStore: () => Promise<void>;
+  beforeAll(async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    cleanupStore = cleanup;
+    app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+  });
+  afterAll(async () => {
+    await cleanupStore?.();
+  });
+
+  const id = "f01-stale-instruction-demo";
+
+  it("proves Generic export cannot resurrect stale pre-edit instructions or description", async () => {
+    // 1. Generate a valid skill through the server/API
+    const res = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: id })
+      .expect(200);
+    const result = eventsOf(res.text).find((e: { type: string }) => e.type === "result");
+    expect(result.validation.passed).toBe(true);
+
+    const get = await request(app).get(`/api/skills/${id}`).expect(200);
+    const originalSkillMd: string = get.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
+    const originalDesc: string = get.body.skill.meta.description;
+
+    // 2. Capture a distinctive instruction and the original description
+    const distinctiveInstruction = 'Follow the documented procedure "Refunding a payment"';
+    expect(originalSkillMd).toContain(distinctiveInstruction);
+    expect(originalDesc.length).toBeGreaterThan(0);
+
+    // 3. Submit a valid edit to SKILL.md that removes that instruction and changes description
+    const newDescription = "A thoroughly updated and custom payment gateway skill definition.";
+    const editedSkillMd = originalSkillMd
+      .replace(
+        /^description: .*/m,
+        `description: ${JSON.stringify(newDescription)}`,
+      )
+      .replace(
+        distinctiveInstruction,
+        "Custom replacement workflow step for payment processing",
+      );
+
+    expect(editedSkillMd).not.toContain(distinctiveInstruction);
+    expect(editedSkillMd).toContain(newDescription);
+    expect(editedSkillMd).toContain("Custom replacement workflow step for payment processing");
+
+    const editRes = await request(app)
+      .post(`/api/skills/${id}/update-file`)
+      .send({ path: "SKILL.md", content: editedSkillMd })
+      .expect(200);
+    expect(editRes.body.validation.passed).toBe(true);
+
+    // 4. Export target generic through the real export endpoint
+    const exportRes = await request(app)
+      .post(`/api/skills/${id}/export`)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(c));
+        r.on("end", () => cb(null, Buffer.concat(chunks)));
+      })
+      .send({ target: "generic" })
+      .expect(200);
+
+    // 5. Open the ZIP
+    const zip = await JSZip.loadAsync(exportRes.body);
+
+    // 6. Assert:
+    // - edited SKILL.md is present exactly as persisted
+    const skillMdInZip = await zip.files[`${id}/SKILL.md`]!.async("string");
+    expect(skillMdInZip).toBe(editedSkillMd);
+
+    // - AGENTS.md exists
+    const agentsFile = zip.files[`${id}/AGENTS.md`];
+    expect(agentsFile).toBeDefined();
+    const agentsContent = await agentsFile!.async("string");
+
+    // - AGENTS.md does NOT resurrect the removed/replaced pre-edit instruction
+    expect(agentsContent).not.toContain(distinctiveInstruction);
+    expect(agentsContent).not.toContain("Refunding a payment");
+
+    // - AGENTS.md does NOT contain stale pre-edit description
+    expect(agentsContent).not.toContain(originalDesc);
+    expect(agentsContent).not.toContain("## Purpose");
+    expect(agentsContent).not.toContain("## Constraints");
+
+    // - the wrapper still provides useful orientation to the canonical files
+    expect(agentsContent).toContain("## How to use this skill");
+    expect(agentsContent).toContain("## Where to look");
+    expect(agentsContent).toContain("`SKILL.md` is the authoritative skill definition");
+    expect(agentsContent).toContain("- `SKILL.md`");
+    expect(agentsContent).toContain("- `manifest.json`");
+
+    // - exported manifest.json includes correct inventory/hash information for AGENTS.md and edited files
+    const manifestJson = JSON.parse(await zip.files[`${id}/manifest.json`]!.async("string"));
+    const agentsEntry = manifestJson.files.find((f: { path: string }) => f.path === "AGENTS.md");
+    expect(agentsEntry).toBeDefined();
+    expect(agentsEntry.bytes).toBe(Buffer.byteLength(agentsContent, "utf8"));
+    expect(agentsEntry.sha256).toBe(sha256(agentsContent));
+
+    const skillEntry = manifestJson.files.find((f: { path: string }) => f.path === "SKILL.md");
+    expect(skillEntry).toBeDefined();
+    expect(skillEntry.bytes).toBe(Buffer.byteLength(editedSkillMd, "utf8"));
+    expect(skillEntry.sha256).toBe(sha256(editedSkillMd));
+  });
+});
+
+describe("F-02 regression: manifest and source hash consistency across reload, validate, and export", () => {
+  let app: ReturnType<typeof createApp>;
+  let cleanupStore: () => Promise<void>;
+  let storeRootPath: string;
+  beforeAll(async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    cleanupStore = cleanup;
+    storeRootPath = storeRoot;
+    app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+  });
+  afterAll(async () => {
+    await cleanupStore?.();
+  });
+
+  it("raw source with CRLF and HTML normalization does not produce false hash failure on reload, /validate, or /export", async () => {
+    const id = "crlf-html-source-demo";
+    // Source text with CRLF line endings and HTML markup that changes during normalization
+    const rawContent = "# Payments API Guide\r\n\r\n<p>This is paragraph text with &amp; entities.</p>\r\n\r\n## Usage\r\n\r\nRun the payment procedure.\r\n";
+
+    const gen = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "text", content: rawContent, name: "crlf-doc", requestedName: id })
+      .expect(200);
+    const result = eventsOf(gen.text).find((e: { type: string }) => e.type === "result");
+    expect(result.validation.passed).toBe(true);
+
+    // Persisted reload
+    const get = await request(app).get(`/api/skills/${id}`).expect(200);
+    expect(get.body.validation.passed).toBe(true);
+
+    // Manual revalidation
+    const valRes = await request(app).post(`/api/skills/${id}/validate`).expect(200);
+    expect(valRes.body.validation.passed).toBe(true);
+    expect(valRes.body.validation.errorCount).toBe(0);
+    const hashFail = valRes.body.validation.checks.find(
+      (c: { id: string; status: string }) => c.id === "manifest-consistency" && c.status === "fail",
+    );
+    expect(hashFail).toBeUndefined();
+
+    // Export validation
+    const exportRes = await request(app)
+      .post(`/api/skills/${id}/export`)
+      .send({ target: "generic" })
+      .expect(200);
+    expect(exportRes.headers["content-type"]).toBe("application/zip");
+  });
+
+  it("synthetic github-codebase source verifies offline without false hash failure across reload, /validate, and /export", async () => {
+    const id = "offline-codebase-demo";
+    // Codebase source with HTML-like code tags that must NOT be stripped by normalization
+    const codeContent = "// Codebase Source\nexport function renderTemplate() {\n  return '<div><span>Hello</span></div>';\n}\n// Ensure minimum characters requirement is met easily for this fixture.\n";
+
+    const store = createStore(storeRootPath);
+    const normalized = normalizeSource({
+      type: "github-codebase",
+      name: "acme/offline-repo",
+      content: codeContent,
+      notes: ["Inspected 1 file(s) in codebase mode."],
+    });
+    // Codebase normalization must preserve the code tags verbatim
+    expect(normalized.text).toContain("<div><span>Hello</span></div>");
+
+    const analysis = analyzeSource(normalized);
+    const plan = derivePlanFromAnalysis(analysis);
+    const repoAnalysis: RepositoryAnalysis = {
+      ...sampleRepositoryAnalysis(),
+      repository: {
+        url: "https://github.com/acme/offline-repo",
+        owner: "acme",
+        name: "offline-repo",
+        ref: "main",
+      },
+      inspectedFiles: ["package.json", "src/index.ts"],
+      selection: {
+        treeBlobCount: 30,
+        candidateCount: 20,
+        selectedCount: 2,
+        treeTruncated: false,
+      },
+    };
+
+    normalized.repository = repoAnalysis;
+    const skill = buildCanonicalSkill(normalized, analysis, plan, "mock");
+    const validation = validatePackage({
+      skill,
+      sourceText: normalized.text,
+      sourceType: "github-codebase",
+    });
+    expect(validation.passed).toBe(true);
+
+    await store.saveSkill({
+      id,
+      skill,
+      analysis: {
+        title: analysis.title,
+        sectionCount: analysis.sections.length,
+        procedureCount: analysis.procedures.length,
+        commandCount: analysis.commands.length,
+        codeBlockCount: analysis.codeBlocks.length,
+        lineCount: analysis.lineCount,
+      },
+      source: {
+        name: "acme/offline-repo",
+        type: "github-codebase",
+        text: codeContent,
+        notes: ["Inspected 1 file(s) in codebase mode."],
+        repository: repoAnalysis,
+      },
+      validation,
+      createdAt: new Date().toISOString(),
+    });
+
+    // Reload from store
+    const get = await request(app).get(`/api/skills/${id}`).expect(200);
+    expect(get.body.validation.passed).toBe(true);
+
+    // Revalidate
+    const valRes = await request(app).post(`/api/skills/${id}/validate`).expect(200);
+    expect(valRes.body.validation.passed).toBe(true);
+
+    // Export
+    const exportRes = await request(app)
+      .post(`/api/skills/${id}/export`)
+      .send({ target: "generic" })
+      .expect(200);
+    expect(exportRes.headers["content-type"]).toBe("application/zip");
+  });
+
+  it("fails closed with 409 source_renormalization_failed when persisted source cannot be re-normalized", async () => {
+    const id = "malformed-source-fail-closed";
+    const goodContent = "# A perfectly valid document with enough text to pass normalization.\n\n## Section\nSome instructional text.";
+    const gen = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "text", content: goodContent, name: "good-doc", requestedName: id })
+      .expect(200);
+    const result = eventsOf(gen.text).find((e: { type: string }) => e.type === "result");
+    expect(result.validation.passed).toBe(true);
+
+    // Corrupt stored source.text directly in the store to empty string (which fails normalizeSource)
+    const store = createStore(storeRootPath);
+    const stored = await store.getSkill(id);
+    expect(stored).toBeDefined();
+    stored!.source.text = "too short"; // < 40 chars -> fails normalizeSource with source_too_short
+
+    // Directly rewrite skill.json
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    await fs.writeFile(path.join(storeRootPath, id, "skill.json"), JSON.stringify(stored, null, 2), "utf8");
+
+    // /validate should fail closed with 409 source_renormalization_failed
+    const valRes = await request(app).post(`/api/skills/${id}/validate`).expect(409);
+    expect(valRes.body.code).toBe("source_renormalization_failed");
+
+    // /export should fail closed with 409 source_renormalization_failed
+    const exportRes = await request(app)
+      .post(`/api/skills/${id}/export`)
+      .send({ target: "generic" })
+      .expect(409);
+    expect(exportRes.body.code).toBe("source_renormalization_failed");
+  });
 });

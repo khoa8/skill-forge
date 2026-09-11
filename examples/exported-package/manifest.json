@@ -15,8 +15,8 @@
   "files": [
     {
       "path": "AGENTS.md",
-      "bytes": 1343,
-      "sha256": "d05dc7d1756b393bbc77df5efa102cabbee4e174be692accee5eddd3c4840988"
+      "bytes": 765,
+      "sha256": "5ae6689b57990db9456bbb8ffc8b6e70eb824b818640e9573ed02362e9b8dd7b"
     },
     {
       "path": "evals/evals.json",

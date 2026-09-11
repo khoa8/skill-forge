@@ -6,6 +6,7 @@ import { createApp } from "../src/server/app.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill, derivePlanFromAnalysis, manifestFor } from "../src/core/build.js";
+import { sha256 } from "../src/core/util.js";
 import { validatePackage } from "../src/core/validate.js";
 import type { CanonicalSkill } from "../src/core/types.js";
 import { getSample } from "../src/core/samples.js";
@@ -25,7 +26,7 @@ function resyncManifest(skill: CanonicalSkill): CanonicalSkill {
   const files = skill.files.filter((f) => f.path !== "manifest.json");
   const manifest = manifestFor(files, skill.meta, {
     name: "fixture-source",
-    sha256: "test",
+    sha256: sha256("fixture-source"),
     lineCount: 1,
     notes: [],
   });

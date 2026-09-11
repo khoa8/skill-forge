@@ -226,15 +226,7 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     // Regenerate manifest.json from the new inventory (bytes + hashes resync).
     // Codebase provenance must survive edits: the compact manifest repository
     // block is rebuilt from the PERSISTED repository analysis (P1-4).
-    const normalizedSource = normalizeSource({
-      type: existing.source.type,
-      name: existing.source.name,
-      content: existing.source.text,
-      // Preserve the persisted adapter ingestion notes so the regenerated
-      // manifest keeps the original provenance record (truncation/skips must
-      // survive edits — the edit changes files, not the source history).
-      notes: existing.source.notes ?? [],
-    });
+    const normalizedSource = normalizeStoredSource(existing.source);
     const manifestFile = existing.skill.files.find((f) => f.path === "manifest.json");
     if (manifestFile) {
       manifestFile.content = manifestFor(
@@ -257,7 +249,7 @@ export function createStore(root: string = defaultSkillsRoot()): SkillStore {
     // repository provenance silently.
     existing.validation = revalidate(
       existing.skill,
-      existing.source.text,
+      normalizedSource.text,
       existing.source.type,
     );
 
@@ -301,6 +293,18 @@ export class EditError extends Error {
     super(message);
     this.name = "EditError";
   }
+}
+
+/** Re-normalize stored source using the canonical ingestion normalizer.
+ * Preserves source type, adapter notes, and repository provenance. */
+export function normalizeStoredSource(source: StoredSkill["source"]) {
+  return normalizeSource({
+    type: source.type,
+    name: source.name,
+    content: source.text,
+    notes: source.notes ?? [],
+    repository: source.repository,
+  });
 }
 
 /** Map a StoredSkill back to the shape the HTTP layer returns. */

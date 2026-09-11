@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill, derivePlanFromAnalysis, manifestFor } from "../src/core/build.js";
+import { sha256 } from "../src/core/util.js";
 import { validatePackage, skippedValidationReport, splitFrontMatter } from "../src/core/validate.js";
 import type { CanonicalSkill } from "../src/core/types.js";
 import { getSample } from "../src/core/samples.js";
@@ -17,14 +18,14 @@ const healthy = buildSkill(getSample("meridian-payments-api").content);
 
 /** After mutating file contents, re-sync the manifest so manifest-consistency
  * does not mask the specific check under test. */
-function resyncManifest(skill: CanonicalSkill): CanonicalSkill {
+function resyncManifest(skill: CanonicalSkill, sourceSha256 = sha256(healthy.sourceText)): CanonicalSkill {
   const files = skill.files.filter((f) => f.path !== "manifest.json");
   // Use the real manifest builder so the synthetic manifest carries the same
   // identity fields (name, displayName, description, version, generator) the
   // canonical-metadata-consistency check compares against.
   const manifest = manifestFor(files, skill.meta, {
     name: "fixture-source",
-    sha256: "test",
+    sha256: sourceSha256,
     lineCount: 1,
     notes: [],
   });
@@ -196,5 +197,87 @@ describe("validatePackage (deterministic validator)", () => {
     expect(split!.fm).toBe("name: x\ndescription: y");
     expect(split!.body).toContain("# Body");
     expect(splitFrontMatter("no front matter")).toBeNull();
+  });
+
+  it("fails manifest-consistency when a file is mutated to the same byte length (stale hash)", () => {
+    const broken = structuredClone(healthy.skill);
+    const targetFile = broken.files.find((f) => f.path === "references/authentication.md")!;
+    // Exact same byte length mutation: "bearer" (6) -> "header" (6)
+    const original = "bearer";
+    const replacement = "header";
+    expect(targetFile.content).toContain(original);
+    targetFile.content = targetFile.content.replace(original, replacement);
+    // bytes stay identical, but sha256 has drifted
+    const report = validatePackage({ skill: broken, sourceText: healthy.sourceText });
+    expect(report.passed).toBe(false);
+    const failCheck = report.checks.find((c) => c.id === "manifest-consistency" && c.status === "fail");
+    expect(failCheck).toBeDefined();
+    expect(failCheck!.message).toContain("records sha256");
+    expect(failCheck!.message).toContain("but the file hash is");
+  });
+
+  it("fails manifest-consistency when file content changes with stale bytes and sha256", () => {
+    const broken = structuredClone(healthy.skill);
+    const targetFile = broken.files.find((f) => f.path === "references/authentication.md")!;
+    targetFile.content += "\nExtra line changing byte length.\n";
+    const report = validatePackage({ skill: broken, sourceText: healthy.sourceText });
+    expect(report.passed).toBe(false);
+    const fails = report.checks.filter((c) => c.id === "manifest-consistency" && c.status === "fail");
+    expect(fails.some((c) => c.message?.includes("records") && c.message?.includes("bytes"))).toBe(true);
+    expect(fails.some((c) => c.message?.includes("records sha256"))).toBe(true);
+  });
+
+  it("fails manifest-consistency on missing or malformed file entry sha256", () => {
+    const broken = structuredClone(healthy.skill);
+    const manifestFile = broken.files.find((f) => f.path === "manifest.json")!;
+    const parsed = JSON.parse(manifestFile.content);
+    parsed.files[0].sha256 = "not-a-valid-sha";
+    manifestFile.content = JSON.stringify(parsed, null, 2);
+    const report = validatePackage({ skill: broken, sourceText: healthy.sourceText });
+    expect(report.passed).toBe(false);
+    expect(report.checks.some((c) => c.id === "manifest-consistency" && c.status === "fail" && c.message?.includes("invalid sha256"))).toBe(true);
+
+    // Missing sha256
+    delete parsed.files[0].sha256;
+    manifestFile.content = JSON.stringify(parsed, null, 2);
+    const reportMissing = validatePackage({ skill: broken, sourceText: healthy.sourceText });
+    expect(reportMissing.passed).toBe(false);
+    expect(reportMissing.checks.some((c) => c.id === "manifest-consistency" && c.status === "fail" && c.message?.includes("invalid sha256"))).toBe(true);
+  });
+
+  it("fails manifest-consistency on missing, non-integer, or negative file entry bytes", () => {
+    const broken = structuredClone(healthy.skill);
+    const manifestFile = broken.files.find((f) => f.path === "manifest.json")!;
+    const parsed = JSON.parse(manifestFile.content);
+    parsed.files[0].bytes = -1;
+    manifestFile.content = JSON.stringify(parsed, null, 2);
+    expect(validatePackage({ skill: broken }).checks.some((c) => c.id === "manifest-consistency" && c.status === "fail" && c.message?.includes("invalid bytes"))).toBe(true);
+
+    parsed.files[0].bytes = 12.5;
+    manifestFile.content = JSON.stringify(parsed, null, 2);
+    expect(validatePackage({ skill: broken }).checks.some((c) => c.id === "manifest-consistency" && c.status === "fail" && c.message?.includes("invalid bytes"))).toBe(true);
+
+    delete parsed.files[0].bytes;
+    manifestFile.content = JSON.stringify(parsed, null, 2);
+    expect(validatePackage({ skill: broken }).checks.some((c) => c.id === "manifest-consistency" && c.status === "fail" && c.message?.includes("invalid bytes"))).toBe(true);
+  });
+
+  it("fails manifest-consistency when manifest.source.sha256 does not match provided source text", () => {
+    const broken = structuredClone(healthy.skill);
+    const manifestFile = broken.files.find((f) => f.path === "manifest.json")!;
+    const parsed = JSON.parse(manifestFile.content);
+    parsed.source.sha256 = "0".repeat(64);
+    manifestFile.content = JSON.stringify(parsed, null, 2);
+    const report = validatePackage({ skill: broken, sourceText: healthy.sourceText });
+    expect(report.passed).toBe(false);
+    expect(report.checks.some((c) => c.id === "manifest-consistency" && c.status === "fail" && c.message?.includes("source.sha256") && c.message?.includes("does not match"))).toBe(true);
+  });
+
+  it("warns honestly when source text is unavailable for source hash verification", () => {
+    const report = validatePackage({ skill: healthy.skill });
+    expect(report.passed).toBe(true);
+    const warnCheck = report.checks.find((c) => c.id === "manifest-consistency" && c.status === "warn");
+    expect(warnCheck).toBeDefined();
+    expect(warnCheck!.message).toContain("Source text unavailable; manifest.source.sha256 could not be verified");
   });
 });
