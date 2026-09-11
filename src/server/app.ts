@@ -78,7 +78,6 @@ const GenerateBody = z.object({
   recursive: z.boolean().optional(),
   name: z.string().max(200).optional(),
   requestedName: z.string().max(80).optional(),
-  provider: z.enum(PROVIDER_IDS).optional(),
 });
 
 const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
@@ -136,6 +135,7 @@ const PIPELINE_SOURCE_TYPE: Record<z.infer<typeof GenerateBody>["sourceType"], S
 export interface AppConfig {
   provider: string;
   hasApiKey: boolean;
+  apiKey?: string;
   baseUrl?: string;
   model?: string;
 }
@@ -360,8 +360,8 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
             ...(repository ? { repository } : {}),
           },
           {
-            provider: body.provider ?? (config.provider as (typeof PROVIDER_IDS)[number]) ?? "mock",
-            apiKey: config.hasApiKey ? process.env.SKILLFORGE_API_KEY : undefined,
+            provider: (config.provider as (typeof PROVIDER_IDS)[number]) ?? "mock",
+            apiKey: config.apiKey,
             baseUrl: config.baseUrl,
             model: config.model,
             requestedName: body.requestedName,

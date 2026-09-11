@@ -175,3 +175,72 @@ describe("skill inspection, validation, export", () => {
     await request(app).get("/api/skills/does-not-exist").expect(404);
   });
 });
+
+describe("provider credential routing (F-02)", () => {
+  it("strictly enforces configured provider and prevents request body from misrouting credentials", async () => {
+    const calledUrls: string[] = [];
+    const authHeaders: string[] = [];
+    const stubRemoteFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calledUrls.push(url);
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (headers.authorization) authHeaders.push(headers.authorization);
+      const planPayload = {
+        name: "test-routing-skill",
+        displayName: "Test Routing Skill",
+        description: "Valid skill plan for provider routing test.",
+        whenToUse: ["When verifying credential routing."],
+        inputs: ["Test input."],
+        steps: ["Step 1."],
+        constraints: ["None."],
+        verification: ["Run test."],
+        pitfalls: ["None."],
+      };
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(planPayload) } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubRemoteFetch;
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const glmApp = createApp(
+        {
+          provider: "glm",
+          hasApiKey: true,
+          apiKey: "GLM_TEST_KEY_12345",
+        },
+        { storeRoot },
+      );
+
+      const res = await request(glmApp)
+        .post("/api/generate")
+        .send({
+          sourceType: "sample",
+          sampleId: "meridian-payments-api",
+          provider: "openai", // Hostile attempt to switch provider / endpoint
+        })
+        .expect(200);
+
+      // Verify that OpenAI was never called
+      expect(calledUrls.some((u) => u.includes("api.openai.com"))).toBe(false);
+      // Verify that configured GLM endpoint was called
+      expect(calledUrls.some((u) => u.startsWith("https://open.bigmodel.cn/"))).toBe(true);
+      // Verify that GLM key was only sent to the GLM endpoint
+      expect(authHeaders).toEqual(["Bearer GLM_TEST_KEY_12345"]);
+
+      // Verify resulting skill generator is configured provider (glm), not request provider (openai)
+      const events = res.text.trim().split("\n").map((l) => JSON.parse(l));
+      const result = events.find((e: { type: string }) => e.type === "result");
+      expect(result.skill.meta.generator).toBe("glm");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await cleanup();
+    }
+  });
+});
+
