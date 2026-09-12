@@ -18,6 +18,8 @@ const state = {
   // Request ownership and sequence tokens (I-02)
   generationSeq: 0,
   sourceNotesSeq: 0,
+  sourceNotes: null,
+  sourceNotesSkillId: null,
   validateSeq: 0,
   editSeq: 0,
   provenanceSeq: 0,
@@ -205,6 +207,10 @@ async function runGenerate() {
   if (state.running) return;
   state.running = true;
   const genToken = ++state.generationSeq;
+  // Changing the displayed generation invalidates its outstanding requests,
+  // even if a later result happens to reuse the same skill ID.
+  for (const key of ["sourceNotesSeq", "validateSeq", "editSeq", "provenanceSeq", "exportSeq"]) state[key]++;
+  cancelEdit();
   state.skillId = null;
   state.skill = null;
   state.validation = null;
@@ -387,46 +393,51 @@ function renderResults(skill, validation) {
 
 /** Persisted adapter ingestion notes (truncation, skipped files) — kept with
  * the skill so the record stays honest after a reload. Rendered as safe text. */
-async function renderSourceNotes() {
+function paintSourceNotes(status = "") {
   const box = $("#source-notes");
   if (!box) return;
   box.innerHTML = "";
-  if (!state.skillId) {
-    box.classList.add("hidden");
-    return;
-  }
-  const skillId = state.skillId;
-  const token = ++state.sourceNotesSeq;
-  let notes = [];
-  try {
-    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}`);
-    if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
-    if (res.ok) {
-      const data = await res.json();
-      notes = Array.isArray(data.source?.notes) ? data.source.notes : [];
-    }
-  } catch {
-    notes = []; // absence of notes must never fabricate them
-  }
-  if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
-  if (notes.length === 0) {
+  const notes = state.sourceNotes;
+  if (!status && (!notes || notes.length === 0)) {
     box.classList.add("hidden");
     return;
   }
   const h = document.createElement("h2");
   h.textContent = "Source notes";
-  const p = document.createElement("p");
-  p.className = "hint";
-  p.textContent = "Recorded during ingestion — truncation and skipping are reported, never silent:";
   const ul = document.createElement("ul");
   ul.className = "source-notes-list";
-  for (const note of notes) {
+  for (const note of notes ?? []) {
     const li = document.createElement("li");
-    li.textContent = String(note); // safe text rendering
+    li.textContent = String(note);
     ul.append(li);
   }
-  box.append(h, p, ul);
+  const message = document.createElement("p");
+  message.setAttribute("role", "status");
+  message.textContent = status;
+  box.append(h, ul, message);
   box.classList.remove("hidden");
+}
+
+async function renderSourceNotes() {
+  if (!state.skillId) return;
+  const skillId = state.skillId;
+  const token = ++state.sourceNotesSeq;
+  if (state.sourceNotesSkillId !== skillId) {
+    state.sourceNotes = null;
+    state.sourceNotesSkillId = skillId;
+  }
+  paintSourceNotes("Loading source notes…");
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}`);
+    const data = await res.json();
+    if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    state.sourceNotes = Array.isArray(data.source?.notes) ? data.source.notes : [];
+    paintSourceNotes();
+  } catch (err) {
+    if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
+    paintSourceNotes(`Could not reload source notes: ${err.message ?? err}. Previously loaded notes are retained when available.`);
+  }
 }
 
 function analysisSummary(_skill) {
@@ -477,11 +488,15 @@ function renderValidation(validation, fresh) {
   banner.append(head);
 
   const rerun = document.createElement("button");
+  rerun.id = "revalidate-btn";
   rerun.className = "btn";
   rerun.style.marginTop = "8px";
   rerun.textContent = "Re-run validation";
   rerun.addEventListener("click", revalidate);
-  banner.append(rerun);
+  const requestStatus = document.createElement("div");
+  requestStatus.id = "validation-request-status";
+  requestStatus.setAttribute("role", "status");
+  banner.append(rerun, requestStatus);
 
   const checksEl = $("#validation-checks");
   checksEl.innerHTML = "";
@@ -519,6 +534,7 @@ async function revalidate() {
   const token = ++state.validateSeq;
   const revalidateBtn = $("#revalidate-btn");
   if (revalidateBtn) revalidateBtn.disabled = true;
+  $("#validation-request-status").textContent = "Revalidating…";
   try {
     const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/validate`, {
       method: "POST",
@@ -527,13 +543,16 @@ async function revalidate() {
     });
     if (state.skillId !== skillId || state.validateSeq !== token) return;
     const data = await res.json();
+    if (state.skillId !== skillId || state.validateSeq !== token) return;
+    if (!res.ok || !data.validation) throw new Error(data.error ?? `Revalidation failed (HTTP ${res.status}).`);
     if (data.validation) {
       state.validation = data.validation;
       renderValidation(data.validation, false);
       renderExportCards();
     }
   } catch (err) {
-    console.error("Revalidation failed:", err);
+    if (state.skillId !== skillId || state.validateSeq !== token) return;
+    $("#validation-request-status").textContent = `Revalidation failed: ${err.message ?? err}. Last validation result retained.`;
   } finally {
     if (state.skillId === skillId && state.validateSeq === token && revalidateBtn) {
       revalidateBtn.disabled = false;
@@ -616,7 +635,9 @@ function showFile(skill, path) {
 // ---------------------------------------------------------------------------
 
 function startEdit(file) {
+  state.editSeq++;
   state.editingPath = file.path;
+  $("#file-edit-cancel").disabled = false;
   $("#file-view-content").classList.add("hidden");
   $("#file-edit-box").classList.remove("hidden");
   const ta = $("#file-edit-textarea");
@@ -669,6 +690,7 @@ async function saveEdit() {
     });
     if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     const data = await res.json().catch(() => ({}));
+    if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     if (!res.ok) {
       showEditError(data.error ?? `Save failed (HTTP ${res.status}).`);
       saveBtn.disabled = false;
@@ -678,6 +700,9 @@ async function saveEdit() {
     }
     // The server persisted the edit, re-ran deterministic validation, and
     // returned the full updated package + validation.
+    // Pending validation/downloads refer to the package before this edit.
+    state.validateSeq++;
+    state.exportSeq++;
     state.skill = data.skill;
     state.validation = data.validation;
     cancelEdit();
@@ -714,6 +739,7 @@ async function openProvenance(record) {
     );
     if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     const data = await res.json().catch(() => ({}));
+    if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     if (!res.ok) {
       // Never fabricate an excerpt — surface the failure honestly.
       $("#prov-meta").textContent = "";
@@ -740,7 +766,7 @@ async function openProvenance(record) {
   }
 }
 
-function renderExportCards() {
+function renderExportCards(preserveNote = false) {
   const container = $("#export-cards");
   container.innerHTML = "";
   const validation = state.validation;
@@ -767,7 +793,7 @@ function renderExportCards() {
   }
 
   const note = $("#export-note");
-  note.textContent = blocked
+  if (!preserveNote) note.textContent = blocked
     ? ""
     : "Export re-runs deterministic validation server-side before packaging; packages with errors are refused (HTTP 422).";
   // Replace (not stack) the blocked explanation across re-renders.
@@ -803,6 +829,7 @@ async function runExport(target) {
       let message = `Export failed (HTTP ${res.status})`;
       try {
         const data = await res.json();
+        if (state.skillId !== skillId || state.exportSeq !== token) return;
         message = data.error ?? message;
         if (data.validation) {
           state.validation = data.validation;
@@ -810,6 +837,7 @@ async function runExport(target) {
           renderExportCards();
         }
       } catch { /* keep default message */ }
+      if (state.skillId !== skillId || state.exportSeq !== token) return;
       note.textContent = message;
       return;
     }
@@ -834,7 +862,7 @@ async function runExport(target) {
     note.textContent = `Export failed: ${err.message ?? err}`;
   } finally {
     if (state.skillId === skillId && state.exportSeq === token) {
-      renderExportCards();
+      renderExportCards(true);
     }
   }
 }
