@@ -608,7 +608,10 @@ export function buildRepositoryAnalysisFromFiles(
   const seenCommands = new Set<string>();
   const commandsOut: RepositoryCommand[] = [];
   for (const c of [...scriptCommands, ...ciCommandsRaw]) {
-    const key = `${c.kind}::${c.purpose}::${c.command}`;
+    // Root cwd ("") and unknown cwd are distinct. Manifest script names and
+    // evidence retain the corresponding package context without inventing cwd.
+    const key = JSON.stringify([c.kind, c.purpose, c.command,
+      c.kind === "ci-run" ? c.cwd ?? null : c.name, c.evidence]);
     if (seenCommands.has(key)) continue;
     seenCommands.add(key);
     commandsOut.push(c);
