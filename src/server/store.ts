@@ -11,7 +11,7 @@
  * isolated temporary directories and can never touch production data; the
  * module-level exports delegate to the default store for normal use.
  */
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -114,6 +114,7 @@ export class SourceRenormalizationError extends Error {
 export interface StoreTestHooks {
   afterLoad?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
   beforePersist?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
+  beforeEvict?: (id: string) => Promise<void> | void;
   beforeRename?: (id: string, tmpPath: string) => Promise<void> | void;
 }
 
@@ -206,22 +207,35 @@ export function createStore(
           );
         }
 
-        // Evict oldest when over capacity.
         const ids = await listIds();
-        while (ids.length >= MAX_STORED) {
-          const oldest = ids[ids.length - 1]!; // listIds returns newest-first
-          if (oldest === entry.id) break;
-          // Acquire victim's per-id lock before deleting it to avoid racing active mutations
-          await lock.withLock(oldest, async () => {
-            await rm(skillDir(oldest), { recursive: true, force: true });
-          });
-          ids.pop();
-        }
-
         const { analysis, ...rest } = entry;
         const payload = { storeVersion: STORE_VERSION, ...rest, analysisSummary: analysis };
         const dir = skillDir(entry.id);
-        await writeAtomicSkillRecord(dir, payload, entry.id, testHooks);
+        const persist = () => writeAtomicSkillRecord(dir, payload, entry.id, testHooks);
+        if (ids.length < MAX_STORED) {
+          await persist();
+          return;
+        }
+
+        const oldest = ids[ids.length - 1]!;
+        // Lock order is capacity → incoming ID → victim ID. Mutations never
+        // acquire capacity. Public reads wait until this transition completes.
+        await lock.withLock(oldest, async () => {
+          try {
+            // Finish all incoming I/O before touching the retained record.
+            await persist();
+            await testHooks?.beforeEvict?.(oldest);
+            // Removing ONE record is atomic; recursive deletion could partly
+            // destroy the victim before reporting failure.
+            await unlink(join(skillDir(oldest), "skill.json"));
+          } catch (err) {
+            await rm(dir, { recursive: true, force: true });
+            throw err;
+          }
+          // The record transition is committed. Empty directory cleanup is
+          // not part of save success and cannot invalidate the new record.
+          await rm(skillDir(oldest), { recursive: true, force: true }).catch(() => {});
+        });
       });
     });
   }
@@ -417,8 +431,8 @@ export function createStore(
   return {
     root,
     saveSkill,
-    getSkill,
-    listSkills,
+    getSkill: (id) => capacityLock.withLock("save", () => getSkill(id)),
+    listSkills: () => capacityLock.withLock("save", listSkills),
     revalidateSkill,
     updateFileContent,
     _testHooks: testHooks,

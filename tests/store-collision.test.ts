@@ -412,3 +412,41 @@ describe("F-01 / T-02 / I-01: Persistence consistency and collision policy", () 
     }
   });
 });
+
+
+describe("capacity transition failure safety", () => {
+  it.each(["incoming", "eviction"] as const)("preserves every retained record on %s failure", async (phase) => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    let failing = false;
+    const store = createStore(storeRoot, {
+      beforeRename: (id) => {
+        if (failing && phase === "incoming" && id === "incoming") throw new Error("injected incoming failure");
+      },
+      beforeEvict: () => {
+        if (failing && phase === "eviction") throw new Error("injected eviction failure");
+      },
+    });
+    try {
+      const originals = [];
+      for (let i = 0; i < MAX_STORED; i++) {
+        const entry = sampleSkill(`retained-${i}`);
+        entry.createdAt = new Date(1700000000000 + i * 1000).toISOString();
+        await store.saveSkill(entry);
+        originals.push(await store.getSkill(entry.id));
+      }
+      failing = true;
+      await expect(store.saveSkill(sampleSkill("incoming"))).rejects.toThrow(`injected ${phase} failure`);
+      expect(await store.getSkill("incoming")).toBeUndefined();
+      expect(await store.listSkills()).toHaveLength(MAX_STORED);
+      for (const original of originals) expect(await store.getSkill(original!.id)).toEqual(original);
+      for (const id of await readdir(storeRoot)) {
+        expect(await readdir(join(storeRoot, id))).toEqual(["skill.json"]);
+      }
+      failing = false;
+      await store.saveSkill(sampleSkill("incoming"));
+      expect(await store.getSkill("incoming")).toBeDefined();
+      expect(await store.getSkill("retained-0")).toBeUndefined();
+      expect(await store.listSkills()).toHaveLength(MAX_STORED);
+    } finally { await cleanup(); }
+  });
+});
