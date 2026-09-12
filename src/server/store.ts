@@ -11,13 +11,13 @@
  * isolated temporary directories and can never touch production data; the
  * module-level exports delegate to the default store for normal use.
  */
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CanonicalSkill, SourceAnalysis, ValidationReport, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { normalizeSource } from "../core/ingest.js";
-import { manifestFor, manifestRepositoryBlock } from "../core/build.js";
+import { manifestFor, manifestRepositoryBlock, qualifyEditedFileContent } from "../core/build.js";
 
 export const MAX_STORED = 50;
 
@@ -96,6 +96,14 @@ export class AsyncKeyLock {
   }
 }
 
+export class SkillIdConflictError extends Error {
+  readonly code = "skill_id_conflict";
+  constructor(message: string = "A skill with this id already exists. Choose a different skill name before generating again.") {
+    super(message);
+    this.name = "SkillIdConflictError";
+  }
+}
+
 export class SourceRenormalizationError extends Error {
   constructor(message: string) {
     super(message);
@@ -106,6 +114,8 @@ export class SourceRenormalizationError extends Error {
 export interface StoreTestHooks {
   afterLoad?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
   beforePersist?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
+  beforeEvict?: (id: string) => Promise<void> | void;
+  beforeRename?: (id: string, tmpPath: string) => Promise<void> | void;
 }
 
 export interface SkillStore {
@@ -144,11 +154,32 @@ export interface SkillStore {
   readonly _testHooks?: StoreTestHooks;
 }
 
+async function writeAtomicSkillRecord(
+  dir: string,
+  payload: object,
+  id: string,
+  testHooks?: StoreTestHooks,
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
+    if (testHooks?.beforeRename) {
+      await testHooks.beforeRename(id, tmp);
+    }
+    await rename(tmp, join(dir, "skill.json"));
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 export function createStore(
   root: string = defaultSkillsRoot(),
   testHooks?: StoreTestHooks,
 ): SkillStore {
   const lock = new AsyncKeyLock();
+  const capacityLock = new AsyncKeyLock();
 
   function skillDir(id: string): string {
     // Defense in depth: id must be a plain slug — no slashes, dots, or escapes.
@@ -167,21 +198,46 @@ export function createStore(
     createdAt: string;
   }): Promise<void> {
     await mkdir(root, { recursive: true });
-    const { analysis, ...rest } = entry;
-    const payload = { storeVersion: STORE_VERSION, ...rest, analysisSummary: analysis };
-    // Evict oldest when over capacity.
-    const ids = await listIds();
-    while (ids.length >= MAX_STORED) {
-      const oldest = ids[ids.length - 1]!; // listIds returns newest-first
-      if (oldest === entry.id) break;
-      await rm(skillDir(oldest), { recursive: true, force: true });
-      ids.pop();
-    }
-    const dir = skillDir(entry.id);
-    await mkdir(dir, { recursive: true });
-    const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
-    await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
-    await rename(tmp, join(dir, "skill.json"));
+    return capacityLock.withLock("save", async () => {
+      return lock.withLock(entry.id, async () => {
+        const existing = await getSkill(entry.id);
+        if (existing) {
+          throw new SkillIdConflictError(
+            `A skill with this id already exists. Choose a different skill name before generating again.`,
+          );
+        }
+
+        const ids = await listIds();
+        const { analysis, ...rest } = entry;
+        const payload = { storeVersion: STORE_VERSION, ...rest, analysisSummary: analysis };
+        const dir = skillDir(entry.id);
+        const persist = () => writeAtomicSkillRecord(dir, payload, entry.id, testHooks);
+        if (ids.length < MAX_STORED) {
+          await persist();
+          return;
+        }
+
+        const oldest = ids[ids.length - 1]!;
+        // Lock order is capacity → incoming ID → victim ID. Mutations never
+        // acquire capacity. Public reads wait until this transition completes.
+        await lock.withLock(oldest, async () => {
+          try {
+            // Finish all incoming I/O before touching the retained record.
+            await persist();
+            await testHooks?.beforeEvict?.(oldest);
+            // Removing ONE record is atomic; recursive deletion could partly
+            // destroy the victim before reporting failure.
+            await unlink(join(skillDir(oldest), "skill.json"));
+          } catch (err) {
+            await rm(dir, { recursive: true, force: true });
+            throw err;
+          }
+          // The record transition is committed. Empty directory cleanup is
+          // not part of save success and cannot invalidate the new record.
+          await rm(skillDir(oldest), { recursive: true, force: true }).catch(() => {});
+        });
+      });
+    });
   }
 
   async function getSkill(id: string): Promise<StoredSkill | undefined> {
@@ -279,9 +335,7 @@ export function createStore(
         await testHooks.beforePersist(id, "revalidateSkill");
       }
       const dir = skillDir(id);
-      const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
-      await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
-      await rename(tmp, join(dir, "skill.json"));
+      await writeAtomicSkillRecord(dir, { storeVersion: STORE_VERSION, ...existing }, id, testHooks);
       return report;
     });
   }
@@ -320,8 +374,11 @@ export function createStore(
         await testHooks.afterLoad(id, "updateFileContent");
       }
 
-      file.content = content;
+      file.content = qualifyEditedFileContent(path, content, existing.source.name);
       file.userEdited = true;
+      if (!file.purpose.startsWith("User-edited file; originally:")) {
+        file.purpose = `User-edited file; originally: ${file.purpose}`;
+      }
       existing.skill.provenance = existing.skill.provenance.filter((p) => p.filePath !== path);
 
       // Regenerate manifest.json from the new inventory (bytes + hashes resync).
@@ -366,9 +423,7 @@ export function createStore(
       }
 
       const dir = skillDir(id);
-      const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
-      await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
-      await rename(tmp, join(dir, "skill.json"));
+      await writeAtomicSkillRecord(dir, { storeVersion: STORE_VERSION, ...existing }, id, testHooks);
       return existing;
     });
   }
@@ -376,8 +431,8 @@ export function createStore(
   return {
     root,
     saveSkill,
-    getSkill,
-    listSkills,
+    getSkill: (id) => capacityLock.withLock("save", () => getSkill(id)),
+    listSkills: () => capacityLock.withLock("save", listSkills),
     revalidateSkill,
     updateFileContent,
     _testHooks: testHooks,

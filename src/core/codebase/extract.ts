@@ -61,27 +61,34 @@ export interface PackageJsonInfo {
   typeModule?: boolean;
 }
 
-/** Parse one package.json; null on malformed input (graceful degradation). */
-export function parsePackageJson(file: FetchedFile): PackageJsonInfo | null {
+/** Safely parse a JSON string into an object, rejecting null, arrays, and primitives. */
+export function parseJsonObject(content: string): Record<string, unknown> | null {
   try {
-    const raw = JSON.parse(file.content) as Record<string, unknown>;
+    const raw = JSON.parse(content);
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-    const info: PackageJsonInfo = { path: file.path };
-    if (typeof raw.name === "string") info.name = raw.name;
-    if (typeof raw.main === "string") info.main = raw.main;
-    if (typeof raw.types === "string") info.types = raw.types;
-    if (raw.exports !== undefined) info.exports = raw.exports;
-    if (raw.type === "module") info.typeModule = true;
-    const ws = raw.workspaces;
-    if (Array.isArray(ws)) {
-      info.workspaces = ws.filter((w): w is string => typeof w === "string");
-    } else if (ws !== null && typeof ws === "object" && Array.isArray((ws as { packages?: unknown }).packages)) {
-      info.workspaces = (ws as { packages: unknown[] }).packages.filter((w): w is string => typeof w === "string");
-    }
-    return info;
+    return raw as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/** Parse one package.json; null on malformed input (graceful degradation). */
+export function parsePackageJson(file: FetchedFile): PackageJsonInfo | null {
+  const raw = parseJsonObject(file.content);
+  if (!raw) return null;
+  const info: PackageJsonInfo = { path: file.path };
+  if (typeof raw.name === "string") info.name = raw.name;
+  if (typeof raw.main === "string") info.main = raw.main;
+  if (typeof raw.types === "string") info.types = raw.types;
+  if (raw.exports !== undefined) info.exports = raw.exports;
+  if (raw.type === "module") info.typeModule = true;
+  const ws = raw.workspaces;
+  if (Array.isArray(ws)) {
+    info.workspaces = ws.filter((w): w is string => typeof w === "string");
+  } else if (ws !== null && typeof ws === "object" && Array.isArray((ws as { packages?: unknown }).packages)) {
+    info.workspaces = (ws as { packages: unknown[] }).packages.filter((w): w is string => typeof w === "string");
+  }
+  return info;
 }
 
 /** Script-name → purpose mapping, deterministic first-match. */
@@ -110,20 +117,28 @@ export function commandsFromPackageJson(
   files: FetchedFile[],
   _packageManager?: unknown,
   _context?: unknown,
-): { commands: RepositoryPackageScript[]; frameworks: RepositoryClaim[]; testing: string[]; omittedCount: number } {
+): {
+  commands: RepositoryPackageScript[];
+  frameworks: RepositoryClaim[];
+  testing: string[];
+  omittedCount: number;
+  malformedNotes: string[];
+} {
   const commands: RepositoryPackageScript[] = [];
   const frameworkClaims: RepositoryClaim[] = [];
   const testingFrameworks = new Set<string>();
   const frameworkEvidence = new Map<string, string[]>();
+  const malformedNotes: string[] = [];
   let omittedCount = 0;
 
   for (const file of files) {
     if ((file.path.split("/").pop() ?? "").toLowerCase() !== "package.json") continue;
-    let raw: Record<string, unknown>;
-    try {
-      raw = JSON.parse(file.content) as Record<string, unknown>;
-    } catch {
-      continue; // malformed manifest degrades gracefully
+    const raw = parseJsonObject(file.content);
+    if (!raw) {
+      malformedNotes.push(
+        `${file.path} could not be parsed as a JSON object; package scripts and dependencies were not extracted.`,
+      );
+      continue;
     }
     const scripts = raw.scripts;
     if (scripts !== null && typeof scripts === "object" && !Array.isArray(scripts)) {
@@ -184,6 +199,7 @@ export function commandsFromPackageJson(
     frameworks: frameworkClaims.slice(0, 16),
     testing: [...testingFrameworks].sort(),
     omittedCount,
+    malformedNotes,
   };
 }
 
@@ -313,7 +329,7 @@ function collectRunSteps(node: unknown, out: CiRunStep[], file: string, workflow
       const runText = s.run.trim();
       if (runText.length === 0 || runText.startsWith("#") || runText.startsWith("echo ")) continue;
       const cwd = resolveStepCwd(stepWorkingDirectory(s), jobWd, workflowWd);
-      out.push({ command: runText, cwd: cwd || undefined, file, line: 0 });
+      out.push({ command: runText, cwd: cwd !== undefined ? cwd : undefined, file, line: 0 });
     }
   };
 
@@ -373,13 +389,13 @@ export function commandsFromCiWorkflows(
         omittedCount++;
         continue;
       }
-      if (step.cwd && step.cwd.trim().length > 300) {
+      if (step.cwd !== undefined && step.cwd.trim().length > 300) {
         omittedCount++;
         continue;
       }
 
-      const cwd = step.cwd ? step.cwd.trim() : undefined;
-      const evidence = `${step.file} (CI run step${cwd ? `, working-directory: ${cwd}` : ""})`;
+      const cwd = step.cwd !== undefined ? step.cwd.trim() : undefined;
+      const evidence = `${step.file} (CI run step${cwd !== undefined && cwd.length > 0 ? `, working-directory: ${cwd}` : ""})`;
       if (evidence.length > 300) {
         omittedCount++;
         continue;
@@ -391,7 +407,7 @@ export function commandsFromCiWorkflows(
         purpose,
         command: cmdText,
         evidence,
-        ...(cwd ? { cwd } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
       });
     }
   }
@@ -523,7 +539,8 @@ export function testingEvidence(
       file.path.split("/").some((seg) => ["tests", "test", "__tests__", "spec", "e2e"].includes(seg.toLowerCase()));
     if (!isTestFile) continue;
     if (relevantFiles.length < 24) relevantFiles.push(file.path);
-    if (/import\s+(pytest|unittest)|from\s+pytest/.test(file.content)) frameworks.add("pytest");
+    if (/import\s+unittest\b|from\s+unittest\b/.test(file.content)) frameworks.add("unittest");
+    if (/import\s+pytest\b|from\s+pytest\b/.test(file.content)) frameworks.add("pytest");
     if (/from\s+"vitest"|from\s+'vitest'|require\("vitest"\)/.test(file.content)) frameworks.add("vitest");
     if (/from\s+"jest"|@jest\/globals|require\("jest"\)/.test(file.content)) frameworks.add("Jest");
     if (/_test\.go$/.test(base)) frameworks.add("go test");
@@ -575,6 +592,7 @@ export function buildRepositoryAnalysisFromFiles(
     frameworks: depFrameworks,
     testing: depTesting,
     omittedCount: omittedScriptsCount = 0,
+    malformedNotes: packageJsonMalformedNotes = [],
   } = commandsFromPackageJson(input.fetched);
 
   // Python ecosystem evidence (pyproject.toml has no scripts; frameworks only).
@@ -678,7 +696,7 @@ export function buildRepositoryAnalysisFromFiles(
     },
     inspectedFiles: input.fetched.map((f) => f.path.slice(0, 300)).slice(0, 200),
     selection: input.selection,
-    uncertainty: [...omissionNotes, ...uncertainty]
+    uncertainty: [...omissionNotes, ...packageJsonMalformedNotes, ...uncertainty]
       .map((u) => u.trim().slice(0, 300))
       .filter((u) => u.length > 0)
       .slice(0, 12),

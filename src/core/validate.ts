@@ -10,6 +10,7 @@
  * `executed: false` in the report means validation did not run — the UI must
  * never present that state as success.
  */
+import { posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type {
   CanonicalSkill,
@@ -232,13 +233,27 @@ const brokenLinks = check("internal-links", "Internal file references resolve", 
   for (const file of skill.files) {
     if (!file.path.endsWith(".md")) continue;
     const body = splitFrontMatter(file.content)?.body ?? file.content;
+    const dir = posix.dirname(file.path);
     for (const m of body.matchAll(MD_LINK_RE)) {
       const href = m[1]!;
       if (href.startsWith("#")) continue;
       if (/^[a-z]+:\/\//i.test(href) || href.startsWith("mailto:")) continue;
       const clean = href.split("#")[0]!.trim();
       if (clean.length === 0) continue;
-      if (!paths.has(clean)) {
+
+      const target = clean.startsWith("/") ? clean.slice(1) : posix.join(dir, clean);
+      const normalized = posix.normalize(target);
+      const safe = safePackagePath(normalized);
+      if (safe === null || normalized === ".." || normalized.startsWith("../")) {
+        outcomes.push(
+          fail(
+            `Broken internal reference in ${file.path}: "${href}" escapes the skill package root.`,
+            file.path,
+          ),
+        );
+        continue;
+      }
+      if (!paths.has(safe)) {
         outcomes.push(
           fail(
             `Broken internal reference in ${file.path}: "${href}" does not match any file in the package.`,
@@ -325,7 +340,7 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
     return outcomes;
   }
 
-  const listed = new Map<string, { bytes: number; sha256: string }>();
+  const listed = new Map<string, { bytes: number; sha256: string; userEdited?: boolean }>();
   for (const f of m.files as { path?: unknown; bytes?: unknown; sha256?: unknown }[]) {
     if (typeof f !== "object" || f === null || Array.isArray(f)) {
       outcomes.push(fail("manifest.json `files` contains a non-object entry.", "manifest.json"));
@@ -370,8 +385,24 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
       validEntry = false;
     }
 
+    const userEditedRaw = (f as { userEdited?: unknown }).userEdited;
+    let userEdited: boolean | undefined = undefined;
+    if (userEditedRaw !== undefined) {
+      if (typeof userEditedRaw !== "boolean") {
+        outcomes.push(
+          fail(
+            `manifest.json records invalid userEdited for "${path}" (expected boolean, got ${JSON.stringify(userEditedRaw)}).`,
+            "manifest.json",
+          ),
+        );
+        validEntry = false;
+      } else {
+        userEdited = userEditedRaw;
+      }
+    }
+
     if (validEntry) {
-      listed.set(path, { bytes: f.bytes as number, sha256: f.sha256 as string });
+      listed.set(path, { bytes: f.bytes as number, sha256: f.sha256 as string, userEdited });
     }
   }
 
@@ -389,6 +420,16 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
     const actualHash = sha256(file.content);
     if (info.sha256 !== actualHash) {
       outcomes.push(fail(`manifest.json records sha256 "${info.sha256}" for "${path}" but the file hash is "${actualHash}".`, "manifest.json"));
+    }
+    const manifestEdited = info.userEdited === true;
+    const fileEdited = file.userEdited === true;
+    if (manifestEdited !== fileEdited) {
+      outcomes.push(
+        fail(
+          `manifest.json userEdited state (${manifestEdited}) disagrees with package file userEdited state (${fileEdited}) for "${path}".`,
+          "manifest.json",
+        ),
+      );
     }
   }
 
@@ -518,6 +559,13 @@ const provenanceIntegrity = check("provenance-integrity", "Every file has valid 
     }
   }
   for (const file of skill.files) {
+    if (file.userEdited && byFile.has(file.path)) {
+      outcomes.push(
+        fail(`User-edited file "${file.path}" must not retain source provenance records.`, file.path),
+      );
+      continue;
+    }
+    if (file.userEdited === true) continue; // Intentional absence, not unknown origin.
     if (!byFile.has(file.path)) {
       outcomes.push(
         warn(`File "${file.path}" has no provenance record; its origin in the source is not traceable.`, file.path),

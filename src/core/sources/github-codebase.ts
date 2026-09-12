@@ -609,6 +609,8 @@ export interface FetchGithubCodebaseOptions {
   maxDepth?: number;
   /** Optional GitHub API token; sent only to api.github.com. */
   token?: string;
+  /** Caller-provided abort signal (e.g. client disconnect). */
+  signal?: AbortSignal;
 }
 
 export interface GithubCodebaseSourceResult {
@@ -644,7 +646,10 @@ export async function fetchGithubCodebaseSource(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = opts.timeoutMs ?? CODEBASE_TIMEOUT_MS;
   const overallTimeoutMs = opts.overallTimeoutMs ?? CODEBASE_OVERALL_TIMEOUT_MS;
-  const deadline = AbortSignal.timeout(overallTimeoutMs);
+  const timeoutSignal = AbortSignal.timeout(overallTimeoutMs);
+  const deadline = opts.signal
+    ? AbortSignal.any([opts.signal, timeoutSignal])
+    : timeoutSignal;
   const maxFiles = opts.maxFiles ?? MAX_CODEBASE_FILES;
   const maxFileBytes = opts.maxFileBytes ?? MAX_CODEBASE_FILE_BYTES;
   const maxTotalBytes = opts.maxTotalBytes ?? MAX_CODEBASE_TOTAL_BYTES;
@@ -664,6 +669,7 @@ export async function fetchGithubCodebaseSource(
       timeoutMs,
       token,
       signal: deadline,
+      callerSignal: opts.signal,
       maxJsonBytes: MAX_CODEBASE_TREE_BYTES,
     });
     ref = repoRef.ref;
@@ -673,9 +679,9 @@ export async function fetchGithubCodebaseSource(
     const treeRes = await apiFetch(
       fetchImpl,
       `${apiBase}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
-      { timeoutMs, token, signal: deadline },
+      { timeoutMs, token, signal: deadline, callerSignal: opts.signal },
     );
-    const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_CODEBASE_TREE_BYTES)) as GithubTreePayload;
+    const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_CODEBASE_TREE_BYTES, opts.signal)) as GithubTreePayload;
     const allEntries = (Array.isArray(treePayload.tree) ? treePayload.tree : []).filter(
       (e): e is TreeEntryLike & { path: string } => typeof e.path === "string",
     );
@@ -767,7 +773,10 @@ export async function fetchGithubCodebaseSource(
       }
       const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
       const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
-      const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline);
+      const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline, opts.signal);
+      if (opts.signal?.aborted) {
+        throw new GithubCodebaseError("The request was aborted by the client.", "codebase_aborted");
+      }
       if (fetched.kind === "deadline_exceeded") {
         throw new GithubCodebaseError(
           `Codebase ingestion exceeded its overall time budget (${Math.round(overallTimeoutMs / 1000)} s) after ${files.length} file(s). Scope the URL (e.g. …/tree/main/packages/app) or retry later.`,
@@ -907,6 +916,9 @@ export async function fetchGithubCodebaseSource(
       analysis,
     };
   } catch (err) {
+    if (opts.signal?.aborted) {
+      throw new GithubCodebaseError("The request was aborted by the client.", "codebase_aborted");
+    }
     if (err instanceof GithubCodebaseError) throw err;
     if (err instanceof GithubSourceError) {
       throw new GithubCodebaseError(err.message, err.code.replace(/^github_/, "codebase_"));

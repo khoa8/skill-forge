@@ -80,10 +80,10 @@ afterAll(async () => {
     // Validation reflects the edited content and still passes.
     expect(res.body.validation.executed).toBe(true);
     expect(res.body.validation.passed).toBe(true);
-    // The honest traceability warning for the user-edited file is present.
+    // Intentional provenance absence for a user-edited file is accepted.
     const provCheck = res.body.validation.checks.find((c: { id: string }) => c.id === "provenance-integrity");
-    expect(provCheck.status).toBe("warn");
-    expect(JSON.stringify(provCheck.message ?? provCheck)).toContain(editPath);
+    expect(provCheck.status).toBe("pass");
+    expect(JSON.stringify(provCheck.message ?? provCheck)).not.toContain("not traceable");
     // Persisted across store round-trips.
     const get = await request(app).get(`/api/skills/${id}`).expect(200);
     expect(get.body.skill.files.find((f: { path: string }) => f.path === editPath).content).toBe(edited);
@@ -164,7 +164,8 @@ afterAll(async () => {
     // Manifest inside the ZIP matches the edited file (hash resync survived packaging).
     const manifest = JSON.parse(await zip.files["edit-safe-demo/manifest.json"]!.async("string"));
     const entry = manifest.files.find((f: { path: string }) => f.path === "SKILL.md");
-    expect(entry!.sha256).toBe(sha256(repaired));
+    const repairedSkillMd = repairRes.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
+    expect(entry!.sha256).toBe(sha256(repairedSkillMd));
     const editedEntry = manifest.files.find((f: { path: string }) => f.path === editPath);
     expect(editedEntry!.sha256).toBe(sha256("## Test cards (user-reviewed)\n\nUse 4242-4242-4242-4242 in the sandbox only.\n"));
   });
@@ -330,8 +331,9 @@ describe("F-01 regression: generic export does not resurrect stale instructions 
 
     // 6. Assert:
     // - edited SKILL.md is present exactly as persisted
+    const persistedSkillMd = editRes.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
     const skillMdInZip = await zip.files[`${id}/SKILL.md`]!.async("string");
-    expect(skillMdInZip).toBe(editedSkillMd);
+    expect(skillMdInZip).toBe(persistedSkillMd);
 
     // - AGENTS.md exists
     const agentsFile = zip.files[`${id}/AGENTS.md`];
@@ -363,8 +365,8 @@ describe("F-01 regression: generic export does not resurrect stale instructions 
 
     const skillEntry = manifestJson.files.find((f: { path: string }) => f.path === "SKILL.md");
     expect(skillEntry).toBeDefined();
-    expect(skillEntry.bytes).toBe(Buffer.byteLength(editedSkillMd, "utf8"));
-    expect(skillEntry.sha256).toBe(sha256(editedSkillMd));
+    expect(skillEntry.bytes).toBe(Buffer.byteLength(persistedSkillMd, "utf8"));
+    expect(skillEntry.sha256).toBe(sha256(persistedSkillMd));
   });
 });
 

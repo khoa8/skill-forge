@@ -7,6 +7,7 @@
  * it verified the output against, and unsupported targets are refused.
  */
 import JSZip from "jszip";
+import { parse as parseYaml } from "yaml";
 import type { CanonicalSkill, ExportTarget, SkillFile } from "../types.js";
 import { joinPackagePath, safePackagePath, sha256, slugify } from "../util.js";
 
@@ -56,6 +57,7 @@ function rebuildManifest(
       path: f.path,
       bytes: Buffer.byteLength(f.content, "utf8"),
       sha256: sha256(f.content),
+      ...(f.userEdited ? { userEdited: true } : {}),
     }));
   const updated = {
     ...manifest,
@@ -94,18 +96,39 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
   if (!fm) {
     throw new ExportError("SKILL.md is missing YAML front matter; cannot export to claude-code.", "export_bad_frontmatter");
   }
-  const nameOk = new RegExp(`^name:\\s*${skill.meta.name}\\s*$`, "m").test(fm[1]!);
+
+  let parsed: Record<string, unknown>;
+  try {
+    const v = parseYaml(fm[1]!);
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      throw new ExportError("SKILL.md front matter is not a valid YAML object; cannot export to claude-code.", "export_bad_frontmatter");
+    }
+    parsed = v as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof ExportError) throw err;
+    throw new ExportError(`SKILL.md has invalid YAML front matter: ${err instanceof Error ? err.message : String(err)}`, "export_bad_frontmatter");
+  }
+
+  const nameOk = typeof parsed.name === "string" && parsed.name === skill.meta.name;
   let files = skill.files;
   if (!nameOk) {
     notes.push("Front matter `name` did not match the package id; exporter rewrote it.");
+    const description = typeof parsed.description === "string" && parsed.description.trim().length > 0
+      ? parsed.description
+      : skill.meta.description;
     files = skill.files.map((f) => {
       if (f.path !== "SKILL.md") return f;
       const content = f.content.replace(
         /^---\n[\s\S]*?\n---/,
-        `---\nname: ${skill.meta.name}\ndescription: ${JSON.stringify(skill.meta.description)}\n---`,
+        `---\nname: ${skill.meta.name}\ndescription: ${JSON.stringify(description)}\n---`,
       );
       return { ...f, content };
     });
+    const baseManifest = skill.files.find((f) => f.path === "manifest.json")?.content;
+    const resyncedManifest = rebuildManifest(baseManifest, files, notes);
+    if (resyncedManifest) {
+      files = files.filter((f) => f.path !== "manifest.json").concat(resyncedManifest);
+    }
   }
   if (skill.meta.name.length > 64) {
     throw new ExportError(
@@ -141,13 +164,13 @@ function exportGeneric(skill: CanonicalSkill): ExportedPackage {
     "",
     "- `SKILL.md` — authoritative instructions: when to use, inputs, workflow, constraints, verification, pitfalls.",
     skill.files.some((f) => f.path.startsWith("references/"))
-      ? "- `references/` — verbatim source excerpts with line-range provenance."
+      ? "- `references/` — reference material; consult each file and manifest.json for provenance and userEdited status."
       : null,
     skill.files.some((f) => f.path.startsWith("workflows/"))
-      ? "- `workflows/` — documented multi-step procedures from the source."
+      ? "- `workflows/` — workflow material; consult each file and manifest.json for provenance and userEdited status."
       : null,
     skill.files.some((f) => f.path.startsWith("examples/"))
-      ? "- `examples/` — verbatim code examples from the source."
+      ? "- `examples/` — example material; consult each file and manifest.json for provenance and userEdited status."
       : null,
     "- `manifest.json` — source identity, gap list, file inventory with hashes.",
     "",

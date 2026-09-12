@@ -636,7 +636,7 @@ describe("Final F-03: oversized observational facts are omitted rather than sile
     expect(cmds.omittedCount).toBe(1);
     expect(cmds.length).toBe(1);
     expect(cmds[0]?.command).toBe("npm run lint");
-    expect(cmds[0]?.cwd).toBeUndefined();
+    expect(cmds[0]?.cwd).toBe("");
   });
 
   it("preserves normal values exactly without truncation or false uncertainty", () => {

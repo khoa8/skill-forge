@@ -117,7 +117,12 @@ afterAll(async () => {
     for (const run of [1, 2]) {
       const res = await request(app)
         .post("/api/generate")
-        .send({ sourceType: "file", path: "tool.md", name: run === 1 ? "tool.md" : "tool-renamed.md" })
+        .send({
+          sourceType: "file",
+          path: "tool.md",
+          name: run === 1 ? "tool.md" : "tool-renamed.md",
+          requestedName: `toolkit-run-${run}`,
+        })
         .expect(200);
       const result = eventsOf(res.text).find((e) => e.type === "result");
       const get = await request(app).get(`/api/skills/${result.skill.id}`).expect(200);

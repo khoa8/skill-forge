@@ -23,11 +23,12 @@ import {
   getDefaultStore,
   getSkill as loadSkill,
   EditError,
+  SkillIdConflictError,
   toResponse,
   normalizeStoredSource,
   SourceRenormalizationError,
 } from "./store.js";
-import type { ExportTarget, SourceType, RepositoryAnalysis } from "../core/types.js";
+import type { ExportTarget, SourceType, RepositoryAnalysis, CanonicalSkill } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 import { createHostValidationMiddleware } from "./host-guard.js";
@@ -214,6 +215,21 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       return;
     }
 
+    // Client disconnects surface as EPIPE/ECONNRESET 'error' events on the
+    // response; an unhandled 'error' event would crash the process. Swallow
+    // them here — the abort below stops further work instead.
+    res.on("error", () => {});
+    // End-to-end cancellation: a disconnect aborts in-flight source acquisition
+    // and pipeline work itself (including a remote provider request), not just the writes.
+    const cancellation = new AbortController();
+    let clientGone = false;
+    res.on("close", () => {
+      clientGone = true;
+      // Aborting also guarantees no unfinished result is persisted: the
+      // pipeline surfaces cancellation instead of yielding a result.
+      cancellation.abort();
+    });
+
     let content: string;
     let name: string;
     let sourceNotes: string[] = [];
@@ -243,13 +259,15 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         return;
       }
       try {
-        const fetched = await fetchUrlSource(body.url);
+        const fetched = await fetchUrlSource(body.url, { signal: cancellation.signal });
         content = fetched.input.content;
         name = body.name?.trim() || fetched.input.name;
         sourceNotes = fetched.notes;
         adapterNotes = fetched.notes;
       } catch (err) {
+        if (clientGone || res.writableEnded) return;
         const code = err instanceof UrlSourceError ? err.code : "url_fetch_failed";
+        if (code === "url_aborted") return;
         const status = code === "url_invalid" ? 400 : code === "url_deadline_exceeded" ? 504 : 502;
         res.status(status).json({
           error: err instanceof Error ? err.message : String(err),
@@ -265,20 +283,21 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       const mode = body.mode ?? "docs";
       try {
         if (mode === "codebase") {
-          const fetched = await fetchGithubCodebaseSource(body.repo);
+          const fetched = await fetchGithubCodebaseSource(body.repo, { signal: cancellation.signal });
           content = fetched.input.content;
           name = body.name?.trim() || fetched.input.name;
           sourceNotes = fetched.notes;
           adapterNotes = fetched.notes;
           repository = fetched.input.repository;
         } else {
-          const fetched = await fetchGithubSource(body.repo);
+          const fetched = await fetchGithubSource(body.repo, { signal: cancellation.signal });
           content = fetched.input.content;
           name = body.name?.trim() || fetched.input.name;
           sourceNotes = fetched.notes;
           adapterNotes = fetched.notes;
         }
       } catch (err) {
+        if (clientGone || res.writableEnded) return;
         const isCodebase = err instanceof GithubCodebaseError;
         const code = isCodebase
           ? err.code
@@ -287,6 +306,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
             : mode === "codebase"
               ? "codebase_fetch_failed"
               : "github_fetch_failed";
+        if (code === "github_aborted" || code === "codebase_aborted") return;
         const status = isCodebase
           ? (GITHUB_ERROR_STATUS[code] ?? 502)
           : err instanceof GithubSourceError
@@ -304,7 +324,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         return;
       }
       try {
-        const collected = await collectFiles(body.path, { recursive: body.recursive });
+        const collected = await collectFiles(body.path, { recursive: body.recursive, signal: cancellation.signal });
         const combined = combineFiles(collected.files, body.name?.trim());
         content = combined.content;
         name = combined.name;
@@ -315,10 +335,13 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         ];
         adapterNotes = sourceNotes;
       } catch (err) {
+        if (clientGone || res.writableEnded) return;
+        const code = err instanceof FileSourceError ? err.code : "file_source_failed";
+        if (code === "file_aborted") return;
         const status = err instanceof FileSourceError && err.code === "file_outside_root" ? 403 : 400;
         res.status(status).json({
           error: err instanceof Error ? err.message : String(err),
-          code: err instanceof FileSourceError ? err.code : "file_source_failed",
+          code,
         });
         return;
       }
@@ -331,6 +354,8 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       name = body.name?.trim() || "pasted-source";
     }
 
+    if (clientGone || res.writableEnded) return;
+
     res.setHeader("content-type", "application/x-ndjson");
     res.setHeader("cache-control", "no-cache");
     res.setHeader("x-accel-buffering", "no");
@@ -341,20 +366,6 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       body.sourceType === "github" && (body.mode ?? "docs") === "codebase"
         ? "github-codebase"
         : PIPELINE_SOURCE_TYPE[body.sourceType];
-    // Client disconnects surface as EPIPE/ECONNRESET 'error' events on the
-    // response; an unhandled 'error' event would crash the process. Swallow
-    // them here — the abort below stops further work instead.
-    res.on("error", () => {});
-    // End-to-end cancellation: a disconnect aborts the in-flight pipeline work
-    // itself (including a remote provider request), not just the writes.
-    const cancellation = new AbortController();
-    let clientGone = false;
-    res.on("close", () => {
-      clientGone = true;
-      // Aborting also guarantees no unfinished result is persisted: the
-      // pipeline surfaces cancellation instead of yielding a result.
-      cancellation.abort();
-    });
     void (async () => {
       try {
         for await (const event of runPipeline(
@@ -396,10 +407,14 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         }
       } catch (err) {
         if (!clientGone) {
+          const code =
+            err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string"
+              ? (err as { code: string }).code
+              : "pipeline_stream_failed";
           res.write(
             JSON.stringify({
               type: "error",
-              code: "pipeline_stream_failed",
+              code,
               message: err instanceof Error ? err.message : String(err),
             }) + "\n",
           );
@@ -600,10 +615,28 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
 
     try {
       const exported = exportPackage(stored.skill, target);
+      const finalSkillView: CanonicalSkill = {
+        ...stored.skill,
+        files: exported.files,
+      };
+      const finalReport = validatePackage({
+        skill: finalSkillView,
+        sourceText: normalized.text,
+        target,
+        sourceType: stored.source.type,
+      });
+      if (!finalReport.passed) {
+        res.status(422).json({
+          error: `Export blocked: deterministic validation found ${finalReport.errorCount} error(s) in the exported package. Inspect the validation panel, repair the source or plan, and try again.`,
+          validation: finalReport,
+        });
+        return;
+      }
+
       void buildZip(exported).then((zip) => {
         res.setHeader("content-type", "application/zip");
         res.setHeader("content-disposition", `attachment; filename="${zip.fileName}"`);
-        res.setHeader("x-skillforge-validation", JSON.stringify({ passed: report.passed, warnings: report.warningCount }));
+        res.setHeader("x-skillforge-validation", JSON.stringify({ passed: finalReport.passed, warnings: finalReport.warningCount }));
         res.setHeader("x-skillforge-entries", String(zip.entries.length));
         res.status(200).send(zip.buffer);
       }).catch((err) => {

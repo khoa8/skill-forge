@@ -15,6 +15,15 @@ const state = {
   activeTab: "sample",
   exportTargets: [],
   editingPath: null,
+  // Request ownership and sequence tokens (I-02)
+  generationSeq: 0,
+  sourceNotesSeq: 0,
+  sourceNotes: null,
+  sourceNotesSkillId: null,
+  validateSeq: 0,
+  editSeq: 0,
+  provenanceSeq: 0,
+  exportSeq: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -197,6 +206,14 @@ function logProgress(stageName, text, ms, isError) {
 async function runGenerate() {
   if (state.running) return;
   state.running = true;
+  const genToken = ++state.generationSeq;
+  // Changing the displayed generation invalidates its outstanding requests,
+  // even if a later result happens to reuse the same skill ID.
+  for (const key of ["sourceNotesSeq", "validateSeq", "editSeq", "provenanceSeq", "exportSeq"]) state[key]++;
+  cancelEdit();
+  state.skillId = null;
+  state.skill = null;
+  state.validation = null;
   updateGenerateButton();
   $("#generate-error").classList.add("hidden");
   $("#progress-log").innerHTML = "";
@@ -239,32 +256,50 @@ async function runGenerate() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (state.generationSeq !== genToken) return;
     if (!res.ok && res.headers.get("content-type")?.includes("application/json")) {
       const err = await res.json();
       throw new Error(`${err.error}${err.detail ? ` (${err.detail})` : ""}`);
     }
-    await consumeNdjson(res, handlePipelineEvent);
+    await consumeNdjson(
+      res,
+      (ev) => {
+        if (state.generationSeq === genToken) {
+          handlePipelineEvent(ev);
+        }
+      },
+      () => state.generationSeq === genToken,
+    );
   } catch (err) {
-    showFatal(err.message || String(err));
+    if (state.generationSeq === genToken) {
+      showFatal(err.message || String(err));
+    }
   } finally {
-    state.running = false;
-    updateGenerateButton();
+    if (state.generationSeq === genToken) {
+      state.running = false;
+      updateGenerateButton();
+    }
   }
 }
 
-async function consumeNdjson(res, onEvent) {
+async function consumeNdjson(res, onEvent, isValid) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    if (isValid && !isValid()) {
+      reader.cancel().catch(() => {});
+      break;
+    }
     buffer += decoder.decode(value, { stream: true });
     let idx;
     while ((idx = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
       if (line.length === 0) continue;
+      if (isValid && !isValid()) return;
       try {
         onEvent(JSON.parse(line));
       } catch (err) {
@@ -358,38 +393,51 @@ function renderResults(skill, validation) {
 
 /** Persisted adapter ingestion notes (truncation, skipped files) — kept with
  * the skill so the record stays honest after a reload. Rendered as safe text. */
-async function renderSourceNotes() {
+function paintSourceNotes(status = "") {
   const box = $("#source-notes");
   if (!box) return;
   box.innerHTML = "";
-  let notes = [];
-  try {
-    const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}`);
-    if (res.ok) {
-      const data = await res.json();
-      notes = Array.isArray(data.source?.notes) ? data.source.notes : [];
-    }
-  } catch {
-    notes = []; // absence of notes must never fabricate them
-  }
-  if (notes.length === 0) {
+  const notes = state.sourceNotes;
+  if (!status && (!notes || notes.length === 0)) {
     box.classList.add("hidden");
     return;
   }
   const h = document.createElement("h2");
   h.textContent = "Source notes";
-  const p = document.createElement("p");
-  p.className = "hint";
-  p.textContent = "Recorded during ingestion — truncation and skipping are reported, never silent:";
   const ul = document.createElement("ul");
   ul.className = "source-notes-list";
-  for (const note of notes) {
+  for (const note of notes ?? []) {
     const li = document.createElement("li");
-    li.textContent = String(note); // safe text rendering
+    li.textContent = String(note);
     ul.append(li);
   }
-  box.append(h, p, ul);
+  const message = document.createElement("p");
+  message.setAttribute("role", "status");
+  message.textContent = status;
+  box.append(h, ul, message);
   box.classList.remove("hidden");
+}
+
+async function renderSourceNotes() {
+  if (!state.skillId) return;
+  const skillId = state.skillId;
+  const token = ++state.sourceNotesSeq;
+  if (state.sourceNotesSkillId !== skillId) {
+    state.sourceNotes = null;
+    state.sourceNotesSkillId = skillId;
+  }
+  paintSourceNotes("Loading source notes…");
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}`);
+    const data = await res.json();
+    if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    state.sourceNotes = Array.isArray(data.source?.notes) ? data.source.notes : [];
+    paintSourceNotes();
+  } catch (err) {
+    if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
+    paintSourceNotes(`Could not reload source notes: ${err.message ?? err}. Previously loaded notes are retained when available.`);
+  }
 }
 
 function analysisSummary(_skill) {
@@ -440,11 +488,15 @@ function renderValidation(validation, fresh) {
   banner.append(head);
 
   const rerun = document.createElement("button");
+  rerun.id = "revalidate-btn";
   rerun.className = "btn";
   rerun.style.marginTop = "8px";
   rerun.textContent = "Re-run validation";
   rerun.addEventListener("click", revalidate);
-  banner.append(rerun);
+  const requestStatus = document.createElement("div");
+  requestStatus.id = "validation-request-status";
+  requestStatus.setAttribute("role", "status");
+  banner.append(rerun, requestStatus);
 
   const checksEl = $("#validation-checks");
   checksEl.innerHTML = "";
@@ -478,16 +530,33 @@ function renderValidation(validation, fresh) {
 
 async function revalidate() {
   if (!state.skillId) return;
-  const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/validate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  const data = await res.json();
-  if (data.validation) {
-    state.validation = data.validation;
-    renderValidation(data.validation, false);
-    renderExportCards();
+  const skillId = state.skillId;
+  const token = ++state.validateSeq;
+  const revalidateBtn = $("#revalidate-btn");
+  if (revalidateBtn) revalidateBtn.disabled = true;
+  $("#validation-request-status").textContent = "Revalidating…";
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/validate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    if (state.skillId !== skillId || state.validateSeq !== token) return;
+    const data = await res.json();
+    if (state.skillId !== skillId || state.validateSeq !== token) return;
+    if (!res.ok || !data.validation) throw new Error(data.error ?? `Revalidation failed (HTTP ${res.status}).`);
+    if (data.validation) {
+      state.validation = data.validation;
+      renderValidation(data.validation, false);
+      renderExportCards();
+    }
+  } catch (err) {
+    if (state.skillId !== skillId || state.validateSeq !== token) return;
+    $("#validation-request-status").textContent = `Revalidation failed: ${err.message ?? err}. Last validation result retained.`;
+  } finally {
+    if (state.skillId === skillId && state.validateSeq === token && revalidateBtn) {
+      revalidateBtn.disabled = false;
+    }
   }
 }
 
@@ -566,7 +635,9 @@ function showFile(skill, path) {
 // ---------------------------------------------------------------------------
 
 function startEdit(file) {
+  state.editSeq++;
   state.editingPath = file.path;
+  $("#file-edit-cancel").disabled = false;
   $("#file-view-content").classList.add("hidden");
   $("#file-edit-box").classList.remove("hidden");
   const ta = $("#file-edit-textarea");
@@ -578,11 +649,13 @@ function startEdit(file) {
 }
 
 function cancelEdit() {
+  state.editSeq++;
   state.editingPath = null;
   const box = $("#file-edit-box");
   if (box) {
     box.classList.add("hidden");
     $("#file-view-content").classList.remove("hidden");
+    $("#file-edit-error").classList.add("hidden");
   }
 }
 
@@ -599,27 +672,37 @@ function showEditError(message) {
 
 async function saveEdit() {
   if (state.editingPath === null || !state.skillId) return;
+  const skillId = state.skillId;
   const path = state.editingPath;
+  const token = ++state.editSeq;
   const content = $("#file-edit-textarea").value;
   const saveBtn = $("#file-edit-save");
+  const cancelBtn = $("#file-edit-cancel");
   saveBtn.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
   $("#file-edit-status").textContent = "Saving…";
   $("#file-edit-error").classList.add("hidden");
   try {
-    const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/update-file`, {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/update-file`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ path, content }),
     });
+    if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     const data = await res.json().catch(() => ({}));
+    if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     if (!res.ok) {
       showEditError(data.error ?? `Save failed (HTTP ${res.status}).`);
       saveBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = false;
       $("#file-edit-status").textContent = "Not saved — fix the error or cancel.";
       return;
     }
     // The server persisted the edit, re-ran deterministic validation, and
     // returned the full updated package + validation.
+    // Pending validation/downloads refer to the package before this edit.
+    state.validateSeq++;
+    state.exportSeq++;
     state.skill = data.skill;
     state.validation = data.validation;
     cancelEdit();
@@ -627,8 +710,10 @@ async function saveEdit() {
     renderFiles(data.skill, path);
     renderExportCards();
   } catch (err) {
+    if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     showEditError(err.message ?? String(err));
     saveBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = false;
     $("#file-edit-status").textContent = "Not saved — network error.";
   }
 }
@@ -638,6 +723,9 @@ async function saveEdit() {
 // ---------------------------------------------------------------------------
 
 async function openProvenance(record) {
+  if (!state.skillId) return;
+  const skillId = state.skillId;
+  const token = ++state.provenanceSeq;
   const dlg = $("#provenance-dialog");
   const [start, end] = record.sourceLines;
   $("#prov-extraction").textContent = `Extraction: ${record.extraction}`;
@@ -647,9 +735,11 @@ async function openProvenance(record) {
 
   try {
     const res = await fetch(
-      `/api/skills/${encodeURIComponent(state.skillId)}/provenance/excerpt?start=${start}&end=${end}`,
+      `/api/skills/${encodeURIComponent(skillId)}/provenance/excerpt?start=${start}&end=${end}`,
     );
+    if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     const data = await res.json().catch(() => ({}));
+    if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     if (!res.ok) {
       // Never fabricate an excerpt — surface the failure honestly.
       $("#prov-meta").textContent = "";
@@ -670,12 +760,13 @@ async function openProvenance(record) {
       .map((line, i) => `${String(returned.start + i).padStart(width, " ")} │ ${line}`)
       .join("\n");
   } catch (err) {
+    if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     $("#prov-meta").textContent = "";
     $("#prov-lines").textContent = `Source excerpt unavailable: ${err.message ?? err}`;
   }
 }
 
-function renderExportCards() {
+function renderExportCards(preserveNote = false) {
   const container = $("#export-cards");
   container.innerHTML = "";
   const validation = state.validation;
@@ -693,6 +784,7 @@ function renderExportCards() {
     basis.textContent = target.formatBasis;
     const btn = document.createElement("button");
     btn.className = "btn primary";
+    btn.dataset.target = target.target;
     btn.textContent = blocked ? "Export blocked (validation errors)" : "Download ZIP";
     btn.disabled = Boolean(blocked);
     btn.addEventListener("click", () => runExport(target.target));
@@ -701,7 +793,7 @@ function renderExportCards() {
   }
 
   const note = $("#export-note");
-  note.textContent = blocked
+  if (!preserveNote) note.textContent = blocked
     ? ""
     : "Export re-runs deterministic validation server-side before packaging; packages with errors are refused (HTTP 422).";
   // Replace (not stack) the blocked explanation across re-renders.
@@ -716,41 +808,63 @@ function renderExportCards() {
 
 async function runExport(target) {
   if (!state.skillId) return;
-  const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/export`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ target }),
+  const skillId = state.skillId;
+  const token = ++state.exportSeq;
+  const exportButtons = document.querySelectorAll(".export-card button");
+  exportButtons.forEach((btn) => {
+    btn.disabled = true;
+    if (btn.dataset.target === target) btn.textContent = "Downloading…";
   });
-  if (!res.ok) {
-    let message = `Export failed (HTTP ${res.status})`;
-    try {
-      const data = await res.json();
-      message = data.error ?? message;
-      if (data.validation) {
-        state.validation = data.validation;
-        renderValidation(data.validation, false);
-        renderExportCards();
-      }
-    } catch { /* keep default message */ }
-    const note = $("#export-note");
-    note.textContent = message;
-    return;
-  }
-  const blob = await res.blob();
-  const disposition = res.headers.get("content-disposition") ?? "";
-  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] ?? `skillforge-${target}.zip`;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  const note = $("#export-note");
+  note.textContent = `Preparing ${target} export package…`;
 
-  setStep("export", "done");
-  const entries = res.headers.get("x-skillforge-entries");
-  $("#export-note").textContent = `Downloaded ${fileName} (${(blob.size / 1024).toFixed(1)} KB, ${entries ?? "?"} entries). Unzip it and drop the folder into your agent's skills directory.`;
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/export`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target }),
+    });
+    if (state.skillId !== skillId || state.exportSeq !== token) return;
+    if (!res.ok) {
+      let message = `Export failed (HTTP ${res.status})`;
+      try {
+        const data = await res.json();
+        if (state.skillId !== skillId || state.exportSeq !== token) return;
+        message = data.error ?? message;
+        if (data.validation) {
+          state.validation = data.validation;
+          renderValidation(data.validation, false);
+          renderExportCards();
+        }
+      } catch { /* keep default message */ }
+      if (state.skillId !== skillId || state.exportSeq !== token) return;
+      note.textContent = message;
+      return;
+    }
+    const blob = await res.blob();
+    if (state.skillId !== skillId || state.exportSeq !== token) return;
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const fileName = disposition.match(/filename="([^"]+)"/)?.[1] ?? `skillforge-${target}.zip`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    setStep("export", "done");
+    const entries = res.headers.get("x-skillforge-entries");
+    note.textContent = `Downloaded ${fileName} (${(blob.size / 1024).toFixed(1)} KB, ${entries ?? "?"} entries). Unzip it and drop the folder into your agent's skills directory.`;
+  } catch (err) {
+    if (state.skillId !== skillId || state.exportSeq !== token) return;
+    note.textContent = `Export failed: ${err.message ?? err}`;
+  } finally {
+    if (state.skillId === skillId && state.exportSeq === token) {
+      renderExportCards(true);
+    }
+  }
 }
 
 init();
