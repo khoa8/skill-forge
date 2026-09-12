@@ -13,10 +13,11 @@ Exporters are the only place vendor-specific format differences live (AGENTS.md 
 
 ## Behavior details
 
+- **Edited-file provenance:** Generic orientation describes supporting material without claiming every file is verbatim; consult per-file provenance and manifest `userEdited` flags.
 - **Manifest resync:** when an exporter adds files (e.g. `AGENTS.md`), it regenerates `manifest.json` so the inventory stays consistent — exported packages still pass deterministic validation.
 - **ZIP safety:** every entry passes `safePackagePath`; traversal/absolute/duplicate entries abort the export with `ExportError`. Root folder is the slugified skill id.
 - **Unsupported targets:** `exportPackage(skill, "bogus")` throws `export_target_unsupported` with the supported list; the HTTP API returns 400 with `supported: [...]`.
-- **Validation gate:** the export endpoint re-runs deterministic validation (`validatePackage`) on the transformed package before packaging; packages with errors are refused with HTTP 422 before any bytes are produced, carrying the post-transformation report in the `x-skillforge-validation` header.
+- **Validation gate:** the export endpoint re-runs deterministic validation (`validatePackage`) on the transformed package before packaging; packages with errors are refused with HTTP 422 before any ZIP bytes are produced, returning the validation report in the JSON response body. Successful ZIP responses carry a validation summary in the `x-skillforge-validation` header.
 
 ## Adding an exporter
 

@@ -80,10 +80,10 @@ afterAll(async () => {
     // Validation reflects the edited content and still passes.
     expect(res.body.validation.executed).toBe(true);
     expect(res.body.validation.passed).toBe(true);
-    // The honest traceability warning for the user-edited file is present.
+    // Intentional provenance absence for a user-edited file is accepted.
     const provCheck = res.body.validation.checks.find((c: { id: string }) => c.id === "provenance-integrity");
-    expect(provCheck.status).toBe("warn");
-    expect(JSON.stringify(provCheck.message ?? provCheck)).toContain(editPath);
+    expect(provCheck.status).toBe("pass");
+    expect(JSON.stringify(provCheck.message ?? provCheck)).not.toContain("not traceable");
     // Persisted across store round-trips.
     const get = await request(app).get(`/api/skills/${id}`).expect(200);
     expect(get.body.skill.files.find((f: { path: string }) => f.path === editPath).content).toBe(edited);

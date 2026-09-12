@@ -565,6 +565,7 @@ const provenanceIntegrity = check("provenance-integrity", "Every file has valid 
       );
       continue;
     }
+    if (file.userEdited === true) continue; // Intentional absence, not unknown origin.
     if (!byFile.has(file.path)) {
       outcomes.push(
         warn(`File "${file.path}" has no provenance record; its origin in the source is not traceable.`, file.path),

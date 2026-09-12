@@ -164,13 +164,13 @@ function exportGeneric(skill: CanonicalSkill): ExportedPackage {
     "",
     "- `SKILL.md` — authoritative instructions: when to use, inputs, workflow, constraints, verification, pitfalls.",
     skill.files.some((f) => f.path.startsWith("references/"))
-      ? "- `references/` — verbatim source excerpts with line-range provenance."
+      ? "- `references/` — reference material; consult each file and manifest.json for provenance and userEdited status."
       : null,
     skill.files.some((f) => f.path.startsWith("workflows/"))
-      ? "- `workflows/` — documented multi-step procedures from the source."
+      ? "- `workflows/` — workflow material; consult each file and manifest.json for provenance and userEdited status."
       : null,
     skill.files.some((f) => f.path.startsWith("examples/"))
-      ? "- `examples/` — verbatim code examples from the source."
+      ? "- `examples/` — example material; consult each file and manifest.json for provenance and userEdited status."
       : null,
     "- `manifest.json` — source identity, gap list, file inventory with hashes.",
     "",

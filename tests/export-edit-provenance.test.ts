@@ -6,7 +6,7 @@
  * - Repeated-edit idempotency (F-03)
  * - Unzipped ZIP byte and manifest verification (F-02, F-03)
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import JSZip from "jszip";
 import request from "supertest";
 import { createApp } from "../src/server/app.js";
@@ -16,6 +16,7 @@ import { buildCanonicalSkill } from "../src/core/build.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { derivePlanFromAnalysis } from "../src/core/build.js";
+import * as exporterModule from "../src/core/export/exporters.js";
 import { exportPackage, buildZip } from "../src/core/export/exporters.js";
 import { validatePackage } from "../src/core/validate.js";
 import { sha256 } from "../src/core/util.js";
@@ -96,30 +97,30 @@ describe("F-02: Claude export semantic YAML & final manifest integrity", () => {
         .send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "export-val" })
         .expect(200);
 
-      // Now edit manifest.json directly in stored skill to cause inconsistency
       const store = (await import("../src/server/store.js")).createStore(storeRoot);
-      const stored = await store.getSkill("export-val");
-      expect(stored).toBeDefined();
-
-      // Tamper with a file without updating manifest, so final post-transformation validation fails
-      stored!.skill.files.push({
-        path: "references/unlisted.md",
-        content: "# Unlisted file\n\nNot in manifest",
-        purpose: "unlisted",
+      const stored = (await store.getSkill("export-val"))!;
+      const source = normalizeSource({ type: stored.source.type, name: stored.source.name, content: stored.source.text });
+      expect(validatePackage({ skill: stored.skill, sourceText: source.text, target: "generic" }).passed).toBe(true);
+      const actualExport = exporterModule.exportPackage;
+      const transform = vi.spyOn(exporterModule, "exportPackage").mockImplementation((skill, target) => {
+        const exported = actualExport(skill, target);
+        // Only the final representation is broken. The stored canonical input
+        // remains valid, proving this request reaches the second gate.
+        exported.files = exported.files.map((f) => f.path === "AGENTS.md" ? { ...f, content: f.content + "\nChanged after manifest creation.\n" } : f);
+        return exported;
       });
-      // Save tampered state bypassing store API
-      const { writeFile } = await import("node:fs/promises");
-      const { join } = await import("node:path");
-      await writeFile(join(storeRoot, "export-val", "skill.json"), JSON.stringify({ storeVersion: 1, ...stored }), "utf8");
-
-      // Attempt export: must fail post-transformation validation with HTTP 422
-      const res = await request(app)
-        .post("/api/skills/export-val/export")
-        .send({ target: "claude-code" })
-        .expect(422);
-
-      expect(res.body.error).toMatch(/Export blocked: deterministic validation found/);
-      expect(res.body.validation.passed).toBe(false);
+      const zip = vi.spyOn(exporterModule, "buildZip");
+      try {
+        const res = await request(app).post("/api/skills/export-val/export")
+          .send({ target: "generic" }).expect(422);
+        expect(transform).toHaveBeenCalledOnce();
+        expect(zip).not.toHaveBeenCalled();
+        expect(res.body.error).toContain("in the exported package");
+        expect(res.body.validation.passed).toBe(false);
+        expect(res.body.validation.checks.some((c: { id: string; status: string }) => c.id === "manifest-consistency" && c.status === "fail")).toBe(true);
+        expect(res.headers["content-type"]).toContain("application/json");
+        expect(res.headers["x-skillforge-validation"]).toBeUndefined();
+      } finally { vi.restoreAllMocks(); }
     } finally {
       await cleanup();
     }
@@ -453,5 +454,43 @@ describe("F-03: Edit provenance removal, manifest userEdited, and honest qualifi
     const report = validatePackage({ skill });
     expect(report.passed).toBe(false);
     expect(report.checks.some((c) => c.message?.includes('expected boolean, got "yes"'))).toBe(true);
+  });
+});
+
+
+describe("Generic edited-file provenance", () => {
+  it("exports edited references without restoring verbatim claims and retains edit flags and hashes", async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+      await request(app).post("/api/generate").send({ sourceType: "sample", sampleId: "meridian-payments-api" }).expect(200);
+      const edited = await request(app).post("/api/skills/meridian-payments-api/update-file").send({
+        path: "references/test-cards.md", content: "# Reviewed test cards\n\nUse only the sandbox cards reviewed by the author.",
+      }).expect(200);
+      expect(edited.body.validation.checks.find((c: { id: string }) => c.id === "provenance-integrity").status).toBe("pass");
+      const res = await request(app).post("/api/skills/meridian-payments-api/export").send({ target: "generic" }).buffer(true).parse(binaryParser).expect(200);
+      const zip = await JSZip.loadAsync(res.body);
+      const agents = await zip.file("meridian-payments-api/AGENTS.md")!.async("string");
+      expect(agents).not.toMatch(/verbatim|source-derived/);
+      expect(agents).toContain("userEdited status");
+      const manifest = JSON.parse(await zip.file("meridian-payments-api/manifest.json")!.async("string"));
+      const entry = manifest.files.find((f: { path: string }) => f.path === "references/test-cards.md");
+      const content = await zip.file(`meridian-payments-api/${entry.path}`)!.async("string");
+      expect(entry.userEdited).toBe(true);
+      expect(entry.bytes).toBe(Buffer.byteLength(content));
+      expect(entry.sha256).toBe(sha256(content));
+    } finally { await cleanup(); }
+  });
+
+  it("accepts intentional provenance absence but rejects retained source claims on edited files", () => {
+    const skill = buildTestSkill();
+    const file = skill.files.find((f) => f.path.startsWith("references/"))!;
+    file.userEdited = true;
+    const check = () => validatePackage({ skill }).checks.filter((c) => c.id === "provenance-integrity");
+    expect(check().some((c) => c.status === "fail")).toBe(true);
+    skill.provenance = skill.provenance.filter((p) => p.filePath !== file.path);
+    expect(check()).toEqual([expect.objectContaining({ status: "pass" })]);
+    file.userEdited = false;
+    expect(check().some((c) => c.status === "warn")).toBe(true);
   });
 });
