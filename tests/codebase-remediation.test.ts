@@ -1436,3 +1436,51 @@ describe("conventionsFromInstructionFiles: observational extraction without clas
     ]);
   });
 });
+
+describe("observed CI command purposes", () => {
+  it.each([
+    ["npm ci", "install"], ["npm install", "install"], ["npm test", "test"], ["npm run test", "test"],
+    ["npm run test:unit", "test"], ["npm run build", "build"], ["npm run lint", "lint"],
+    ["npm run typecheck", "typecheck"], ["npm run format", "format"], ["npm run custom", "other"],
+    ["npm run testing-custom", "other"], ["npm run buildish", "other"], ["cargo test", "test"], ["go build ./...", "build"],
+  ])("classifies %s as %s without changing its text", (command, purpose) => {
+    const commands = commandsFromCiWorkflows([{ path: ".github/workflows/ci.yml", content: `jobs:\n  checks:\n    steps:\n      - run: ${JSON.stringify(command)}\n` }]);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({ kind: "ci-run", command, purpose });
+  });
+});
+
+describe("command context deduplication", () => {
+  async function aggregate(fetched: FetchedFile[]) {
+    const { buildRepositoryAnalysisFromFiles } = await import("../src/core/codebase/extract.js");
+    return buildRepositoryAnalysisFromFiles({
+      url: "https://github.com/acme/project", owner: "acme", name: "project", ref: "main",
+      languages: [], ecosystems: [], manifests: [], structure: { sourceRoots: [], testRoots: [], exampleRoots: [], packages: [] },
+      entrypoints: [], importantFiles: [], instructions: [], ciWorkflows: [], fetched,
+      selection: { candidateCount: fetched.length, selectedCount: fetched.length, treeBlobCount: fetched.length, treeTruncated: false },
+    }, []);
+  }
+  const workflow = (steps: string) => ({ path: ".github/workflows/check.yml", content: `jobs:\n  check:\n    steps:\n${steps}` });
+  it("retains distinct cwd and evidence, removes exact duplicates, and stays deterministic", async () => {
+    const file = workflow(["packages/a", "packages/b", "packages/a", "", "${{ matrix.dir }}"].map((cwd) =>
+      `      - run: npm test\n${cwd === undefined ? "" : `        working-directory: ${JSON.stringify(cwd)}\n`}`).join(""));
+    const input = [file, { ...file, path: ".github/workflows/other.yml", content: workflow('      - run: npm test\n        working-directory: packages/a\n').content }];
+    const a = await aggregate(input);
+    expect(a.commands).toEqual((await aggregate(input)).commands);
+    expect(a.commands).toHaveLength(5);
+    expect(a.commands.map((c) => c.kind === "ci-run" ? c.cwd : null)).toEqual(["packages/a", "packages/b", "", undefined, "packages/a"]);
+    expect(a.commands[0]!.evidence).toContain("check.yml (CI run step, working-directory: packages/a)");
+    expect(a.commands[1]!.evidence).toContain("working-directory: packages/b");
+    expect(a.commands[4]!.evidence).toContain("other.yml");
+    expect(a.commands.every((c) => c.command === "npm test")).toBe(true);
+  });
+  it("preserves manifest script context and the existing 30-command bound", async () => {
+    const inputs = ["a", "b"].map((name) => ({ path: `packages/${name}/package.json`, content: JSON.stringify({ scripts: { test: "vitest run" } }) }));
+    const small = await aggregate(inputs);
+    expect(small.commands.map((c) => c.evidence)).toEqual(['packages/a/package.json scripts.test = "vitest run"', 'packages/b/package.json scripts.test = "vitest run"']);
+    const many = workflow(Array.from({ length: 40 }, (_, i) => `      - run: npm test\n        working-directory: packages/p${i}\n`).join(""));
+    const bounded = await aggregate([...inputs, many]);
+    expect(bounded.commands).toHaveLength(30);
+    expect(bounded.commands.every((c) => c.command === "vitest run" || c.command === "npm test")).toBe(true);
+  });
+});

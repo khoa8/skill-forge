@@ -26,7 +26,7 @@ import { isIP } from "node:net";
 import type { SourceInput } from "../types.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "./body.js";
 import { safeFetch, type SafeResponse } from "./safe-fetch.js";
-import { isAllowedUrlDestinationIp } from "./ip-policy.js";
+import { isAllowedUrlDestinationIp, normalizeUrlHostname } from "./ip-policy.js";
 
 /** DNS lookup shape used for SSRF validation and injection. */
 export interface LookupAllFn {
@@ -54,17 +54,12 @@ export class UrlSourceError extends Error {
  * centralized IP policy (ip-policy.ts) — see isGloballyReachable).
  */
 export function isRefusedHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/\.$/, "");
+  const h = normalizeUrlHostname(host).toLowerCase().replace(/\.$/, "");
   if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) {
     return true;
   }
   const ip = isIP(h) ? h : null;
   if (ip) return !isAllowedUrlDestinationIp(ip);
-  // IPv6 literal in brackets
-  if (h.startsWith("[") && h.endsWith("]")) {
-    const inner = h.slice(1, -1);
-    return isIP(inner) ? !isAllowedUrlDestinationIp(inner) : false;
-  }
   return false;
 }
 
@@ -254,7 +249,7 @@ export async function fetchUrlSource(
         "url_private_host",
       );
     }
-    if (isIP(url.hostname)) return; // literal public IP already checked
+    if (isIP(normalizeUrlHostname(url.hostname))) return; // literal public IP already checked
     let addresses: { address: string }[];
     try {
       addresses = await lookupImpl(url.hostname, { all: true, verbatim: true });

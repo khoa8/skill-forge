@@ -155,7 +155,7 @@ describe("F-03: Edit provenance removal, manifest userEdited, and honest qualifi
         id: "ref-edit-test",
         skill,
         analysis: { title: "Test", sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 1, lineCount: 50 },
-        source: { name: "Test Source", type: "text", text: "# Test Source\n\nContent for testing purposes." },
+        source: { name: getSample("meridian-payments-api").meta.title, type: "text", text: "# Test Source\n\nContent for testing purposes." },
         validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
         createdAt: new Date().toISOString(),
       });
@@ -290,13 +290,14 @@ describe("F-03: Edit provenance removal, manifest userEdited, and honest qualifi
       const store = (await import("../src/server/store.js")).createStore(storeRoot);
       const skill = buildTestSkill("wf-edit-test");
       const wf = skill.files.find((f) => f.path.startsWith("workflows/"));
-      if (!wf) return; // if sample has workflow
+      expect(wf).toBeDefined();
+      if (!wf) throw new Error("Required wf fixture missing");
 
       await store.saveSkill({
         id: "wf-edit-test",
         skill,
         analysis: { title: "Test", sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 1, lineCount: 50 },
-        source: { name: "Test Source", type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
+        source: { name: getSample("meridian-payments-api").meta.title, type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
         validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
         createdAt: new Date().toISOString(),
       });
@@ -326,13 +327,14 @@ describe("F-03: Edit provenance removal, manifest userEdited, and honest qualifi
       const store = (await import("../src/server/store.js")).createStore(storeRoot);
       const skill = buildTestSkill("ex-edit-test");
       const ex = skill.files.find((f) => f.path.startsWith("examples/"));
-      if (!ex) return;
+      expect(ex).toBeDefined();
+      if (!ex) throw new Error("Required ex fixture missing");
 
       await store.saveSkill({
         id: "ex-edit-test",
         skill,
         analysis: { title: "Test", sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 1, lineCount: 50 },
-        source: { name: "Test Source", type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
+        source: { name: getSample("meridian-payments-api").meta.title, type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
         validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
         createdAt: new Date().toISOString(),
       });
@@ -364,7 +366,7 @@ describe("F-03: Edit provenance removal, manifest userEdited, and honest qualifi
         id: "untouched-test",
         skill,
         analysis: { title: "Test", sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 1, lineCount: 50 },
-        source: { name: "Test Source", type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
+        source: { name: getSample("meridian-payments-api").meta.title, type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
         validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
         createdAt: new Date().toISOString(),
       });
@@ -405,7 +407,7 @@ describe("F-03: Edit provenance removal, manifest userEdited, and honest qualifi
         id: "idempotency-test",
         skill,
         analysis: { title: "Test", sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 1, lineCount: 50 },
-        source: { name: "Test Source", type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
+        source: { name: getSample("meridian-payments-api").meta.title, type: "text", text: "# Test Source\n\nContent for testing purposes exceeding forty characters." },
         validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
         createdAt: new Date().toISOString(),
       });
@@ -492,5 +494,89 @@ describe("Generic edited-file provenance", () => {
     expect(check()).toEqual([expect.objectContaining({ status: "pass" })]);
     file.userEdited = false;
     expect(check().some((c) => c.status === "warn")).toBe(true);
+  });
+});
+
+describe("canonical body and target description export gates", () => {
+  it("rejects a bodyless edited skill before ZIP construction", async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+      await request(app).post("/api/generate").send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "body-gate" });
+      const stored = await request(app).get("/api/skills/body-gate").expect(200);
+      const original = stored.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
+      const content = original.match(/^---\n[\s\S]*?\n---/)[0] + "\n";
+      const edited = await request(app).post("/api/skills/body-gate/update-file").send({ path: "SKILL.md", content }).expect(200);
+      expect(edited.body.validation.passed).toBe(false);
+      const zip = vi.spyOn(exporterModule, "buildZip");
+      try {
+        const res = await request(app).post("/api/skills/body-gate/export").send({ target: "claude-code" }).expect(422);
+        expect(res.body.validation.checks).toContainEqual(expect.objectContaining({ id: "skill-instructions", status: "fail" }));
+        expect(zip).not.toHaveBeenCalled();
+      } finally { zip.mockRestore(); }
+    } finally { await cleanup(); }
+  });
+  it("preserves 1024-character YAML and rejects 1025 only for Claude before ZIP", async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+      await request(app).post("/api/generate").send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "description-gate" });
+      const stored = await request(app).get("/api/skills/description-gate").expect(200);
+      const original = stored.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
+      for (const length of [1024, 1025]) {
+        const content = original.replace(/^description:.*$/m, `description: '${"x".repeat(length)}' # preserve formatting`);
+        const edited = await request(app).post("/api/skills/description-gate/update-file").send({ path: "SKILL.md", content }).expect(200);
+        expect(edited.body.validation.passed).toBe(true);
+        if (length === 1025) {
+          expect(() => exportPackage(edited.body.skill, "claude-code")).toThrow(/1024/);
+          const zip = vi.spyOn(exporterModule, "buildZip");
+          try {
+            await request(app).post("/api/skills/description-gate/export").send({ target: "claude-code" }).expect(422);
+            expect(zip).not.toHaveBeenCalled();
+          } finally { zip.mockRestore(); }
+        }
+        const target = length === 1024 ? "claude-code" : "generic";
+        const res = await request(app).post("/api/skills/description-gate/export").send({ target }).parse(binaryParser).expect(200);
+        const zip = await JSZip.loadAsync(res.body);
+        expect(await zip.file("description-gate/SKILL.md")!.async("string")).toContain(`description: '${"x".repeat(length)}' # preserve formatting`);
+      }
+    } finally { await cleanup(); }
+  });
+});
+
+describe("punctuation-safe edited provenance", () => {
+  it.each([`Alice's "API", notes`, "Unicode — café / 東京", "comma,name", 'quote"name', "apostrophe'name", "regex.* [$&] `name`", "two\nlines"])("qualifies generated templates and exported manifest for %s", async (name) => {
+    const { qualifyEditedFileContent } = await import("../src/core/build.js");
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+      await request(app).post("/api/generate").send({ sourceType: "text", content: getSample("meridian-payments-api").content, name, requestedName: "punctuation" });
+      const res = await request(app).get("/api/skills/punctuation").expect(200);
+      const files = res.body.skill.files as CanonicalSkill["files"];
+      const paths = ["SKILL.md", "evals/README.md", files.find((f) => f.path.startsWith("references/"))!.path,
+        files.find((f) => f.path.startsWith("workflows/"))!.path,
+        files.find((f) => f.path.startsWith("examples/") && f.content.includes("Verbatim code block"))!.path];
+      const userProse = "User prose: verbatim source, grounded claims and (source line 12) are discussed here.";
+      for (const path of paths) {
+        const file = files.find((f) => f.path === path)!;
+        const content = file.content + `\n${userProse}\n`;
+        const edited = await request(app).post("/api/skills/punctuation/update-file").send({ path, content }).expect(200);
+        const updated = edited.body.skill.files.find((f: { path: string }) => f.path === path);
+        expect(updated.userEdited).toBe(true);
+        expect(updated.content).toContain("edited after generation");
+        expect(updated.content).toContain(userProse);
+        expect(updated.content).not.toMatch(/Every factual claim below is grounded|Verbatim except|Verbatim code block|Steps are verbatim|_Source:|_\(source line \d+\)_/);
+        expect(qualifyEditedFileContent(path, updated.content, name)).toBe(updated.content);
+        expect(qualifyEditedFileContent(path, userProse, name)).toBe(userProse);
+      }
+      const downloaded = await request(app).post("/api/skills/punctuation/export").send({ target: "claude-code" }).parse(binaryParser).expect(200);
+      const zip = await JSZip.loadAsync(downloaded.body);
+      const manifest = JSON.parse(await zip.file("punctuation/manifest.json")!.async("string"));
+      for (const path of paths) {
+        const content = await zip.file(`punctuation/${path}`)!.async("string");
+        expect(content).toContain("edited after generation");
+        expect(manifest.files).toContainEqual(expect.objectContaining({ path, userEdited: true, bytes: Buffer.byteLength(content), sha256: sha256(content) }));
+      }
+    } finally { await cleanup(); }
   });
 });
