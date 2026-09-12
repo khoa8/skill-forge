@@ -112,3 +112,27 @@ describe("buildCanonicalSkill", () => {
     }
   });
 });
+
+describe("allocated generated instruction paths", () => {
+  it("omits heading-only references and resolves substantive/colliding reference and workflow paths", async () => {
+    const { validatePackage } = await import("../src/core/validate.js");
+    const { exportPackage, buildZip } = await import("../src/core/export/exporters.js");
+    const { default: JSZip } = await import("jszip");
+    const source = "# Guide\n\nInstructions for operating the documented service.\n\n## Setup\n\n## Use!\n\nRead these documented settings before operating the service.\n\n## Use?\n\nConsult these other documented settings for the other operation.\n\n## Run!\n\n1. Read the guide.\n2. Set the documented options.\n3. Verify the result.\n\n## Run?\n\n1. Read the other guide.\n2. Set the other options.\n3. Verify the other result.\n";
+    const { skill, plan, normalized } = build(source);
+    expect(plan.steps.join("\n")).not.toContain("references/setup.md");
+    expect(skill.files.some((f) => f.path === "references/setup.md")).toBe(false);
+    expect(plan.steps.join("\n")).toContain("references/use.md");
+    expect(plan.steps.join("\n")).toContain("references/use-2.md");
+    expect(plan.steps.join("\n")).toContain("workflows/run-2.md");
+    expect(validatePackage({ skill, sourceText: normalized.text }).passed).toBe(true);
+    const paths = plan.steps.flatMap((step) => [...step.matchAll(/(?:references|workflows)\/[a-z0-9-]+\.md/g)].map((m) => m[0]));
+    const exported = await buildZip(exportPackage(skill, "claude-code"));
+    const zip = await JSZip.loadAsync(exported.buffer);
+    for (const path of paths) {
+      expect(skill.files.find((f) => f.path === path)).toBeDefined();
+      expect(zip.file(`${skill.id}/${path}`)).not.toBeNull();
+    }
+    expect(skill.files.find((f) => f.path === "references/use-2.md")!.content).toContain("other documented settings");
+  });
+});

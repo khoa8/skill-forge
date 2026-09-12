@@ -110,12 +110,14 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
   }
 
   const nameOk = typeof parsed.name === "string" && parsed.name === skill.meta.name;
+  const description = typeof parsed.description === "string" && parsed.description.trim().length > 0
+    ? parsed.description : skill.meta.description;
+  if (description.length > 1024) {
+    throw new ExportError("Description exceeds the claude-code 1024-character limit.", "export_description_too_long");
+  }
   let files = skill.files;
   if (!nameOk) {
     notes.push("Front matter `name` did not match the package id; exporter rewrote it.");
-    const description = typeof parsed.description === "string" && parsed.description.trim().length > 0
-      ? parsed.description
-      : skill.meta.description;
     files = skill.files.map((f) => {
       if (f.path !== "SKILL.md") return f;
       const content = f.content.replace(

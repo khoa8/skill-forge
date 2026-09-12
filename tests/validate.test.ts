@@ -156,7 +156,8 @@ describe("validatePackage (deterministic validator)", () => {
   it("eval-integrity warns on incomplete or malformed eval items", () => {
     const broken = structuredClone(healthy.skill);
     const evals = broken.files.find((f) => f.path === "evals/evals.json");
-    if (!evals) return; // sample without evals; nothing to check here
+    expect(evals).toBeDefined();
+    if (!evals) throw new Error("Required evals fixture missing");
     evals.content = JSON.stringify({
       schema: "skillforge.evals/1",
       items: [
@@ -279,5 +280,30 @@ describe("validatePackage (deterministic validator)", () => {
     const warnCheck = report.checks.find((c) => c.id === "manifest-consistency" && c.status === "warn");
     expect(warnCheck).toBeDefined();
     expect(warnCheck!.message).toContain("Source text unavailable; manifest.source.sha256 could not be verified");
+  });
+});
+
+describe("canonical instruction sections", () => {
+  const headings = ["When to use this skill", "Inputs required", "Workflow", "Constraints", "Verification", "Common pitfalls", "References"];
+  function withBody(body: string) {
+    const skill = structuredClone(healthy.skill);
+    const file = skill.files.find((f) => f.path === "SKILL.md")!;
+    file.content = `---\n${splitFrontMatter(file.content)!.fm}\n---\n${body}`;
+    return resyncManifest(skill);
+  }
+  it("accepts generated instructions and explicit source gaps", () => {
+    expect(validatePackage({ skill: healthy.skill }).passed).toBe(true);
+    const skill = withBody(headings.map((h) => `## ${h}\n\nSource gap: the supplied material does not specify this information.\n`).join("\n"));
+    expect(validatePackage({ skill }).passed).toBe(true);
+  });
+  it.each(["", "<!-- nothing -->", "```md\n" + headings.map((h) => `## ${h}\npretend instructions`).join("\n") + "\n```"])("rejects bodies without real sections: %s", (body) => {
+    const report = validatePackage({ skill: withBody(body) });
+    expect(report.passed).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "skill-instructions", status: "fail" }));
+  });
+  it.each(headings)("rejects a missing or empty %s section", (heading) => {
+    const body = splitFrontMatter(healthy.skill.files.find((f) => f.path === "SKILL.md")!.content)!.body;
+    expect(validatePackage({ skill: withBody(body.replace(`## ${heading}`, `## Different section`)) }).passed).toBe(false);
+    expect(validatePackage({ skill: withBody(headings.map((h) => `## ${h}\n${h === heading ? "<!-- empty -->\n> ---" : "Explicit source gap: not supplied."}\n`).join("\n")) }).passed).toBe(false);
   });
 });

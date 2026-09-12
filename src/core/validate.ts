@@ -187,10 +187,46 @@ const frontMatterFields = check("frontmatter-fields", "Front matter has valid na
     outcomes.push(fail("Front matter `description` is missing; agents use it to decide when to load the skill.", "SKILL.md"));
   } else if (description.length > 1024) {
     outcomes.push(
-      warn(`Front matter \`description\` is ${description.length} characters; the recommended limit is 1024.`, "SKILL.md"),
+      (target === "claude-code" ? fail : warn)(`Front matter \`description\` is ${description.length} characters; ${target === "claude-code" ? "the claude-code limit" : "the recommended limit"} is 1024.`, "SKILL.md"),
     );
   }
   return outcomes.length === 0 ? pass() : outcomes;
+});
+
+const requiredSkillSections = check("skill-instructions", "SKILL.md contains canonical instructions", ({ skill }) => {
+  const file = skill.files.find((f) => f.path === "SKILL.md");
+  const split = file && splitFrontMatter(file.content);
+  if (!split) return pass(); // frontmatter-parse owns malformed front matter
+  try {
+    const fm = parseYaml(split.fm);
+    if (!fm || typeof fm !== "object" || Array.isArray(fm)) return pass();
+  } catch { return pass(); }
+  const required = ["When to use this skill", "Inputs required", "Workflow", "Constraints",
+    "Verification", "Common pitfalls", "References"];
+  const sections = new Map<string, string[]>();
+  let current: string | undefined;
+  let fence: { marker: string; length: number } | undefined;
+  for (const line of split.body.replace(/<!--[\s\S]*?-->/g, "").split("\n")) {
+    const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (delimiter && delimiter[1]![0] === fence.marker && delimiter[1]!.length >= fence.length &&
+          line.slice(delimiter[0].length).trim() === "") fence = undefined;
+      else if (current) sections.get(current)!.push(line);
+      continue;
+    }
+    if (delimiter) { fence = { marker: delimiter[1]![0]!, length: delimiter[1]!.length }; continue; }
+    const heading = line.match(HEADING_RE);
+    if (heading && heading[1]!.length <= 2) {
+      current = heading[1]!.length === 2 ? heading[2]!.toLowerCase() : undefined;
+      if (current && !sections.has(current)) sections.set(current, []);
+    } else if (current && !heading) sections.get(current)!.push(line);
+  }
+  const missing = required.filter((heading) => !sections.has(heading.toLowerCase()));
+  if (missing.length) return fail(`SKILL.md is missing required instruction sections: ${missing.join(", ")}.`, "SKILL.md");
+  const empty = required.filter((heading) => !/[\p{L}\p{N}]/u.test(sections.get(heading.toLowerCase())!.join("\n")));
+  return empty.length
+    ? fail(`SKILL.md has empty instruction sections: ${empty.join(", ")}. Add instructions or an explicit source gap.`, "SKILL.md")
+    : pass();
 });
 
 const emptySections = check("no-empty-sections", "No empty markdown sections", ({ skill }) => {
@@ -825,6 +861,7 @@ export const CHECKS: Check[] = [
   emptyFiles,
   frontMatterParses,
   frontMatterFields,
+  requiredSkillSections,
   canonicalMetadataConsistency,
   emptySections,
   brokenLinks,
