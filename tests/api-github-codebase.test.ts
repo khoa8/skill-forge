@@ -142,10 +142,10 @@ describe("GitHub codebase source via the API", () => {
 
   it("keeps documentation mode working (default and explicit)", async () => {
     stubCodebaseFetch();
-    for (const body of [
-      { sourceType: "github", repo: "https://github.com/acme/widget-service" },
-      { sourceType: "github", repo: "https://github.com/acme/widget-service", mode: "docs" },
-    ]) {
+    for (const [idx, body] of [
+      { sourceType: "github", repo: "https://github.com/acme/widget-service", requestedName: "widget-service-docs-1" },
+      { sourceType: "github", repo: "https://github.com/acme/widget-service", mode: "docs", requestedName: "widget-service-docs-2" },
+    ].entries()) {
       const res = await request(app).post("/api/generate").send(body).expect(200);
       const result = eventsOf(res.text).find((e) => e.type === "result");
       const get = await request(app).get(`/api/skills/${result.skill.id}`).expect(200);
@@ -208,7 +208,7 @@ describe("GitHub codebase source via the API", () => {
     stubCodebaseFetch();
     const res = await request(app)
       .post("/api/generate")
-      .send({ sourceType: "github", repo: "https://github.com/acme/widget-service", mode: "codebase" })
+      .send({ sourceType: "github", repo: "https://github.com/acme/widget-service", mode: "codebase", requestedName: "widget-service-codebase" })
       .expect(200);
     const result = eventsOf(res.text).find((e) => e.type === "result");
     const binaryParser = (res2: unknown, cb: (err: Error | null, body?: unknown) => void) => {

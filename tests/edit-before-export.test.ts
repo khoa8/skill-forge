@@ -164,7 +164,8 @@ afterAll(async () => {
     // Manifest inside the ZIP matches the edited file (hash resync survived packaging).
     const manifest = JSON.parse(await zip.files["edit-safe-demo/manifest.json"]!.async("string"));
     const entry = manifest.files.find((f: { path: string }) => f.path === "SKILL.md");
-    expect(entry!.sha256).toBe(sha256(repaired));
+    const repairedSkillMd = repairRes.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
+    expect(entry!.sha256).toBe(sha256(repairedSkillMd));
     const editedEntry = manifest.files.find((f: { path: string }) => f.path === editPath);
     expect(editedEntry!.sha256).toBe(sha256("## Test cards (user-reviewed)\n\nUse 4242-4242-4242-4242 in the sandbox only.\n"));
   });
@@ -330,8 +331,9 @@ describe("F-01 regression: generic export does not resurrect stale instructions 
 
     // 6. Assert:
     // - edited SKILL.md is present exactly as persisted
+    const persistedSkillMd = editRes.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
     const skillMdInZip = await zip.files[`${id}/SKILL.md`]!.async("string");
-    expect(skillMdInZip).toBe(editedSkillMd);
+    expect(skillMdInZip).toBe(persistedSkillMd);
 
     // - AGENTS.md exists
     const agentsFile = zip.files[`${id}/AGENTS.md`];
@@ -363,8 +365,8 @@ describe("F-01 regression: generic export does not resurrect stale instructions 
 
     const skillEntry = manifestJson.files.find((f: { path: string }) => f.path === "SKILL.md");
     expect(skillEntry).toBeDefined();
-    expect(skillEntry.bytes).toBe(Buffer.byteLength(editedSkillMd, "utf8"));
-    expect(skillEntry.sha256).toBe(sha256(editedSkillMd));
+    expect(skillEntry.bytes).toBe(Buffer.byteLength(persistedSkillMd, "utf8"));
+    expect(skillEntry.sha256).toBe(sha256(persistedSkillMd));
   });
 });
 

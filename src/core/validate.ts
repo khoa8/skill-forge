@@ -325,7 +325,7 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
     return outcomes;
   }
 
-  const listed = new Map<string, { bytes: number; sha256: string }>();
+  const listed = new Map<string, { bytes: number; sha256: string; userEdited?: boolean }>();
   for (const f of m.files as { path?: unknown; bytes?: unknown; sha256?: unknown }[]) {
     if (typeof f !== "object" || f === null || Array.isArray(f)) {
       outcomes.push(fail("manifest.json `files` contains a non-object entry.", "manifest.json"));
@@ -370,8 +370,24 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
       validEntry = false;
     }
 
+    const userEditedRaw = (f as { userEdited?: unknown }).userEdited;
+    let userEdited: boolean | undefined = undefined;
+    if (userEditedRaw !== undefined) {
+      if (typeof userEditedRaw !== "boolean") {
+        outcomes.push(
+          fail(
+            `manifest.json records invalid userEdited for "${path}" (expected boolean, got ${JSON.stringify(userEditedRaw)}).`,
+            "manifest.json",
+          ),
+        );
+        validEntry = false;
+      } else {
+        userEdited = userEditedRaw;
+      }
+    }
+
     if (validEntry) {
-      listed.set(path, { bytes: f.bytes as number, sha256: f.sha256 as string });
+      listed.set(path, { bytes: f.bytes as number, sha256: f.sha256 as string, userEdited });
     }
   }
 
@@ -389,6 +405,16 @@ const manifestConsistency = check("manifest-consistency", "Manifest matches pack
     const actualHash = sha256(file.content);
     if (info.sha256 !== actualHash) {
       outcomes.push(fail(`manifest.json records sha256 "${info.sha256}" for "${path}" but the file hash is "${actualHash}".`, "manifest.json"));
+    }
+    const manifestEdited = info.userEdited === true;
+    const fileEdited = file.userEdited === true;
+    if (manifestEdited !== fileEdited) {
+      outcomes.push(
+        fail(
+          `manifest.json userEdited state (${manifestEdited}) disagrees with package file userEdited state (${fileEdited}) for "${path}".`,
+          "manifest.json",
+        ),
+      );
     }
   }
 
@@ -518,6 +544,12 @@ const provenanceIntegrity = check("provenance-integrity", "Every file has valid 
     }
   }
   for (const file of skill.files) {
+    if (file.userEdited && byFile.has(file.path)) {
+      outcomes.push(
+        fail(`User-edited file "${file.path}" must not retain source provenance records.`, file.path),
+      );
+      continue;
+    }
     if (!byFile.has(file.path)) {
       outcomes.push(
         warn(`File "${file.path}" has no provenance record; its origin in the source is not traceable.`, file.path),

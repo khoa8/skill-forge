@@ -28,7 +28,7 @@ import {
   normalizeStoredSource,
   SourceRenormalizationError,
 } from "./store.js";
-import type { ExportTarget, SourceType, RepositoryAnalysis } from "../core/types.js";
+import type { ExportTarget, SourceType, RepositoryAnalysis, CanonicalSkill } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 import { createHostValidationMiddleware } from "./host-guard.js";
@@ -605,10 +605,28 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
 
     try {
       const exported = exportPackage(stored.skill, target);
+      const finalSkillView: CanonicalSkill = {
+        ...stored.skill,
+        files: exported.files,
+      };
+      const finalReport = validatePackage({
+        skill: finalSkillView,
+        sourceText: normalized.text,
+        target,
+        sourceType: stored.source.type,
+      });
+      if (!finalReport.passed) {
+        res.status(422).json({
+          error: `Export blocked: deterministic validation found ${finalReport.errorCount} error(s) in the exported package. Inspect the validation panel, repair the source or plan, and try again.`,
+          validation: finalReport,
+        });
+        return;
+      }
+
       void buildZip(exported).then((zip) => {
         res.setHeader("content-type", "application/zip");
         res.setHeader("content-disposition", `attachment; filename="${zip.fileName}"`);
-        res.setHeader("x-skillforge-validation", JSON.stringify({ passed: report.passed, warnings: report.warningCount }));
+        res.setHeader("x-skillforge-validation", JSON.stringify({ passed: finalReport.passed, warnings: finalReport.warningCount }));
         res.setHeader("x-skillforge-entries", String(zip.entries.length));
         res.status(200).send(zip.buffer);
       }).catch((err) => {

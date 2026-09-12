@@ -94,11 +94,11 @@ describe("generation pipeline (streaming)", () => {
     const content = getSample("scaffoldcraft-cli").content;
     const res = await request(app)
       .post("/api/generate")
-      .send({ sourceType: "text", name: "Pasted ScaffoldCraft", content })
+      .send({ sourceType: "text", name: "Pasted ScaffoldCraft", requestedName: "scaffoldcraft-pasted", content })
       .expect(200);
     const events = res.text.trim().split("\n").map((l) => JSON.parse(l));
     const result = events.find((e: { type: string }) => e.type === "result");
-    expect(result.skill.meta.name).toBe("scaffoldcraft-cli");
+    expect(result.skill.meta.name).toBe("scaffoldcraft-pasted");
   });
 });
 

@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CanonicalSkill, SourceAnalysis, ValidationReport, SourceType, RepositoryAnalysis } from "../core/types.js";
 import { normalizeSource } from "../core/ingest.js";
-import { manifestFor, manifestRepositoryBlock } from "../core/build.js";
+import { manifestFor, manifestRepositoryBlock, qualifyEditedFileContent } from "../core/build.js";
 
 export const MAX_STORED = 50;
 
@@ -360,8 +360,11 @@ export function createStore(
         await testHooks.afterLoad(id, "updateFileContent");
       }
 
-      file.content = content;
+      file.content = qualifyEditedFileContent(path, content, existing.source.name);
       file.userEdited = true;
+      if (!file.purpose.startsWith("User-edited file; originally:")) {
+        file.purpose = `User-edited file; originally: ${file.purpose}`;
+      }
       existing.skill.provenance = existing.skill.provenance.filter((p) => p.filePath !== path);
 
       // Regenerate manifest.json from the new inventory (bytes + hashes resync).
