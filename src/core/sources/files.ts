@@ -9,14 +9,16 @@
  *   explicit flag, bounded depth and file count;
  * - no code execution — files are read as text only.
  */
-import { readFile, readdir, stat, realpath } from "node:fs/promises";
+import { readFile, opendir, stat, realpath } from "node:fs/promises";
 import { join, relative, extname, basename, isAbsolute, sep } from "node:path";
+import type { Dirent } from "node:fs";
 import type { SourceInput } from "../types.js";
 
 export const MAX_FILE_BYTES = 800_000; // per file
 export const MAX_TOTAL_BYTES = 1_400_000; // combined (under ingest's 1.5 MB cap)
 export const MAX_FILES = 40;
 export const MAX_DEPTH = 6;
+export const MAX_VISITED_ENTRIES = 10_000;
 
 /** Documentation-like text extensions shared by the file and GitHub adapters. */
 export const TEXT_EXTENSIONS = new Set([
@@ -81,7 +83,7 @@ export interface CollectedFile {
 /** Read a file (with extension + size checks) or walk a bounded directory. */
 export async function collectFiles(
   userPath: string,
-  opts: { recursive?: boolean; signal?: AbortSignal } = {},
+  opts: { recursive?: boolean; signal?: AbortSignal; /** May lower, never raise, the traversal budget. */ maxVisitedEntries?: number } = {},
 ): Promise<{ files: CollectedFile[]; skipped: string[] }> {
   if (opts.signal?.aborted) {
     throw new FileSourceError("The request was aborted by the client.", "file_aborted");
@@ -112,13 +114,22 @@ export async function collectFiles(
         "file_too_large",
       );
     }
-    const content = await readFile(absolute, "utf8");
+    const content = await readFile(absolute, { encoding: "utf8", signal: opts.signal }).catch((err) => {
+      if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+      throw err;
+    });
     if (opts.signal?.aborted) {
       throw new FileSourceError("The request was aborted by the client.", "file_aborted");
     }
     return { files: [{ path: relative(root, absolute).split(sep).join("/"), content }], skipped };
   }
 
+  const budget = opts.maxVisitedEntries ?? MAX_VISITED_ENTRIES;
+  if (!Number.isSafeInteger(budget) || budget < 1 || budget > MAX_VISITED_ENTRIES) {
+    throw new FileSourceError(`Traversal budget must be an integer from 1 to ${MAX_VISITED_ENTRIES}.`, "file_bad_budget");
+  }
+  let visited = 0;
+  let traversalStopped = false;
   const files: CollectedFile[] = [];
   let totalBytes = 0;
   await walk(realRoot, absolute, 0, opts.recursive ?? false, files, skipped, new Set());
@@ -127,11 +138,11 @@ export async function collectFiles(
   }
   if (files.length === 0) {
     throw new FileSourceError(
-      `No supported documentation files (${[...TEXT_EXTENSIONS].slice(0, 5).join(", ")}…) found under "${userPath}".`,
+      `No supported documentation files (${[...TEXT_EXTENSIONS].slice(0, 5).join(", ")}…) found under "${userPath}".${traversalStopped ? ` ${skipped[skipped.length - 1]}` : ""}`,
       "file_none_found",
     );
   }
-  files.sort((a, b) => a.path.localeCompare(b.path));
+  files.sort((a, b) => compareNames(a.path, b.path));
   return { files, skipped };
 
   async function walk(
@@ -146,23 +157,41 @@ export async function collectFiles(
     if (opts.signal?.aborted) {
       throw new FileSourceError("The request was aborted by the client.", "file_aborted");
     }
+    if (traversalStopped) return;
     if (depth > MAX_DEPTH) {
       skipped.push(`${dir}: max depth ${MAX_DEPTH} exceeded`);
       return;
     }
     if (seen.has(dir)) return; // symlink cycle guard
     seen.add(dir);
-    let entries;
+    const entries: Dirent[] = [];
     try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
+      // Incremental enumeration bounds memory/work even for huge ignored directories.
+      // Do not select from an incomplete listing: its prefix is platform-dependent.
+      const directory = await opendir(dir, { bufferSize: 1 });
+      for await (const entry of directory) {
+        if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+        visited++;
+        if (visited >= budget) {
+          traversalStopped = true;
+          skipped.push(`stopped: traversal entry limit (${budget}) reached; ${relative(rootDir, dir).split(sep).join("/")}/ listing may be incomplete and was omitted`);
+          return;
+        }
+        entries.push(entry);
+      }
+    } catch (err) {
+      if (opts.signal?.aborted || err instanceof FileSourceError) {
+        throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+      }
       skipped.push(`${dir}: unreadable`);
       return;
     }
+    entries.sort((a, b) => compareNames(a.name, b.name));
     for (const entry of entries) {
       if (opts.signal?.aborted) {
         throw new FileSourceError("The request was aborted by the client.", "file_aborted");
       }
+      if (traversalStopped) return;
       if (out.length >= MAX_FILES) {
         skipped.push(`stopped: file limit (${MAX_FILES}) reached`);
         return;
@@ -196,7 +225,8 @@ export async function collectFiles(
         skipped.push(`${rel}: total size limit reached`);
         return;
       }
-      const content = await readFile(full, "utf8").catch(() => {
+      const content = await readFile(full, { encoding: "utf8", signal: opts.signal }).catch(() => {
+        if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
         skipped.push(`${rel}: unreadable`);
         return null;
       });
@@ -205,6 +235,11 @@ export async function collectFiles(
       out.push({ path: rel, content });
     }
   }
+}
+
+/** UTF-16 code-unit ordering, independent of filesystem order and locale. */
+function compareNames(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** Build a SourceInput from collected files. Multi-file sources are joined

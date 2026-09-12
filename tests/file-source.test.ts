@@ -1,5 +1,5 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from "node:fs/promises";
+import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest";
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, opendir, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,7 +8,14 @@ import {
   resolveInsideRoot,
   FileSourceError,
   allowedRoot,
+  MAX_VISITED_ENTRIES, MAX_FILES, MAX_DEPTH, MAX_TOTAL_BYTES,
 } from "../src/core/sources/files.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, opendir: vi.fn(actual.opendir) };
+});
+afterEach(() => { vi.mocked(opendir).mockReset(); });
 
 let rootBackup: string | undefined;
 let sandbox: string;
@@ -125,5 +132,80 @@ describe("allowedRoot", () => {
     delete process.env.SKILLFORGE_DOCS_ROOT;
     expect(allowedRoot()).toBe(process.cwd());
     process.env.SKILLFORGE_DOCS_ROOT = prev;
+  });
+});
+
+
+describe("bounded deterministic traversal", () => {
+  async function fixture(name: string, files: Record<string, string>) {
+    const dir = join(sandbox, name);
+    await mkdir(dir, { recursive: true });
+    for (const [path, content] of Object.entries(files)) {
+      await mkdir(join(dir, path, ".."), { recursive: true });
+      await writeFile(join(dir, path), content);
+    }
+    return dir;
+  }
+  function enumeration(reverse: boolean, onEntry: () => void = () => {}) {
+    vi.mocked(opendir).mockImplementation(async (path) => {
+      const entries = await readdir(path, { withFileTypes: true });
+      entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      if (reverse) entries.reverse();
+      return { async *[Symbol.asyncIterator]() { for (const entry of entries) { onEntry(); yield entry; } } } as unknown as Awaited<ReturnType<typeof opendir>>;
+    });
+  }
+  it("sorts before file selection caps regardless of enumeration order", async () => {
+    await fixture("ordered", Object.fromEntries(Array.from({ length: MAX_FILES + 3 }, (_, i) => [`f${String(i).padStart(2, "0")}.md`, "documented content"])));
+    enumeration(false);
+    const forward = await collectFiles("ordered");
+    enumeration(true);
+    const reverse = await collectFiles("ordered");
+    expect(reverse).toEqual(forward);
+    expect(forward.files).toHaveLength(MAX_FILES);
+    expect(forward.files[0]!.path).toBe("ordered/f00.md");
+    expect(forward.files.at(-1)!.path).toBe("ordered/f39.md");
+    expect(forward.skipped).toContain(`stopped: file limit (${MAX_FILES}) reached`);
+  });
+  it("counts unsupported entries and directories, stops globally, and reports omitted listings", async () => {
+    await fixture("budget", { "a.md": "retained documentation", "b/ignored1.bin": "x", "b/ignored2.bin": "x", "b/ignored3.bin": "x", "b/z.md": "not reached", "c/later.md": "not reached" });
+    let visited = 0;
+    enumeration(false, () => { visited++; });
+    const result = await collectFiles("budget", { recursive: true, maxVisitedEntries: 5 });
+    expect(visited).toBe(5); // three root entries, then two unsupported children
+    expect(result.files.map((f) => f.path)).toEqual(["budget/a.md"]);
+    expect(result.skipped.join("\n")).toContain("traversal entry limit (5) reached");
+    expect(result.skipped.join("\n")).toContain("listing may be incomplete and was omitted");
+    enumeration(true);
+    expect(await collectFiles("budget", { recursive: true, maxVisitedEntries: 5 })).toEqual(result);
+    await expect(collectFiles("budget", { maxVisitedEntries: 1 })).rejects.toThrow(/traversal entry limit/);
+    await expect(collectFiles("budget", { maxVisitedEntries: MAX_VISITED_ENTRIES + 1 })).rejects.toMatchObject({ code: "file_bad_budget" });
+  });
+  it("retains byte, depth and symlink boundaries", async () => {
+    await fixture("limits", { "a.md": "a".repeat(700_000), "b.md": "b".repeat(700_000), "c.md": "too much", ["deep/".repeat(MAX_DEPTH + 2) + "hidden.md"]: "not reached" });
+    const capped = await collectFiles("limits", { recursive: true });
+    expect(capped.files.reduce((sum, f) => sum + Buffer.byteLength(f.content), 0)).toBe(MAX_TOTAL_BYTES);
+    expect(capped.skipped.join("\n")).toContain("total size limit");
+    await fixture("depth", { "root.md": "safe", ["sub/".repeat(MAX_DEPTH + 2) + "hidden.md"]: "not reached" });
+    await symlink(join(sandbox, "README.md"), join(sandbox, "depth", "link.md"));
+    const depth = await collectFiles("depth", { recursive: true });
+    expect(depth.files.map((f) => f.path)).toEqual(["depth/root.md"]);
+    expect(depth.skipped.join("\n")).toContain("max depth");
+    expect(depth.skipped.join("\n")).toContain("not a regular file");
+  });
+  it("aborts during enumeration and closes the iterator without reading files", async () => {
+    const dir = await fixture("cancel-walk", { "a.md": "safe", "b.md": "safe" });
+    const entries = await readdir(dir, { withFileTypes: true });
+    const controller = new AbortController();
+    let closed = false;
+    let visited = 0;
+    vi.mocked(opendir).mockImplementation(async () => ({
+      async *[Symbol.asyncIterator]() {
+        try { for (const entry of entries) { visited++; controller.abort(); yield entry; } }
+        finally { closed = true; }
+      },
+    }) as unknown as Awaited<ReturnType<typeof opendir>>);
+    await expect(collectFiles("cancel-walk", { signal: controller.signal })).rejects.toMatchObject({ code: "file_aborted" });
+    expect(visited).toBe(1);
+    expect(closed).toBe(true);
   });
 });
