@@ -16,6 +16,8 @@ import request from "supertest";
 import { createStore, type StoreTestHooks, type StoredSkill } from "../src/server/store.js";
 import { createApp } from "../src/server/app.js";
 import { validatePackage } from "../src/core/validate.js";
+import { manifestFor } from "../src/core/build.js";
+import { normalizeSource } from "../src/core/ingest.js";
 import { sha256 } from "../src/core/util.js";
 import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 
@@ -36,6 +38,37 @@ function eventsOf(text: string) {
     .map((l) => JSON.parse(l));
 }
 
+function skillInstructions(id: string, description = "demo"): string {
+  return `---
+name: ${id}
+description: ${description}
+---
+
+# Reference editing guide
+
+## When to use this skill
+Use this guide when updating the reference documents.
+
+## Inputs required
+Read the current reference files and the requested changes.
+
+## Workflow
+Apply the requested changes to the relevant reference file, then inspect the saved contents.
+
+## Constraints
+Preserve unrelated reference content while editing.
+
+## Verification
+Confirm the saved files contain the requested changes and validation passes.
+
+## Common pitfalls
+Do not mistake an earlier validation report for the state of a later edit.
+
+## References
+Consult [Reference A](references/a.md) and [Reference B](references/b.md).
+`;
+}
+
 function sampleSkill(id: string): {
   id: string;
   skill: StoredSkill["skill"];
@@ -44,25 +77,26 @@ function sampleSkill(id: string): {
   validation: StoredSkill["validation"];
   createdAt: string;
 } {
-  const file1 = { path: "SKILL.md", content: "---\nname: " + id + "\ndescription: demo\n---\n\n# Guide\n\nContent", purpose: "main" };
+  const file1 = { path: "SKILL.md", content: skillInstructions(id), purpose: "main" };
   const file2 = { path: "references/a.md", content: "# Ref A\n\nInitial content A", purpose: "reference" };
   const file3 = { path: "references/b.md", content: "# Ref B\n\nInitial content B", purpose: "reference" };
   const allFiles = [file1, file2, file3];
-  const manifest = {
-    schemaVersion: "1",
-    generator: "mock",
-    generatedAt: new Date().toISOString(),
-    files: allFiles.map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.content, "utf8"), sha256: sha256(f.content) })),
-    source: { name: "demo-source", sha256: sha256("source text with sufficient length for testing"), lineCount: 10, notes: [] },
+  const meta: StoredSkill["skill"]["meta"] = { name: id, displayName: id, description: "demo", version: "0.1.0", generator: "mock", generatedAt: new Date().toISOString(), gaps: [] };
+  const source: StoredSkill["source"] = {
+    name: "demo-source", type: "text",
+    text: "# Source\n\nReference A describes the first editable document.\nReference B describes the second editable document.\nVerify saved changes before exporting.\n",
   };
-  const manifestFile = { path: "manifest.json", content: JSON.stringify(manifest, null, 2), purpose: "manifest" };
+  const normalized = normalizeSource({ type: source.type, name: source.name, content: source.text });
+  const manifestFile = { path: "manifest.json", content: manifestFor(allFiles, meta, {
+    name: source.name, sha256: normalized.sha256, lineCount: normalized.lineCount, notes: [],
+  }), purpose: "manifest" };
 
   return {
     id,
     skill: {
       schemaVersion: "1",
       id,
-      meta: { name: id, displayName: id, description: "demo", version: "0.1.0", generator: "mock", generatedAt: new Date().toISOString(), gaps: [] },
+      meta,
       plan: { whenToUse: [], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] },
       files: [...allFiles, manifestFile],
       provenance: [
@@ -71,13 +105,21 @@ function sampleSkill(id: string): {
       ],
     },
     analysis: { title: id, sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 0, lineCount: 10 },
-    source: { name: "demo-source", type: "text", text: "# Source\n\nA valid source document with enough text to normalize properly." },
+    source,
     validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
     createdAt: new Date().toISOString(),
   };
 }
 
 describe("F-01 same-skill state consistency", () => {
+  it("starts with a canonical-valid fixture and consistent manifest", () => {
+    const fixture = sampleSkill("fixture-contract");
+    const source = normalizeSource({ type: fixture.source.type, name: fixture.source.name, content: fixture.source.text });
+    const report = validatePackage({ skill: fixture.skill, sourceText: source.text });
+    expect(report.executed).toBe(true);
+    expect(report.checks.filter((check) => check.status === "fail")).toEqual([]);
+    expect(report.passed).toBe(true);
+  });
   it("1. two concurrent edits to different files on the same skill are both preserved", async () => {
     const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
     try {
@@ -198,7 +240,7 @@ describe("F-01 same-skill state consistency", () => {
       await barrierVal.promise;
 
       // While Operation A holds the lock, Operation B is initiated to repair SKILL.md to V2 (valid)
-      const repairedContent = "---\nname: stale-val\ndescription: repaired\n---\n\n# Valid SKILL\n\nProperly repaired";
+      const repairedContent = skillInstructions("stale-val", "repaired");
       const editPromise = store.updateFileContent(
         "stale-val",
         "SKILL.md",
@@ -213,6 +255,7 @@ describe("F-01 same-skill state consistency", () => {
 
       // Operation A computed against V1, so its returned report reflects V1 (failed)
       expect(valReport.passed).toBe(false);
+      expect(valReport.checks).toContainEqual(expect.objectContaining({ id: "frontmatter-parse", status: "fail" }));
 
       // Operation B then executed against V1, applied the repair, validated V2, and persisted V2
       expect(editSkill.validation.passed).toBe(true);
