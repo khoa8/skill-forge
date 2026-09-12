@@ -50,11 +50,11 @@ Any section the source cannot answer renders an explicit gap note instead of inv
   "generator": "mock",
   "source": { "name": "…", "sha256": "…", "lineCount": 125, "notes": [] },
   "gaps": ["…"],
-  "files": [{ "path": "…", "bytes": 123, "sha256": "…" }]
+  "files": [{ "path": "…", "bytes": 123, "sha256": "…", "userEdited": true }]
 }
 ```
 
-`files` lists every file except the manifest itself. Exporters may add `exportNotes` when they change the package (e.g. the generic exporter adds `AGENTS.md` and re-lists it).
+`files` lists every file except the manifest itself. When a file is edited by the user before export, its entry records `"userEdited": true` (unmodified files omit the field or set it to `false`). User-edited files have their provenance records removed honestly, and generator-authored header banners are qualified. Exporters may add `exportNotes` when they change the package (e.g. the generic exporter adds `AGENTS.md` and re-lists it).
 
 ### `source.repository` (codebase mode only)
 

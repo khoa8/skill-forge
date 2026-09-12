@@ -15,6 +15,13 @@ const state = {
   activeTab: "sample",
   exportTargets: [],
   editingPath: null,
+  // Request ownership and sequence tokens (I-02)
+  generationSeq: 0,
+  sourceNotesSeq: 0,
+  validateSeq: 0,
+  editSeq: 0,
+  provenanceSeq: 0,
+  exportSeq: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -197,6 +204,10 @@ function logProgress(stageName, text, ms, isError) {
 async function runGenerate() {
   if (state.running) return;
   state.running = true;
+  const genToken = ++state.generationSeq;
+  state.skillId = null;
+  state.skill = null;
+  state.validation = null;
   updateGenerateButton();
   $("#generate-error").classList.add("hidden");
   $("#progress-log").innerHTML = "";
@@ -239,32 +250,50 @@ async function runGenerate() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (state.generationSeq !== genToken) return;
     if (!res.ok && res.headers.get("content-type")?.includes("application/json")) {
       const err = await res.json();
       throw new Error(`${err.error}${err.detail ? ` (${err.detail})` : ""}`);
     }
-    await consumeNdjson(res, handlePipelineEvent);
+    await consumeNdjson(
+      res,
+      (ev) => {
+        if (state.generationSeq === genToken) {
+          handlePipelineEvent(ev);
+        }
+      },
+      () => state.generationSeq === genToken,
+    );
   } catch (err) {
-    showFatal(err.message || String(err));
+    if (state.generationSeq === genToken) {
+      showFatal(err.message || String(err));
+    }
   } finally {
-    state.running = false;
-    updateGenerateButton();
+    if (state.generationSeq === genToken) {
+      state.running = false;
+      updateGenerateButton();
+    }
   }
 }
 
-async function consumeNdjson(res, onEvent) {
+async function consumeNdjson(res, onEvent, isValid) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    if (isValid && !isValid()) {
+      reader.cancel().catch(() => {});
+      break;
+    }
     buffer += decoder.decode(value, { stream: true });
     let idx;
     while ((idx = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
       if (line.length === 0) continue;
+      if (isValid && !isValid()) return;
       try {
         onEvent(JSON.parse(line));
       } catch (err) {
@@ -362,9 +391,16 @@ async function renderSourceNotes() {
   const box = $("#source-notes");
   if (!box) return;
   box.innerHTML = "";
+  if (!state.skillId) {
+    box.classList.add("hidden");
+    return;
+  }
+  const skillId = state.skillId;
+  const token = ++state.sourceNotesSeq;
   let notes = [];
   try {
-    const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}`);
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}`);
+    if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
     if (res.ok) {
       const data = await res.json();
       notes = Array.isArray(data.source?.notes) ? data.source.notes : [];
@@ -372,6 +408,7 @@ async function renderSourceNotes() {
   } catch {
     notes = []; // absence of notes must never fabricate them
   }
+  if (state.skillId !== skillId || state.sourceNotesSeq !== token) return;
   if (notes.length === 0) {
     box.classList.add("hidden");
     return;
@@ -478,16 +515,29 @@ function renderValidation(validation, fresh) {
 
 async function revalidate() {
   if (!state.skillId) return;
-  const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/validate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  const data = await res.json();
-  if (data.validation) {
-    state.validation = data.validation;
-    renderValidation(data.validation, false);
-    renderExportCards();
+  const skillId = state.skillId;
+  const token = ++state.validateSeq;
+  const revalidateBtn = $("#revalidate-btn");
+  if (revalidateBtn) revalidateBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/validate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    if (state.skillId !== skillId || state.validateSeq !== token) return;
+    const data = await res.json();
+    if (data.validation) {
+      state.validation = data.validation;
+      renderValidation(data.validation, false);
+      renderExportCards();
+    }
+  } catch (err) {
+    console.error("Revalidation failed:", err);
+  } finally {
+    if (state.skillId === skillId && state.validateSeq === token && revalidateBtn) {
+      revalidateBtn.disabled = false;
+    }
   }
 }
 
@@ -578,11 +628,13 @@ function startEdit(file) {
 }
 
 function cancelEdit() {
+  state.editSeq++;
   state.editingPath = null;
   const box = $("#file-edit-box");
   if (box) {
     box.classList.add("hidden");
     $("#file-view-content").classList.remove("hidden");
+    $("#file-edit-error").classList.add("hidden");
   }
 }
 
@@ -599,22 +651,28 @@ function showEditError(message) {
 
 async function saveEdit() {
   if (state.editingPath === null || !state.skillId) return;
+  const skillId = state.skillId;
   const path = state.editingPath;
+  const token = ++state.editSeq;
   const content = $("#file-edit-textarea").value;
   const saveBtn = $("#file-edit-save");
+  const cancelBtn = $("#file-edit-cancel");
   saveBtn.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
   $("#file-edit-status").textContent = "Saving…";
   $("#file-edit-error").classList.add("hidden");
   try {
-    const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/update-file`, {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/update-file`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ path, content }),
     });
+    if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       showEditError(data.error ?? `Save failed (HTTP ${res.status}).`);
       saveBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = false;
       $("#file-edit-status").textContent = "Not saved — fix the error or cancel.";
       return;
     }
@@ -627,8 +685,10 @@ async function saveEdit() {
     renderFiles(data.skill, path);
     renderExportCards();
   } catch (err) {
+    if (state.skillId !== skillId || state.editingPath !== path || state.editSeq !== token) return;
     showEditError(err.message ?? String(err));
     saveBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = false;
     $("#file-edit-status").textContent = "Not saved — network error.";
   }
 }
@@ -638,6 +698,9 @@ async function saveEdit() {
 // ---------------------------------------------------------------------------
 
 async function openProvenance(record) {
+  if (!state.skillId) return;
+  const skillId = state.skillId;
+  const token = ++state.provenanceSeq;
   const dlg = $("#provenance-dialog");
   const [start, end] = record.sourceLines;
   $("#prov-extraction").textContent = `Extraction: ${record.extraction}`;
@@ -647,8 +710,9 @@ async function openProvenance(record) {
 
   try {
     const res = await fetch(
-      `/api/skills/${encodeURIComponent(state.skillId)}/provenance/excerpt?start=${start}&end=${end}`,
+      `/api/skills/${encodeURIComponent(skillId)}/provenance/excerpt?start=${start}&end=${end}`,
     );
+    if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       // Never fabricate an excerpt — surface the failure honestly.
@@ -670,6 +734,7 @@ async function openProvenance(record) {
       .map((line, i) => `${String(returned.start + i).padStart(width, " ")} │ ${line}`)
       .join("\n");
   } catch (err) {
+    if (state.skillId !== skillId || state.provenanceSeq !== token) return;
     $("#prov-meta").textContent = "";
     $("#prov-lines").textContent = `Source excerpt unavailable: ${err.message ?? err}`;
   }
@@ -693,6 +758,7 @@ function renderExportCards() {
     basis.textContent = target.formatBasis;
     const btn = document.createElement("button");
     btn.className = "btn primary";
+    btn.dataset.target = target.target;
     btn.textContent = blocked ? "Export blocked (validation errors)" : "Download ZIP";
     btn.disabled = Boolean(blocked);
     btn.addEventListener("click", () => runExport(target.target));
@@ -716,41 +782,61 @@ function renderExportCards() {
 
 async function runExport(target) {
   if (!state.skillId) return;
-  const res = await fetch(`/api/skills/${encodeURIComponent(state.skillId)}/export`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ target }),
+  const skillId = state.skillId;
+  const token = ++state.exportSeq;
+  const exportButtons = document.querySelectorAll(".export-card button");
+  exportButtons.forEach((btn) => {
+    btn.disabled = true;
+    if (btn.dataset.target === target) btn.textContent = "Downloading…";
   });
-  if (!res.ok) {
-    let message = `Export failed (HTTP ${res.status})`;
-    try {
-      const data = await res.json();
-      message = data.error ?? message;
-      if (data.validation) {
-        state.validation = data.validation;
-        renderValidation(data.validation, false);
-        renderExportCards();
-      }
-    } catch { /* keep default message */ }
-    const note = $("#export-note");
-    note.textContent = message;
-    return;
-  }
-  const blob = await res.blob();
-  const disposition = res.headers.get("content-disposition") ?? "";
-  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] ?? `skillforge-${target}.zip`;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  const note = $("#export-note");
+  note.textContent = `Preparing ${target} export package…`;
 
-  setStep("export", "done");
-  const entries = res.headers.get("x-skillforge-entries");
-  $("#export-note").textContent = `Downloaded ${fileName} (${(blob.size / 1024).toFixed(1)} KB, ${entries ?? "?"} entries). Unzip it and drop the folder into your agent's skills directory.`;
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/export`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target }),
+    });
+    if (state.skillId !== skillId || state.exportSeq !== token) return;
+    if (!res.ok) {
+      let message = `Export failed (HTTP ${res.status})`;
+      try {
+        const data = await res.json();
+        message = data.error ?? message;
+        if (data.validation) {
+          state.validation = data.validation;
+          renderValidation(data.validation, false);
+          renderExportCards();
+        }
+      } catch { /* keep default message */ }
+      note.textContent = message;
+      return;
+    }
+    const blob = await res.blob();
+    if (state.skillId !== skillId || state.exportSeq !== token) return;
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const fileName = disposition.match(/filename="([^"]+)"/)?.[1] ?? `skillforge-${target}.zip`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    setStep("export", "done");
+    const entries = res.headers.get("x-skillforge-entries");
+    note.textContent = `Downloaded ${fileName} (${(blob.size / 1024).toFixed(1)} KB, ${entries ?? "?"} entries). Unzip it and drop the folder into your agent's skills directory.`;
+  } catch (err) {
+    if (state.skillId !== skillId || state.exportSeq !== token) return;
+    note.textContent = `Export failed: ${err.message ?? err}`;
+  } finally {
+    if (state.skillId === skillId && state.exportSeq === token) {
+      renderExportCards();
+    }
+  }
 }
 
 init();
