@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import request from "supertest";
@@ -7,6 +7,27 @@ import { createApp } from "../src/server/app.js";
 import { runPipeline } from "../src/core/pipeline.js";
 import { getSample } from "../src/core/samples.js";
 import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
+
+// Gate the commit primitive itself, after dispatch, rather than a pre-check hook.
+const commitIO = vi.hoisted(() => ({
+  intercept: undefined as undefined | ((path: string, perform: () => Promise<void>) => Promise<void>),
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...fs,
+    rename: (from: string, to: string) => commitIO.intercept
+      ? commitIO.intercept(from, () => fs.rename(from, to)) : fs.rename(from, to),
+    unlink: (path: string) => commitIO.intercept
+      ? commitIO.intercept(path, () => fs.unlink(path)) : fs.unlink(path),
+  };
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(r => { resolve = r; });
+  return { promise, resolve };
+}
 
 async function fixture(): Promise<Parameters<SkillStore["saveSkill"]>[0]> {
   const sample = getSample("meridian-payments-api");
@@ -140,3 +161,126 @@ it("reports safe write failures without a successful generation result", async (
     expect(await store.listSkills()).toEqual([]);
   } finally { await cleanup(); }
 });
+
+for (const atCapacity of [false, true]) {
+  it.each(["before-mutation", "before-completion-observed"] as const)(
+    `arbitrates in-flight commit cancellation at capacity=${atCapacity}: %s`, async (window) => {
+      const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+      const entered = deferred();
+      const release = deferred();
+      const abort = new AbortController();
+      const store = createStore(storeRoot);
+      let pending: Promise<unknown> | undefined;
+      try {
+        const entry = await fixture();
+        if (atCapacity) for (let i = 0; i < MAX_STORED; i++) {
+          await store.saveSkill({ ...entry, id: `retained-${i}`, createdAt: new Date(i * 1000).toISOString() });
+        }
+        const original = await store.listSkills();
+        const victimPath = join(storeRoot, "retained-0", "skill.json");
+        const victimBytes = atCapacity ? await readFile(victimPath) : undefined;
+        await mkdir(join(storeRoot, "incoming"), { recursive: true });
+        await writeFile(join(storeRoot, "incoming", "unknown"), "keep me");
+        let intercepted = false;
+        commitIO.intercept = async (path, perform) => {
+          const target = atCapacity ? path === victimPath : path.startsWith(join(storeRoot, "incoming", "skill.json."));
+          if (!target || intercepted) return perform();
+          intercepted = true;
+          if (window === "before-completion-observed") await perform();
+          entered.resolve();
+          await release.promise;
+          if (window === "before-mutation") await perform();
+        };
+        // Attach rejection handling before releasing the primitive.
+        pending = store.saveSkill(entry, { signal: abort.signal }).then(
+          () => ({ committed: true }), err => ({ error: err }),
+        );
+        await entered.promise;
+        if (atCapacity) expect(await readFile(join(storeRoot, "incoming", "skill.json"), "utf8")).toContain('"id"');
+        abort.abort();
+        release.resolve();
+        expect(await pending).toMatchObject({ error: { code: "store_aborted" } });
+        const restarted = createStore(storeRoot);
+        expect(await restarted.getSkill("incoming")).toBeUndefined();
+        expect(await restarted.listSkills()).toEqual(original);
+        if (atCapacity) expect(await readFile(victimPath)).toEqual(victimBytes);
+        expect(await readFile(join(storeRoot, "incoming", "unknown"), "utf8")).toBe("keep me");
+        for (const id of await readdir(storeRoot)) {
+          expect((await readdir(join(storeRoot, id))).filter(name => name.endsWith(".tmp"))).toEqual([]);
+        }
+      } finally {
+        release.resolve();
+        await pending;
+        commitIO.intercept = undefined;
+        await cleanup();
+      }
+    },
+  );
+}
+
+it.each(["removal-failed", "restoration-failed", "commit-first"] as const)(
+  "handles capacity arbitration outcome: %s", async (outcome) => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    const entered = deferred();
+    const release = deferred();
+    const abort = new AbortController();
+    let pending: Promise<unknown> | undefined;
+    let active = false;
+    const store = createStore(storeRoot, {
+      afterCommit: () => { if (active && outcome === "commit-first") abort.abort(); },
+    });
+    try {
+      const entry = await fixture();
+      for (let i = 0; i < MAX_STORED; i++) {
+        await store.saveSkill({ ...entry, id: `retained-${i}`, createdAt: new Date(i * 1000).toISOString() });
+      }
+      const victimDir = join(storeRoot, "retained-0");
+      const victimPath = join(victimDir, "skill.json");
+      const victimBytes = await readFile(victimPath);
+      const original = await store.listSkills();
+      active = true;
+      commitIO.intercept = async (path, perform) => {
+        if (path === victimPath) {
+          entered.resolve();
+          await release.promise;
+          if (outcome === "removal-failed") throw new Error("injected removal failure");
+        } else if (outcome === "restoration-failed" && path.startsWith(`${victimPath}.`)) {
+          throw new Error("injected restoration failure");
+        }
+        await perform();
+      };
+      pending = store.saveSkill(entry, { signal: abort.signal }).then(
+        () => ({ committed: true }), err => ({ error: err }),
+      );
+      await entered.promise;
+      if (outcome !== "commit-first") abort.abort();
+      release.resolve();
+      const result = await pending;
+      const restarted = createStore(storeRoot);
+      expect(await restarted.listSkills()).toHaveLength(MAX_STORED);
+      if (outcome === "removal-failed") {
+        expect(result).toMatchObject({ error: { message: "injected removal failure" } });
+        expect(await restarted.listSkills()).toEqual(original);
+        expect(await readFile(victimPath)).toEqual(victimBytes);
+      } else if (outcome === "restoration-failed") {
+        expect(result).toMatchObject({ error: { message: "injected restoration failure" } });
+        expect(await restarted.getSkill("incoming")).toBeDefined();
+        expect(await restarted.getSkill("retained-0")).toBeUndefined();
+        const staged = await readdir(victimDir);
+        expect(staged).toHaveLength(1);
+        expect(staged[0]).toMatch(/^skill\.json\..*\.tmp$/);
+        expect(await readFile(join(victimDir, staged[0]!))).toEqual(victimBytes);
+      } else {
+        expect(result).toEqual({ committed: true });
+        expect(abort.signal.aborted).toBe(true);
+        expect(await restarted.getSkill("incoming")).toBeDefined();
+        expect(await restarted.getSkill("retained-0")).toBeUndefined();
+      }
+    } finally {
+      release.resolve();
+      await pending;
+      commitIO.intercept = undefined;
+      await cleanup();
+    }
+  },
+);

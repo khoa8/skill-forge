@@ -200,7 +200,16 @@ async function writeAtomicSkillRecord(
       await testHooks.beforeRename(id, tmp);
     }
     checkCancellation(signal);
-    await rename(tmp, join(dir, "skill.json"));
+    const finalPath = join(dir, "skill.json");
+    await rename(tmp, finalPath);
+    // rename cannot be aborted. Arbitrate in this continuation, before any
+    // further await: cancellation observed while it was pending wins. Only
+    // generation supplies a signal (and its ID was absent under the lock).
+    if (signal?.aborted) {
+      await unlink(finalPath);
+      checkCancellation(signal);
+    }
+    // Successful completion observed without cancellation is the logical commit.
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
     throw err;
@@ -249,7 +258,7 @@ export function createStore(
         const persist = () => writeAtomicSkillRecord(dir, payload, entry.id, testHooks, options.signal);
         if (ids.length < MAX_STORED) {
           await persist();
-          // Below capacity, successful rename is the commit; never check abort after it.
+          // persist has arbitrated rename completion; later abort cannot reverse commit.
           await testHooks?.afterCommit?.(entry.id);
           return;
         }
@@ -258,21 +267,30 @@ export function createStore(
         // Lock order is capacity → incoming ID → victim ID. Mutations never
         // acquire capacity. Public reads wait until this transition completes.
         await lock.withLock(oldest, async () => {
+          const victimPath = join(skillDir(oldest), "skill.json");
+          const stagedVictim = join(skillDir(oldest), `skill.json.${randomUUID()}.tmp`);
+          let victimRemoved = false;
           try {
             // Finish all incoming I/O before touching the retained record.
             await persist();
             await testHooks?.beforeEvict?.(oldest);
             checkCancellation(options.signal);
-            // Removing ONE record is atomic; recursive deletion could partly
-            // destroy the victim before reporting failure.
-            await unlink(join(skillDir(oldest), "skill.json"));
+            // Remove the final pathname atomically but retain the exact bytes
+            // until completion is arbitrated. Unlike unlink, rename is reversible.
+            await rename(victimPath, stagedVictim);
+            victimRemoved = true;
+            checkCancellation(options.signal);
+            // No await between observing success, checking abort, and commit.
           } catch (err) {
+            // Restore before discarding incoming. If restoration itself fails,
+            // preserve both incoming and the staged evidence and surface I/O failure.
+            if (victimRemoved) await rename(stagedVictim, victimPath);
             // Roll back only the incoming final record, preserving unknown files.
             await rm(join(dir, "skill.json"), { force: true });
             await rmdir(dir).catch(() => {});
             throw err;
           }
-          // Successful victim unlink is the capacity transition commit.
+          // Victim removal observed without cancellation commits the transition.
           await testHooks?.afterCommit?.(entry.id);
           // The record transition is committed. Empty directory cleanup is
           // not part of save success and cannot invalidate the new record.
