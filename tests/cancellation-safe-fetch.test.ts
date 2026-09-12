@@ -89,6 +89,8 @@ describe("T-01: safeFetch requestFnOverride test seam", () => {
 
 describe("F-05: Caller abort vs deadline timeout differentiation", () => {
   it("fetchUrlSource throws url_aborted on caller abort and url_deadline_exceeded on timeout", async () => {
+    const lookupImpl = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+    const hanging = vi.fn(mockHangingFetch);
     // 1. Caller abort
     const abortCtrl = new AbortController();
     abortCtrl.abort();
@@ -96,17 +98,23 @@ describe("F-05: Caller abort vs deadline timeout differentiation", () => {
       fetchUrlSource("https://example.com/docs", {
         signal: abortCtrl.signal,
         timeoutMs: 10000,
-        fetchImpl: mockHangingFetch,
+        fetchImpl: hanging,
+        lookupImpl,
       }),
     ).rejects.toMatchObject({ code: "url_aborted" });
+
+    expect(hanging).not.toHaveBeenCalled();
 
     // 2. Deadline exceeded (no caller abort)
     await expect(
       fetchUrlSource("https://example.com/docs", {
         timeoutMs: 50,
-        fetchImpl: mockHangingFetch,
+        fetchImpl: hanging,
+        lookupImpl,
       }),
     ).rejects.toMatchObject({ code: "url_deadline_exceeded" });
+    expect(hanging).toHaveBeenCalledOnce();
+    expect(lookupImpl).toHaveBeenCalledWith("example.com", { all: true, verbatim: true });
   });
 
   it("fetchGithubSource throws github_aborted on caller abort and github_deadline_exceeded on timeout", async () => {

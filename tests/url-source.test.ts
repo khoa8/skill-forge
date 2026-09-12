@@ -244,3 +244,40 @@ describe("fetchUrlSource end-to-end (injected fetch)", () => {
     expect(result.notes.some((n) => n.includes("HTML converted"))).toBe(false);
   });
 });
+
+describe("consistent URL IP literals", () => {
+  it.each(["[2606:4700::1111]", "8.8.8.8", "example.com"])("routes allowed %s through validated transport", async (host) => {
+    const { assertPublicDns } = await import("../src/core/sources/safe-fetch.js");
+    const lookups: string[] = [];
+    const lookupImpl: LookupAllFn = async (hostname) => {
+      lookups.push(hostname);
+      expect(hostname).toBe("example.com");
+      return PUBLIC;
+    };
+    let reached = false;
+    const result = await fetchUrlSource(`https://${host}/docs`, {
+      lookupImpl,
+      safeFetchImpl: async (input, init, lookup) => {
+        reached = true;
+        const records = await assertPublicDns(new URL(String(input)).hostname, lookup ?? lookupImpl, init?.signal ?? undefined);
+        expect(records).toEqual(host === "[2606:4700::1111]" ? [{ address: "2606:4700::1111", family: 6 }] : host === "8.8.8.8" ? [{ address: "8.8.8.8", family: 4 }] : PUBLIC);
+        const response = htmlResponse("<h1>Guide</h1><p>Read the documented settings before using this service.</p>");
+        return { ok: response.ok, status: response.status, statusText: response.statusText,
+          getHeader: (name: string) => response.headers.get(name), body: response.body!,
+          cancel: () => { void response.body?.cancel(); } };
+      },
+    });
+    expect(reached).toBe(true);
+    expect(result.input.content).toContain("documented settings");
+    expect(lookups).toEqual(host === "example.com" ? [host, host] : []);
+  });
+  it.each(["[::1]", "[fd00::1]", "[fe80::1]", "[2001:db8::1]", "127.0.0.1"])("rejects non-public %s before DNS or transport", async (host) => {
+    const { assertPublicDns } = await import("../src/core/sources/safe-fetch.js");
+    const lookupImpl: LookupAllFn = async () => { throw new Error("DNS must not run"); };
+    await expect(assertPublicDns(host, lookupImpl)).rejects.toMatchObject({ code: "url_private_host" });
+    await expect(fetchUrlSource(`https://${host}/docs`, {
+      lookupImpl,
+      fetchImpl: async () => { throw new Error("transport must not run"); },
+    })).rejects.toMatchObject({ code: "url_private_host" });
+  });
+});

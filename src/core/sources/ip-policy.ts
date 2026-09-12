@@ -215,3 +215,8 @@ export function isAllowedUrlDestinationIp(ip: string): boolean {
   const v4 = parseIPv4(ip);
   return v4 === null ? false : !ipv4Blocked(v4);
 }
+
+/** WHATWG URL.hostname retains IPv6 brackets; IP classification takes bare literals. */
+export function normalizeUrlHostname(hostname: string): string {
+  return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+}

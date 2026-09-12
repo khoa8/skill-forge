@@ -24,7 +24,7 @@ import http from "node:http";
 import https from "node:https";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { isAllowedUrlDestinationIp } from "./ip-policy.js";
+import { isAllowedUrlDestinationIp, normalizeUrlHostname } from "./ip-policy.js";
 import type { LookupAllFn } from "./url.js";
 
 export class SafeFetchError extends Error {
@@ -70,17 +70,16 @@ export async function assertPublicDns(
   lookupImpl: LookupAllFn,
   signal?: AbortSignal,
 ): Promise<PinnedAddress[]> {
-  if (isIP(hostname) === 0 && hostname.startsWith("[") && hostname.endsWith("]")) {
-    const literal = hostname.slice(1, -1);
-    if (isIP(literal)) {
-      if (!isAllowedUrlDestinationIp(literal)) {
-        throw new SafeFetchError(
-          `Refusing to fetch "${hostname}": not a permitted public destination.`,
-          "url_private_host",
-        );
-      }
-      return [{ address: literal, family: isIP(literal) }];
+  const literal = normalizeUrlHostname(hostname);
+  const family = isIP(literal);
+  if (family) {
+    if (!isAllowedUrlDestinationIp(literal)) {
+      throw new SafeFetchError(
+        `Refusing to fetch "${hostname}": not a permitted public destination.`,
+        "url_private_host",
+      );
     }
+    return [{ address: literal, family }];
   }
   const resolve = lookupImpl(hostname, { all: true, verbatim: true }).then(
     (records) => records,
