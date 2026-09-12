@@ -576,3 +576,25 @@ describe("codebase ingestion safety", () => {
     }
   });
 });
+
+describe("untrusted dependency lookup keys", () => {
+  it("keeps inherited-looking keys inert through the codebase adapter", async () => {
+    const deps = Object.fromEntries(["constructor", "prototype", "__proto__", "toString", "valueOf"].map((key) => [key, "1.0.0"]));
+    const raw = { "package.json": JSON.stringify({ dependencies: { ...deps, react: "1.0.0" }, devDependencies: { ...deps, vitest: "1.0.0" } }) };
+    const result = await fetchGithubCodebaseSource("https://github.com/owner/repo", {
+      fetchImpl: codebaseFetch({ raw, tree: { truncated: false, tree: [{ path: "package.json", type: "blob", size: raw["package.json"].length }] } }),
+    });
+    expect(result.analysis.frameworks).toEqual([{ name: "React", evidence: ["package.json dependencies: react"] }]);
+    expect(result.analysis.testing.frameworks).toEqual(["vitest"]);
+  });
+  it("keeps pyproject lookups safe and malformed package data graceful", async () => {
+    const { frameworksFromPyproject, commandsFromPackageJson } = await import("../src/core/codebase/extract.js");
+    const parsed = frameworksFromPyproject({ path: "pyproject.toml", content: 'dependencies = ["constructor", "prototype", "__proto__", "toString", "valueOf", "fastapi", "pytest"]' });
+    expect(parsed.frameworks).toEqual([{ name: "FastAPI", evidence: ["pyproject.toml dependencies: fastapi"] }]);
+    expect(parsed.testing).toEqual(["pytest"]);
+    const malformed = commandsFromPackageJson([{ path: "package.json", content: "{ invalid" }]);
+    expect(malformed.frameworks).toEqual([]);
+    expect(malformed.testing).toEqual([]);
+    expect(malformed.malformedNotes.length).toBeGreaterThan(0);
+  });
+});

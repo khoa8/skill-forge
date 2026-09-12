@@ -1436,3 +1436,16 @@ describe("conventionsFromInstructionFiles: observational extraction without clas
     ]);
   });
 });
+
+describe("observed CI command purposes", () => {
+  it.each([
+    ["npm ci", "install"], ["npm install", "install"], ["npm test", "test"], ["npm run test", "test"],
+    ["npm run test:unit", "test"], ["npm run build", "build"], ["npm run lint", "lint"],
+    ["npm run typecheck", "typecheck"], ["npm run format", "format"], ["npm run custom", "other"],
+    ["npm run testing-custom", "other"], ["npm run buildish", "other"], ["cargo test", "test"], ["go build ./...", "build"],
+  ])("classifies %s as %s without changing its text", (command, purpose) => {
+    const commands = commandsFromCiWorkflows([{ path: ".github/workflows/ci.yml", content: `jobs:\n  checks:\n    steps:\n      - run: ${JSON.stringify(command)}\n` }]);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({ kind: "ci-run", command, purpose });
+  });
+});

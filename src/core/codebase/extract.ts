@@ -27,7 +27,7 @@ export interface FetchedFile {
 
 /** Framework hints worth surfacing when a dependency is observed. Small,
  * curated, and only ever *claimed because the dependency is present*. */
-const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
+const FRAMEWORK_DEPENDENCIES = new Map<string, string>(Object.entries({
   react: "React", vue: "Vue", "next": "Next.js", svelte: "Svelte",
   express: "Express", fastify: "Fastify", "@nestjs/core": "NestJS", koa: "Koa", hono: "Hono",
   django: "Django", flask: "Flask", fastapi: "FastAPI",
@@ -35,13 +35,13 @@ const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
   rails: "Rails", "spring-boot": "Spring Boot",
   tailwindcss: "Tailwind CSS", vite: "Vite", webpack: "webpack", esbuild: "esbuild",
   typescript: "TypeScript",
-};
+}));
 
-const TEST_DEPENDENCIES: Record<string, string> = {
+const TEST_DEPENDENCIES = new Map<string, string>(Object.entries({
   vitest: "vitest", jest: "Jest", mocha: "Mocha", ava: "AVA",
   "@vue/test-utils": "Vue Test Utils", "testing-library": "Testing Library",
   pytest: "pytest", "nose": "nose",
-};
+}));
 
 function firstLine(text: string): string {
   return text.split("\n")[0]!.trim().slice(0, 300);
@@ -177,12 +177,12 @@ export function commandsFromPackageJson(
       const deps = raw[depField];
       if (deps === null || typeof deps !== "object" || Array.isArray(deps)) continue;
       for (const dep of Object.keys(deps as Record<string, unknown>)) {
-        const fw = FRAMEWORK_DEPENDENCIES[dep] ?? FRAMEWORK_DEPENDENCIES[dep.split("/").pop()!];
+        const fw = FRAMEWORK_DEPENDENCIES.get(dep) ?? FRAMEWORK_DEPENDENCIES.get(dep.split("/").pop()!);
         if (fw) {
           const ev = `${file.path} ${depField}: ${dep}`.slice(0, 300);
           frameworkEvidence.set(fw, [...(frameworkEvidence.get(fw) ?? []), ev].slice(0, 8));
         }
-        for (const [testDep, fwName] of Object.entries(TEST_DEPENDENCIES)) {
+        for (const [testDep, fwName] of TEST_DEPENDENCIES) {
           if (dep === testDep || (testDep === "testing-library" && dep.startsWith("@testing-library/"))) {
             testingFrameworks.add(fwName.slice(0, 80));
           }
@@ -220,12 +220,13 @@ export function frameworksFromPyproject(file: FetchedFile): { frameworks: Reposi
         .split(/[;\[\]><=~!]/)[0]!
         .trim()
         .toLowerCase();
-      const fw = FRAMEWORK_DEPENDENCIES[name];
+      const fw = FRAMEWORK_DEPENDENCIES.get(name);
       if (fw) {
         const ev = `${file.path} dependencies: ${name}`.slice(0, 300);
         frameworks.set(fw, [...(frameworks.get(fw) ?? []), ev].slice(0, 8));
       }
-      if (TEST_DEPENDENCIES[name]) testing.add(TEST_DEPENDENCIES[name].slice(0, 80));
+      const test = TEST_DEPENDENCIES.get(name);
+      if (test) testing.add(test.slice(0, 80));
     }
   }
   if (/\[tool\.pytest[^\]]*\]/.test(file.content)) testing.add("pytest");
@@ -350,11 +351,11 @@ function collectRunSteps(node: unknown, out: CiRunStep[], file: string, workflow
 
 const CI_COMMAND_RULES: Array<[RegExp, RepositoryCommand["purpose"]]> = [
   [/^(npm (ci|install)|yarn(\s+install)?|pnpm(\s+i| install)|bun install)/, "install"],
-  [/(^|\s)(npm (run |test)|yarn test|pnpm (run )?test|pytest|cargo test|go test|make test|gradle test|mvn test)/, "test"],
-  [/(npm run build|cargo build|go build|make build|gradle build|mvn (package|verify))/, "build"],
-  [/(npm run lint|eslint|stylelint|ruff|flake8|pylint|golangci|clippy)/, "lint"],
-  [/(tsc( --noEmit)?|mypy|pyright|vue-tsc)/, "typecheck"],
-  [/(prettier|cargo fmt|gofmt|black|ruff format)/, "format"],
+  [/(^|\s)(npm (run test(?=[:\s]|$)|test(?=\s|$))|yarn test|pnpm (run )?test|pytest|cargo test|go test|make test|gradle test|mvn test)/, "test"],
+  [/(npm run build(?=[:\s]|$)|cargo build|go build|make build|gradle build|mvn (package|verify))/, "build"],
+  [/(npm run lint(?=[:\s]|$)|eslint|stylelint|ruff|flake8|pylint|golangci|clippy)/, "lint"],
+  [/(npm run typecheck(?=[:\s]|$)|tsc( --noEmit)?|mypy|pyright|vue-tsc)/, "typecheck"],
+  [/(npm run format(?=[:\s]|$)|prettier|cargo fmt|gofmt|black|ruff format)/, "format"],
 ];
 
 /**
