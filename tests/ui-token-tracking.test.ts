@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
+import { isEditablePath } from "../src/server/store.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -20,35 +21,54 @@ function harness() {
     dataset: Record<string, string> = {};
     style = {};
     className = "";
-    classList = { add: vi.fn(), remove: vi.fn(), toggle: vi.fn() };
+    classList: { contains(name: string): boolean; add(...names: string[]): void; remove(...names: string[]): void; toggle(name: string, force?: boolean): void } = {
+      contains: (name: string) => this.className.split(/\s+/).includes(name),
+      add: (...names: string[]) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(" "); },
+      remove: (...names: string[]) => { this.className = this.className.split(/\s+/).filter((n) => !names.includes(n)).join(" "); },
+      toggle: (name: string, force?: boolean) => { if (force ?? !this.classList.contains(name)) this.classList.add(name); else this.classList.remove(name); },
+    };
+    listeners = new Map<string, () => unknown>();
     set id(id: string) { nodes.set(`#${id}`, this); }
     set innerHTML(_value: string) { this.children = []; this.textContent = ""; }
     append(...children: any[]) { this.children.push(...children); }
     after() {}
     remove() {}
-    addEventListener() {}
+    addEventListener(name: string, fn: () => unknown) { this.listeners.set(name, fn); }
     setAttribute() {}
     focus() {}
     showModal() {}
     close() {}
-    click() {}
+    click() { if (!this.disabled) return this.listeners.get("click")?.(); }
     scrollIntoView() {}
+  }
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+  for (const tag of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
+    const el = new Element();
+    el.className = tag[0].match(/class="([^"]*)"/)?.[1] ?? "";
+    nodes.set(`#${tag[1]}`, el);
+  }
+  for (const tag of html.matchAll(/<[^>]+data-stage="([^"]+)"[^>]*>/g)) {
+    const el = new Element();
+    el.className = tag[0].match(/class="([^"]*)"/)?.[1] ?? "";
+    nodes.set(`.step[data-stage="${tag[1]}"]`, el);
   }
   const document = {
     querySelector: (selector: string) => {
       if (!nodes.has(selector) && !["#revalidate-btn", "#validation-request-status"].includes(selector)) nodes.set(selector, new Element());
       return nodes.get(selector) ?? null;
     },
-    querySelectorAll: () => [],
+    querySelectorAll: (selector: string) => selector === "#file-list li" ? nodes.get("#file-list")?.children ?? [] : [],
     createElement: () => new Element(),
+    createTextNode: (text: string) => Object.assign(new Element(), { textContent: text }),
     body: new Element(),
   };
   const fetch = vi.fn();
-  const url = { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() };
+  const url = Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
   const context: any = { document, fetch, URL: url, console, setTimeout: vi.fn(), TextDecoder, Blob };
   const source = readFileSync(new URL("../web/app.js", import.meta.url), "utf8").replace(/\ninit\(\);\s*$/, "");
-  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport };", context);
+  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton };", context);
   const ui = context.ui;
+  ui.bindEvents();
   const original = { executed: true, passed: true, checks: [], warningCount: 0, errorCount: 0 };
   ui.state.skillId = "skill-a";
   ui.state.skill = { files: [] };
@@ -191,5 +211,98 @@ describe("UI request ownership and errors", () => {
     await first;
     expect(h.url.createObjectURL).not.toHaveBeenCalled();
     expect(h.nodes.get("#export-note").textContent).toContain("Export failed: offline");
+  });
+});
+
+describe("initialized preview controls and truthful steps", () => {
+  const file = { path: "SKILL.md", content: "Original instructions", purpose: "instructions" };
+  const step = (h: ReturnType<typeof harness>, name: string) => h.nodes.get(`.step[data-stage="${name}"]`).classList;
+  it("reveals the real Edit control according to store policy and restores preview on cancel/save/switch", async () => {
+    const h = harness();
+    const edit = h.nodes.get("#file-edit-btn");
+    expect(edit.classList.contains("hidden")).toBe(true);
+    const files = [file, ...["references/setup.md", "workflows/setup.md", "examples/setup.sh", "evals/README.md", "evals/evals.json", "manifest.json"].map((path) => ({ ...file, path }))];
+    h.ui.state.skill = { files };
+    for (const selected of files) {
+      h.ui.showFile(h.ui.state.skill, selected.path);
+      expect(edit.classList.contains("hidden")).toBe(!isEditablePath(selected.path));
+    }
+    h.ui.showFile(h.ui.state.skill, file.path);
+    edit.click();
+    expect(h.ui.state.editingPath).toBe(file.path);
+    expect(edit.classList.contains("hidden")).toBe(true);
+    expect(h.nodes.get("#file-edit-box").classList.contains("hidden")).toBe(false);
+    h.nodes.get("#file-edit-cancel").click();
+    expect(h.ui.state.editingPath).toBeNull();
+    expect(edit.classList.contains("hidden")).toBe(false);
+    edit.click();
+    h.ui.showFile(h.ui.state.skill, "manifest.json");
+    expect(h.ui.state.editingPath).toBeNull();
+    expect(edit.classList.contains("hidden")).toBe(true);
+    expect(h.nodes.get("#file-edit-box").classList.contains("hidden")).toBe(true);
+    h.ui.showFile(h.ui.state.skill, file.path);
+    edit.click();
+    const updated = { files: [{ ...file, content: "Edited instructions", userEdited: true }] };
+    const failed = { ...h.original, passed: false, errorCount: 1 };
+    h.fetch.mockResolvedValueOnce(response({ skill: updated, validation: failed }));
+    await h.nodes.get("#file-edit-save").click();
+    expect(h.ui.state.editingPath).toBeNull();
+    expect(edit.classList.contains("hidden")).toBe(false);
+    expect(h.nodes.get("#file-view-content").textContent).toBe("Edited instructions");
+    expect(step(h, "validate").contains("error")).toBe(true);
+    expect(step(h, "export").contains("active")).toBe(false);
+  });
+  it("uses validation outcomes rather than generic stage completion", async () => {
+    const h = harness();
+    h.ui.handlePipelineEvent({ type: "stage", stage: "validate", status: "start" });
+    expect(step(h, "validate").contains("active")).toBe(true);
+    h.ui.handlePipelineEvent({ type: "stage", stage: "validate", status: "done" });
+    expect(step(h, "validate").contains("done")).toBe(false);
+    for (const [executed, passed, expected] of [[true, true, "done"], [true, false, "error"], [false, false, "idle"]] as const) {
+      h.fetch.mockResolvedValueOnce(response({ source: { notes: [] } }));
+      h.ui.handlePipelineEvent({ type: "result", skill: { id: "skill-a", files: [file], meta: { displayName: "Test", generator: "mock", gaps: [] } }, validation: { ...h.original, executed, passed } });
+      expect(step(h, "validate").contains("done")).toBe(expected === "done");
+      expect(step(h, "validate").contains("error")).toBe(expected === "error");
+      expect(step(h, "export").contains("active")).toBe(false);
+      await decoded();
+    }
+    const pending = deferred<any>();
+    h.fetch.mockReturnValueOnce(pending.promise);
+    const validation = h.ui.revalidate();
+    expect(step(h, "validate").contains("active")).toBe(true);
+    pending.resolve(response({ validation: { ...h.original, passed: false } }));
+    await validation;
+    expect(step(h, "validate").contains("error")).toBe(true);
+    h.fetch.mockResolvedValueOnce(response({ validation: h.original }));
+    await h.ui.revalidate();
+    expect(step(h, "validate").contains("done")).toBe(true);
+    h.fetch.mockRejectedValueOnce(new Error("offline"));
+    await h.ui.revalidate();
+    expect(step(h, "validate").contains("error")).toBe(true);
+  });
+  it("marks export active only during its operation, then done or error", async () => {
+    const h = harness();
+    const pending = deferred<any>();
+    h.fetch.mockReturnValueOnce(pending.promise);
+    const exporting = h.ui.runExport("generic");
+    expect(step(h, "export").contains("active")).toBe(true);
+    pending.resolve({ ok: true, blob: async () => new Blob(["zip"]), headers: new Headers() });
+    await exporting;
+    expect(step(h, "export").contains("done")).toBe(true);
+    h.fetch.mockResolvedValueOnce(response({ error: "blocked", validation: { ...h.original, passed: false } }, false));
+    await h.ui.runExport("generic");
+    expect(step(h, "export").contains("error")).toBe(true);
+    expect(step(h, "validate").contains("done")).toBe(false);
+  });
+  it.each([
+    ["https://[2606:4700::1111]/docs", true], ["http://[2606:4700::1111]", true],
+    ["https://example.com/docs", true], ["http://8.8.8.8/docs", true],
+    ["file:///docs", false], ["not a URL", false], ["https://[broken]", false], ["https://user:pass@example.com", false],
+  ])("URL eligibility for %s is %s", (url, allowed) => {
+    const h = harness();
+    h.ui.state.activeTab = "url";
+    h.nodes.get("#source-url").value = url;
+    h.ui.updateGenerateButton();
+    expect(h.nodes.get("#generate-btn").disabled).toBe(!allowed);
   });
 });

@@ -141,7 +141,11 @@ function updateGenerateButton() {
     btn.textContent = len < 40 ? `Paste at least 40 characters (${len} so far)` : "Generate skill";
   } else if (state.activeTab === "url") {
     const url = $("#source-url").value.trim();
-    const ok = /^https?:\/\/.+\..+/.test(url);
+    let ok = false;
+    try {
+      const parsed = new URL(url);
+      ok = ["http:", "https:"].includes(parsed.protocol) && !!parsed.hostname && !parsed.username && !parsed.password;
+    } catch { /* invalid URL */ }
     btn.disabled = !ok;
     btn.textContent = ok ? "Generate skill" : "Enter an http(s) URL";
   } else if (state.activeTab === "github") {
@@ -321,7 +325,8 @@ function handlePipelineEvent(ev) {
       setStep(step, "active");
       logProgress(LOG_LABEL[ev.stage] ?? ev.stage, "running…", null, false);
     } else if (ev.status === "done") {
-      setStep(step, "done");
+      // Validation completion is not proof of a passing report.
+      if (step !== "validate") setStep(step, "done");
       logProgress(LOG_LABEL[ev.stage] ?? ev.stage, ev.detail ?? "done", ev.ms, false);
     }
   } else if (ev.type === "source-note") {
@@ -335,7 +340,7 @@ function handlePipelineEvent(ev) {
     showFatal(`${ev.message} (stage: ${ev.stage}, code: ${ev.code})`);
   } else if (ev.type === "result") {
     setStep("preview", "done");
-    setStep("export", "active");
+    setStep("export", null);
     renderResults(ev.skill, ev.validation);
   }
 }
@@ -452,6 +457,7 @@ function addBadge(parent, text, kind) {
 }
 
 function renderValidation(validation, fresh) {
+  setStep("validate", !validation.executed ? null : validation.passed ? "done" : "error");
   const banner = $("#validation-banner");
   banner.className = "validation-banner";
   banner.innerHTML = "";
@@ -535,6 +541,7 @@ async function revalidate() {
   const revalidateBtn = $("#revalidate-btn");
   if (revalidateBtn) revalidateBtn.disabled = true;
   $("#validation-request-status").textContent = "Revalidating…";
+  setStep("validate", "active");
   try {
     const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/validate`, {
       method: "POST",
@@ -552,6 +559,7 @@ async function revalidate() {
     }
   } catch (err) {
     if (state.skillId !== skillId || state.validateSeq !== token) return;
+    setStep("validate", "error");
     $("#validation-request-status").textContent = `Revalidation failed: ${err.message ?? err}. Last validation result retained.`;
   } finally {
     if (state.skillId === skillId && state.validateSeq === token && revalidateBtn) {
@@ -596,6 +604,7 @@ function showFile(skill, path) {
   });
   cancelEdit();
   $("#file-view-path").textContent = file.path;
+  updateEditControl(file);
   const lines = file.content.split("\n").length;
   $("#file-view-meta").textContent =
     `${lines} lines · ${new Blob([file.content]).size} bytes` + (file.userEdited ? " · user-edited" : "");
@@ -634,9 +643,16 @@ function showFile(skill, path) {
 // Edit generated files before export
 // ---------------------------------------------------------------------------
 
+// Mirrors the store isEditablePath policy; a parity regression covers the file inventory.
+function updateEditControl(file = state.skill?.files.find((f) => f.path === $("#file-view-path").textContent)) {
+  $("#file-edit-btn").classList.toggle("hidden", !file || file.path === "manifest.json" || state.editingPath !== null);
+}
+
 function startEdit(file) {
+  if (file.path === "manifest.json") return;
   state.editSeq++;
   state.editingPath = file.path;
+  updateEditControl(file);
   $("#file-edit-cancel").disabled = false;
   $("#file-view-content").classList.add("hidden");
   $("#file-edit-box").classList.remove("hidden");
@@ -651,6 +667,7 @@ function startEdit(file) {
 function cancelEdit() {
   state.editSeq++;
   state.editingPath = null;
+  updateEditControl();
   const box = $("#file-edit-box");
   if (box) {
     box.classList.add("hidden");
@@ -703,6 +720,7 @@ async function saveEdit() {
     // Pending validation/downloads refer to the package before this edit.
     state.validateSeq++;
     state.exportSeq++;
+    setStep("export", null);
     state.skill = data.skill;
     state.validation = data.validation;
     cancelEdit();
@@ -810,6 +828,7 @@ async function runExport(target) {
   if (!state.skillId) return;
   const skillId = state.skillId;
   const token = ++state.exportSeq;
+  setStep("export", "active");
   const exportButtons = document.querySelectorAll(".export-card button");
   exportButtons.forEach((btn) => {
     btn.disabled = true;
@@ -838,6 +857,7 @@ async function runExport(target) {
         }
       } catch { /* keep default message */ }
       if (state.skillId !== skillId || state.exportSeq !== token) return;
+      setStep("export", "error");
       note.textContent = message;
       return;
     }
@@ -859,6 +879,7 @@ async function runExport(target) {
     note.textContent = `Downloaded ${fileName} (${(blob.size / 1024).toFixed(1)} KB, ${entries ?? "?"} entries). Unzip it and drop the folder into your agent's skills directory.`;
   } catch (err) {
     if (state.skillId !== skillId || state.exportSeq !== token) return;
+    setStep("export", "error");
     note.textContent = `Export failed: ${err.message ?? err}`;
   } finally {
     if (state.skillId === skillId && state.exportSeq === token) {
