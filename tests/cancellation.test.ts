@@ -207,3 +207,53 @@ describe("HTTP disconnect cancels the in-flight provider request end to end", ()
     }
   });
 });
+
+it("disconnect during persistence aborts before rename and keeps the server healthy", async () => {
+  const { createStore } = await import("../src/server/store.js");
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  let reached!: () => void;
+  const paused = new Promise<void>(resolve => { reached = resolve; });
+  let observed!: () => void;
+  const aborted = new Promise<void>(resolve => { observed = resolve; });
+  let finished!: () => void;
+  const settled = new Promise<void>(resolve => { finished = resolve; });
+  let signal: AbortSignal | undefined;
+  let failure: unknown;
+  const store = createStore(storeRoot, {
+    beforeRename: async () => { reached(); await aborted; },
+  });
+  const app = createApp({ provider: "mock", hasApiKey: false }, {
+    storeRoot,
+    saveSkill: async (entry, options) => {
+      signal = options?.signal;
+      signal?.addEventListener("abort", observed, { once: true });
+      try { await store.saveSkill(entry, options); }
+      catch (err) { failure = err; throw err; }
+      finally { finished(); }
+    },
+  });
+  const server = createServer(app);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  let raw = "";
+  const req = httpRequest({ host: "127.0.0.1", port: (server.address() as AddressInfo).port, method: "POST", path: "/api/generate", headers: { "content-type": "application/json" } }, res => {
+    res.on("data", chunk => { raw += chunk.toString(); });
+  });
+  req.on("error", () => {});
+  try {
+    req.end(JSON.stringify({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "paused-save" }));
+    await paused;
+    req.destroy();
+    await aborted;
+    await settled;
+    expect(signal?.aborted).toBe(true);
+    expect(failure).toMatchObject({ code: "store_aborted" });
+    expect(await createStore(storeRoot).getSkill("paused-save")).toBeUndefined();
+    expect(await readdir(`${storeRoot}/paused-save`)).toEqual([]);
+    expect(raw).not.toContain('"type":"result"');
+    await request(app).get("/api/health").expect(200);
+  } finally {
+    req.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await cleanup();
+  }
+});

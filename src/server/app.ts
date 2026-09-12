@@ -24,6 +24,8 @@ import {
   getSkill as loadSkill,
   EditError,
   SkillIdConflictError,
+  StoreReadError,
+  type SkillStore,
   toResponse,
   normalizeStoredSource,
   SourceRenormalizationError,
@@ -152,6 +154,7 @@ export interface AppConfig {
 export interface AppOverrides {
   storeRoot?: string;
   loadSkill?: typeof loadSkill;
+  saveSkill?: SkillStore["saveSkill"];
 }
 
 /** True when the bind host only exposes the server to the local machine. */
@@ -162,7 +165,7 @@ export function isLoopbackHost(host: string): boolean {
 
 export function createApp(config: AppConfig, overrides: AppOverrides = {}): Express {
   const store = overrides.storeRoot ? createStore(overrides.storeRoot) : getDefaultStore();
-  const saveSkillImpl = store.saveSkill;
+  const saveSkillImpl = overrides.saveSkill ?? store.saveSkill;
   const loadSkillImpl = overrides.loadSkill ?? store.getSkill;
   const listSkillsImpl = store.listSkills;
   const revalidateSkillImpl = store.revalidateSkill;
@@ -225,8 +228,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     let clientGone = false;
     res.on("close", () => {
       clientGone = true;
-      // Aborting also guarantees no unfinished result is persisted: the
-      // pipeline surfaces cancellation instead of yielding a result.
+      // Persistence observes cancellation up to its logical commit boundary.
       cancellation.abort();
     });
 
@@ -387,26 +389,32 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         )) {
           if (clientGone || res.writableEnded) return;
           if (event.type === "result") {
-            await saveSkillImpl({
-              id: event.skill.id,
-              skill: event.skill,
-              analysis: {
-                title: event.analysis.title,
-                sectionCount: event.analysis.sections.length,
-                procedureCount: event.analysis.procedures.length,
-                commandCount: event.analysis.commands.length,
-                codeBlockCount: event.analysis.codeBlocks.length,
-                lineCount: event.analysis.lineCount,
-              },
-              source: { name, type: pipelineSourceType, text: content, notes: adapterNotes, ...(repository ? { repository } : {}) },
-              validation: event.validation,
-              createdAt: new Date().toISOString(),
-            });
+            try {
+              await saveSkillImpl({
+                id: event.skill.id,
+                skill: event.skill,
+                analysis: {
+                  title: event.analysis.title,
+                  sectionCount: event.analysis.sections.length,
+                  procedureCount: event.analysis.procedures.length,
+                  commandCount: event.analysis.commands.length,
+                  codeBlockCount: event.analysis.codeBlocks.length,
+                  lineCount: event.analysis.lineCount,
+                },
+                source: { name, type: pipelineSourceType, text: content, notes: adapterNotes, ...(repository ? { repository } : {}) },
+                validation: event.validation,
+                createdAt: new Date().toISOString(),
+              }, { signal: cancellation.signal });
+            } catch (err) {
+              if (err instanceof StoreReadError || err instanceof SkillIdConflictError || cancellation.signal.aborted) throw err;
+              throw Object.assign(new Error("Skill persistence failed."), { code: "store_write_failed" });
+            }
           }
+          if (clientGone || res.writableEnded) return;
           res.write(JSON.stringify(event) + "\n");
         }
       } catch (err) {
-        if (!clientGone) {
+        if (!clientGone && !res.writableEnded) {
           const code =
             err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string"
               ? (err as { code: string }).code
@@ -565,7 +573,8 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         });
         return;
       }
-      res.status(500).json({ error: err instanceof Error ? err.message : String(err), code: "edit_failed" });
+      if (err instanceof StoreReadError) throw err;
+      res.status(500).json({ error: "Skill edit failed.", code: "edit_failed" });
     }
   }));
 
@@ -673,6 +682,10 @@ export function terminalErrorHandler(
     // The response is already streaming (e.g. NDJSON generation); the stream
     // owner is responsible for it. Terminate instead of writing a second body.
     res.end();
+    return;
+  }
+  if (err instanceof StoreReadError) {
+    res.status(500).json({ error: err.message, code: err.code });
     return;
   }
   const type =
