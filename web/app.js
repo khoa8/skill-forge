@@ -276,6 +276,12 @@ async function runGenerate() {
     );
   } catch (err) {
     if (state.generationSeq === genToken) {
+      resetStepper();
+      setStep("generate", "error");
+      state.skillId = null;
+      state.skill = null;
+      state.validation = null;
+      $("#results").classList.add("hidden");
       showFatal(err.message || String(err));
     }
   } finally {
@@ -286,30 +292,49 @@ async function runGenerate() {
   }
 }
 
-async function consumeNdjson(res, onEvent, isValid) {
+async function consumeNdjson(res, onEvent, isValid = () => true) {
+  if (!res.body) throw new Error("Generation stream has no response body.");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (isValid && !isValid()) {
-      reader.cancel().catch(() => {});
-      break;
+  let terminalSeen = false;
+  const consumeLine = (line) => {
+    if (!line.trim() || !isValid()) return;
+    let event;
+    try { event = JSON.parse(line); }
+    catch { throw new Error("Generation stream protocol failure: malformed NDJSON."); }
+    if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") {
+      throw new Error("Generation stream protocol failure: invalid event.");
     }
-    buffer += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (line.length === 0) continue;
-      if (isValid && !isValid()) return;
-      try {
-        onEvent(JSON.parse(line));
-      } catch (err) {
-        console.error("Bad NDJSON line:", line, err);
+    if (event.type === "result" || event.type === "error") {
+      if (terminalSeen) throw new Error("Generation stream protocol failure: duplicate terminal outcome.");
+      terminalSeen = true;
+    } else if (terminalSeen && event.type !== "done") {
+      throw new Error("Generation stream protocol failure: event after terminal outcome.");
+    }
+    onEvent(event);
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (!isValid()) return;
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        consumeLine(line);
       }
     }
+    if (!isValid()) return;
+    buffer += decoder.decode();
+    consumeLine(buffer); // A final JSON event need not end with a newline.
+    if (!terminalSeen) throw new Error("Generation stream ended before a result or error (incomplete stream). Please try again.");
+  } finally {
+    // Release pending transport on malformed or obsolete streams as well as EOF.
+    reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -334,6 +359,9 @@ function handlePipelineEvent(ev) {
     // of the honest record — shown individually, never folded into a stage line.
     logProgress("source note", ev.note, null, false);
   } else if (ev.type === "error") {
+    for (const stage of ["ingest", "generate", "validate"]) {
+      if ($(`.step[data-stage="${stage}"]`)?.classList.contains("active")) setStep(stage, null);
+    }
     const step = STEP_FOR_STAGE[ev.stage] ?? ev.stage ?? "ingest";
     setStep(step, "error");
     logProgress(LOG_LABEL[ev.stage] ?? ev.stage ?? "pipeline", `${ev.message} [${ev.code}]`, null, true);

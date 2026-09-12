@@ -66,7 +66,7 @@ function harness() {
   const url = Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
   const context: any = { document, fetch, URL: url, console, setTimeout: vi.fn(), TextDecoder, Blob };
   const source = readFileSync(new URL("../web/app.js", import.meta.url), "utf8").replace(/\ninit\(\);\s*$/, "");
-  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton };", context);
+  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton, runGenerate, consumeNdjson };", context);
   const ui = context.ui;
   ui.bindEvents();
   const original = { executed: true, passed: true, checks: [], warningCount: 0, errorCount: 0 };
@@ -304,5 +304,74 @@ describe("initialized preview controls and truthful steps", () => {
     h.nodes.get("#source-url").value = url;
     h.ui.updateGenerateButton();
     expect(h.nodes.get("#generate-btn").disabled).toBe(!allowed);
+  });
+});
+
+
+describe("generation stream terminal protocol", () => {
+  const start = { type: "stage", stage: "generate", status: "start" };
+  const result = { type: "result", skill: { id: "new-skill", files: [], meta: { displayName: "Stream result", generator: "mock", gaps: [] } }, validation: { executed: true, passed: true, checks: [], errorCount: 0, warningCount: 0 } };
+  function streamed(text: string) {
+    return { ok: true, headers: new Headers(), body: new ReadableStream<Uint8Array>({ start(controller) {
+      // Small chunks exercise partial JSON and multi-byte UTF-8 boundaries.
+      const bytes = new TextEncoder().encode(text);
+      for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7));
+      controller.close();
+    } }) };
+  }
+  async function generate(text: string) {
+    const h = harness();
+    h.fetch.mockResolvedValueOnce(streamed(text)).mockResolvedValue(response({ source: { notes: [] } }));
+    await h.ui.runGenerate();
+    return h;
+  }
+  const lines = (...events: unknown[]) => events.map((e) => JSON.stringify(e)).join("\n");
+  it("accepts exactly one result, an optional done trailer, and final JSON without newline", async () => {
+    for (const trailing of ["", '\n{"type":"done"}\n']) {
+      const h = await generate(lines(start, { type: "source-note", note: "café 東京" }, result) + trailing);
+      expect(h.ui.state.skillId).toBe("new-skill");
+      expect(h.ui.state.running).toBe(false);
+      expect(h.nodes.get("#generate-error").classList.contains("hidden")).toBe(true);
+    }
+  });
+  it("renders an explicit terminal error and clears active stages", async () => {
+    const h = await generate(lines(start, { type: "error", code: "provider_failed", message: "Provider failed", stage: "generate" }, { type: "done" }));
+    expect(h.text(h.nodes.get("#generate-error"))).toContain("Provider failed");
+    expect(h.ui.state.skillId).toBeNull();
+    expect(h.nodes.get('.step[data-stage="generate"]').classList.contains("error")).toBe(true);
+    expect(h.nodes.get('.step[data-stage="ingest"]').classList.contains("active")).toBe(false);
+  });
+  it.each(["", lines(start), lines(start, { type: "stage", stage: "validate", status: "start" }), lines(start, { type: "done" })])("rejects incomplete EOF: %s", async (text) => {
+    const h = await generate(text);
+    expect(h.text(h.nodes.get("#generate-error"))).toContain("incomplete stream");
+    expect(h.ui.state.running).toBe(false);
+    expect(h.ui.state.skillId).toBeNull();
+    expect(h.nodes.get('.step[data-stage="validate"]').classList.contains("active")).toBe(false);
+    expect(h.nodes.get('.step[data-stage="generate"]').classList.contains("error")).toBe(true);
+  });
+  it.each([lines(start) + "\n{broken", lines(start, result) + "\nnot json\n", lines(null), lines(result, result), lines(result, { type: "error" })])("rejects corrupted or duplicate terminal streams: %s", async (text) => {
+    const h = await generate(text);
+    expect(h.text(h.nodes.get("#generate-error"))).toContain("protocol failure");
+    expect(h.ui.state.skillId).toBeNull();
+    expect(h.nodes.get("#results").classList.contains("hidden")).toBe(true);
+    expect(h.nodes.get('.step[data-stage="validate"]').classList.contains("done")).toBe(false);
+  });
+  it.each(["EOF", "late result", "malformed line"])("ignores obsolete %s after a new generation owns the page", async (ending) => {
+    const h = harness();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const oldBody = new ReadableStream<Uint8Array>({ start(c) { controller = c; } });
+    h.fetch.mockResolvedValueOnce({ ok: true, body: oldBody, headers: new Headers() });
+    const old = h.ui.runGenerate();
+    await decoded();
+    // Model the established generation token invalidation mechanism.
+    h.ui.state.generationSeq++;
+    h.ui.state.running = false;
+    h.fetch.mockResolvedValueOnce(streamed(lines(result))).mockResolvedValue(response({ source: { notes: [] } }));
+    await h.ui.runGenerate();
+    if (ending !== "EOF") controller.enqueue(new TextEncoder().encode(ending === "late result" ? lines({ ...result, skill: { ...result.skill, id: "obsolete" } }) : "broken"));
+    controller.close();
+    await old;
+    expect(h.ui.state.skillId).toBe("new-skill");
+    expect(h.nodes.get("#generate-error").classList.contains("hidden")).toBe(true);
   });
 });
