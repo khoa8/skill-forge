@@ -23,6 +23,7 @@ import {
   getDefaultStore,
   getSkill as loadSkill,
   EditError,
+  SkillIdConflictError,
   toResponse,
   normalizeStoredSource,
   SourceRenormalizationError,
@@ -396,10 +397,14 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
         }
       } catch (err) {
         if (!clientGone) {
+          const code =
+            err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string"
+              ? (err as { code: string }).code
+              : "pipeline_stream_failed";
           res.write(
             JSON.stringify({
               type: "error",
-              code: "pipeline_stream_failed",
+              code,
               message: err instanceof Error ? err.message : String(err),
             }) + "\n",
           );

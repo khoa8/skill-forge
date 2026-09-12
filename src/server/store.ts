@@ -96,6 +96,14 @@ export class AsyncKeyLock {
   }
 }
 
+export class SkillIdConflictError extends Error {
+  readonly code = "skill_id_conflict";
+  constructor(message: string = "A skill with this id already exists. Choose a different skill name before generating again.") {
+    super(message);
+    this.name = "SkillIdConflictError";
+  }
+}
+
 export class SourceRenormalizationError extends Error {
   constructor(message: string) {
     super(message);
@@ -106,6 +114,7 @@ export class SourceRenormalizationError extends Error {
 export interface StoreTestHooks {
   afterLoad?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
   beforePersist?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
+  beforeRename?: (id: string, tmpPath: string) => Promise<void> | void;
 }
 
 export interface SkillStore {
@@ -144,11 +153,32 @@ export interface SkillStore {
   readonly _testHooks?: StoreTestHooks;
 }
 
+async function writeAtomicSkillRecord(
+  dir: string,
+  payload: object,
+  id: string,
+  testHooks?: StoreTestHooks,
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
+    if (testHooks?.beforeRename) {
+      await testHooks.beforeRename(id, tmp);
+    }
+    await rename(tmp, join(dir, "skill.json"));
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 export function createStore(
   root: string = defaultSkillsRoot(),
   testHooks?: StoreTestHooks,
 ): SkillStore {
   const lock = new AsyncKeyLock();
+  const capacityLock = new AsyncKeyLock();
 
   function skillDir(id: string): string {
     // Defense in depth: id must be a plain slug — no slashes, dots, or escapes.
@@ -167,21 +197,33 @@ export function createStore(
     createdAt: string;
   }): Promise<void> {
     await mkdir(root, { recursive: true });
-    const { analysis, ...rest } = entry;
-    const payload = { storeVersion: STORE_VERSION, ...rest, analysisSummary: analysis };
-    // Evict oldest when over capacity.
-    const ids = await listIds();
-    while (ids.length >= MAX_STORED) {
-      const oldest = ids[ids.length - 1]!; // listIds returns newest-first
-      if (oldest === entry.id) break;
-      await rm(skillDir(oldest), { recursive: true, force: true });
-      ids.pop();
-    }
-    const dir = skillDir(entry.id);
-    await mkdir(dir, { recursive: true });
-    const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
-    await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
-    await rename(tmp, join(dir, "skill.json"));
+    return capacityLock.withLock("save", async () => {
+      return lock.withLock(entry.id, async () => {
+        const existing = await getSkill(entry.id);
+        if (existing) {
+          throw new SkillIdConflictError(
+            `A skill with this id already exists. Choose a different skill name before generating again.`,
+          );
+        }
+
+        // Evict oldest when over capacity.
+        const ids = await listIds();
+        while (ids.length >= MAX_STORED) {
+          const oldest = ids[ids.length - 1]!; // listIds returns newest-first
+          if (oldest === entry.id) break;
+          // Acquire victim's per-id lock before deleting it to avoid racing active mutations
+          await lock.withLock(oldest, async () => {
+            await rm(skillDir(oldest), { recursive: true, force: true });
+          });
+          ids.pop();
+        }
+
+        const { analysis, ...rest } = entry;
+        const payload = { storeVersion: STORE_VERSION, ...rest, analysisSummary: analysis };
+        const dir = skillDir(entry.id);
+        await writeAtomicSkillRecord(dir, payload, entry.id, testHooks);
+      });
+    });
   }
 
   async function getSkill(id: string): Promise<StoredSkill | undefined> {
@@ -279,9 +321,7 @@ export function createStore(
         await testHooks.beforePersist(id, "revalidateSkill");
       }
       const dir = skillDir(id);
-      const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
-      await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
-      await rename(tmp, join(dir, "skill.json"));
+      await writeAtomicSkillRecord(dir, { storeVersion: STORE_VERSION, ...existing }, id, testHooks);
       return report;
     });
   }
@@ -366,9 +406,7 @@ export function createStore(
       }
 
       const dir = skillDir(id);
-      const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
-      await writeFile(tmp, JSON.stringify({ storeVersion: STORE_VERSION, ...existing }, null, 2), "utf8");
-      await rename(tmp, join(dir, "skill.json"));
+      await writeAtomicSkillRecord(dir, { storeVersion: STORE_VERSION, ...existing }, id, testHooks);
       return existing;
     });
   }
