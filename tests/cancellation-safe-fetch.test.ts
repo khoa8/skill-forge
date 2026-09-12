@@ -1,4 +1,7 @@
-import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import request from "supertest";
+import { createStore } from "../src/server/store.js";
+import * as pipelineModule from "../src/core/pipeline.js";
 import http from "node:http";
 import { EventEmitter } from "node:events";
 import { safeFetch } from "../src/core/sources/safe-fetch.js";
@@ -154,67 +157,44 @@ describe("F-05: Caller abort vs deadline timeout differentiation", () => {
 });
 
 describe("F-05: Server disconnect handling during source acquisition", () => {
-  let app: ReturnType<typeof createApp>;
-  let cleanupStore: () => Promise<void>;
-
-  beforeAll(async () => {
+  it.each(["docs", "codebase"])("aborts %s acquisition without starting the pipeline or persisting", async (mode) => {
     const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
-    cleanupStore = cleanup;
-    app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
-  });
-
-  afterAll(async () => {
-    await cleanupStore?.();
-  });
-
-  it("aborts source acquisition promptly when client disconnects and avoids unhandled response errors", async () => {
-    let sourceSignalAborted = false;
-
-    // Use a custom fetch that inspects signal
-    vi.stubGlobal("fetch", async (_url: any, init?: any) => {
-      const signal = init?.signal as AbortSignal | undefined;
-      if (signal) {
-        signal.addEventListener("abort", () => {
-          sourceSignalAborted = true;
-        });
-      }
-      return new Promise<Response>(() => {}); // hangs until aborted
-    });
-
-    const server = http.createServer(app);
-    await new Promise<void>((resolve) => server.listen(0, resolve));
-    const port = (server.address() as any).port;
-
-    try {
-      const clientReq = http.request({
-        port,
-        path: "/api/generate",
-        method: "POST",
-        headers: { "content-type": "application/json" },
+    const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+    let started!: () => void;
+    let aborted!: () => void;
+    const acquisitionStarted = new Promise<void>((resolve) => { started = resolve; });
+    const acquisitionAborted = new Promise<void>((resolve) => { aborted = resolve; });
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      started();
+      return new Promise<Response>((_resolve, reject) => {
+        const stop = () => { aborted(); reject(new DOMException("Disconnected", "AbortError")); };
+        if (init?.signal?.aborted) stop();
+        else init?.signal?.addEventListener("abort", stop, { once: true });
       });
-      clientReq.on("error", () => {});
-
-      clientReq.write(
-        JSON.stringify({
-          sourceType: "github",
-          repo: "https://github.com/owner/repo",
-        }),
-      );
-      clientReq.end();
-
-      // Wait a moment for server to receive request and start source acquisition
-      await new Promise((r) => setTimeout(r, 50));
-
-      // Destroy the client connection prematurely
-      clientReq.destroy();
-
-      // Wait for server to handle disconnect
-      await new Promise((r) => setTimeout(r, 100));
-
-      expect(sourceSignalAborted).toBe(true);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const pipeline = vi.spyOn(pipelineModule, "runPipeline");
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const client = http.request({ host: "127.0.0.1", port, path: "/api/generate", method: "POST", headers: { "content-type": "application/json" } });
+      client.on("error", () => {});
+      client.end(JSON.stringify({ sourceType: "github", repo: "https://github.com/owner/repo", mode }));
+      await acquisitionStarted;
+      client.destroy();
+      await acquisitionAborted;
+      // A subsequent request gives the aborted acquisition rejection a chance
+      // to finish unwinding, without arbitrary timing sleeps.
+      await request(server).get("/api/health").expect(200).expect((res) => expect(res.body.ok).toBe(true));
+      expect(pipeline).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(await createStore(storeRoot).listSkills()).toEqual([]);
     } finally {
+      vi.restoreAllMocks();
       vi.unstubAllGlobals();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await cleanup();
     }
   });
 });
