@@ -207,6 +207,13 @@ function bodyStream(res: http.IncomingMessage, signal?: AbortSignal): ReadableSt
   return stream;
 }
 
+export interface SafeFetchOptions {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  /** Test seam allowing unit tests to intercept the low-level HTTP(S) request. */
+  requestFnOverride?: typeof http.request;
+}
+
 /**
  * Issue ONE request to `url`, connecting only to addresses validated as
  * public by `lookupImpl` (resolved at connection time — the check/use gap
@@ -214,7 +221,7 @@ function bodyStream(res: http.IncomingMessage, signal?: AbortSignal): ReadableSt
  */
 export async function safeFetch(
   url: string,
-  opts: { headers?: Record<string, string>; signal?: AbortSignal },
+  opts: SafeFetchOptions = {},
   lookupImpl: LookupAllFn = lookup as unknown as LookupAllFn,
 ): Promise<SafeResponse> {
   let parsed: URL;
@@ -242,7 +249,7 @@ export async function safeFetch(
   return new Promise<SafeResponse>((resolveRes, rejectReq) => {
     const agentOptions = { keepAlive: false, lookup: lookupHook } as http.AgentOptions;
     const agent = isHttps ? new https.Agent(agentOptions) : new http.Agent(agentOptions);
-    const requestFn = isHttps ? https.request : http.request;
+    const requestFn = opts.requestFnOverride ?? (isHttps ? https.request : http.request);
     const req = requestFn(
       url,
       {

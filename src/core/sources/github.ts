@@ -50,8 +50,11 @@ export class GithubSourceError extends Error {
   }
 }
 
-/** Throw the typed deadline error when the overall budget has fired. */
-function assertOverallAlive(overallSignal: AbortSignal): void {
+/** Throw the typed deadline error when the overall budget has fired or caller aborted. */
+function assertOverallAlive(overallSignal: AbortSignal, callerSignal?: AbortSignal): void {
+  if (callerSignal?.aborted) {
+    throw new GithubSourceError("The request was aborted by the client.", "github_aborted");
+  }
   if (overallSignal.aborted) {
     throw new GithubSourceError(
       "GitHub ingestion exceeded its overall time budget. Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.",
@@ -76,12 +79,17 @@ export async function readBodyWithDeadline(
   overallSignal: AbortSignal,
   kind: "text" | "json",
   maxBytes: number,
+  callerSignal?: AbortSignal,
 ): Promise<string | unknown> {
-  assertOverallAlive(overallSignal);
+  assertOverallAlive(overallSignal, callerSignal);
   try {
     const bytes = await readBodyCapped(res, maxBytes, overallSignal);
     return kind === "text" ? new TextDecoder("utf-8").decode(bytes) : JSON.parse(new TextDecoder("utf-8").decode(bytes));
   } catch (err) {
+    if (callerSignal?.aborted) {
+      await res.body?.cancel().catch(() => {});
+      throw new GithubSourceError("The request was aborted by the client.", "github_aborted");
+    }
     if (err instanceof BodyTooLargeError) {
       // Cancel any pending read before surfacing the cap error.
       await res.body?.cancel().catch(() => {});
@@ -213,6 +221,8 @@ export interface FetchGithubOptions {
   maxDepth?: number;
   /** Optional GitHub API token; sent only to api.github.com. */
   token?: string;
+  /** Caller-provided abort signal (e.g. client disconnect). */
+  signal?: AbortSignal;
 }
 
 export interface GithubSourceResult {
@@ -238,7 +248,11 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 export async function apiFetch(
   fetchImpl: typeof fetch,
   url: string,
-  opts: Required<Pick<FetchGithubOptions, "timeoutMs">> & { token?: string; signal: AbortSignal },
+  opts: Required<Pick<FetchGithubOptions, "timeoutMs">> & {
+    token?: string;
+    signal: AbortSignal;
+    callerSignal?: AbortSignal;
+  },
 ): Promise<Response> {
   let res: Response;
   const headers: Record<string, string> = {
@@ -252,6 +266,9 @@ export async function apiFetch(
   try {
     res = await fetchImpl(url, { headers, redirect: "error", signal });
   } catch (err) {
+    if (opts.callerSignal?.aborted) {
+      throw new GithubSourceError("The request was aborted by the client.", "github_aborted");
+    }
     if (opts.signal.aborted) {
       throw new GithubSourceError(
         `GitHub ingestion exceeded its overall time budget while fetching ${url}. Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.`,
@@ -327,6 +344,7 @@ export async function fetchRawFile(
   maxFileBytes: number,
   timeoutMs: number,
   overallSignal: AbortSignal,
+  callerSignal?: AbortSignal,
 ): Promise<RawFetchResult> {
   let res: Response;
   try {
@@ -338,6 +356,9 @@ export async function fetchRawFile(
       signal,
     });
   } catch {
+    if (callerSignal?.aborted) {
+      throw new GithubSourceError("The request was aborted by the client.", "github_aborted");
+    }
     if (overallSignal.aborted) return { kind: "deadline_exceeded" };
     return { kind: "unreachable" }; // reported as a skipped-file note by the caller
   }
@@ -351,7 +372,7 @@ export async function fetchRawFile(
   // The body is streamed under the per-file cap: an oversized or underreported
   // body is torn down mid-read instead of being buffered to completion first.
   try {
-    const read = await readBodyWithDeadline(res, overallSignal, "text", maxFileBytes);
+    const read = await readBodyWithDeadline(res, overallSignal, "text", maxFileBytes, callerSignal);
     return { kind: "ok", content: read as string };
   } catch (err) {
     if (err instanceof BodyTooLargeError) return { kind: "too_large" };
@@ -419,6 +440,7 @@ export async function resolvePublicGithubRepo(
     timeoutMs: number;
     token?: string;
     signal: AbortSignal;
+    callerSignal?: AbortSignal;
     maxJsonBytes?: number;
   },
 ): Promise<ResolvedGithubRepo> {
@@ -427,12 +449,14 @@ export async function resolvePublicGithubRepo(
     timeoutMs: opts.timeoutMs,
     token: opts.token,
     signal: opts.signal,
+    callerSignal: opts.callerSignal,
   });
   const meta = (await readBodyWithDeadline(
     res,
     opts.signal,
     "json",
     opts.maxJsonBytes ?? MAX_GITHUB_JSON_BYTES,
+    opts.callerSignal,
   )) as GithubRepoMetadata;
 
   assertPublicRepository(meta, `${ref0.owner}/${ref0.repo}`);
@@ -467,7 +491,10 @@ export async function fetchGithubSource(
   const timeoutMs = opts.timeoutMs ?? GITHUB_TIMEOUT_MS;
   const overallTimeoutMs = opts.overallTimeoutMs ?? GITHUB_OVERALL_TIMEOUT_MS;
   // Hard budget for the entire ingestion; every request aborts when it fires.
-  const deadline = AbortSignal.timeout(overallTimeoutMs);
+  const timeoutSignal = AbortSignal.timeout(overallTimeoutMs);
+  const deadline = opts.signal
+    ? AbortSignal.any([opts.signal, timeoutSignal])
+    : timeoutSignal;
   const maxFiles = opts.maxFiles ?? MAX_GITHUB_FILES;
   const maxFileBytes = opts.maxFileBytes ?? MAX_GITHUB_FILE_BYTES;
   const maxTotalBytes = opts.maxTotalBytes ?? MAX_GITHUB_TOTAL_BYTES;
@@ -483,6 +510,7 @@ export async function fetchGithubSource(
     timeoutMs,
     token,
     signal: deadline,
+    callerSignal: opts.signal,
     maxJsonBytes: MAX_GITHUB_JSON_BYTES,
   });
   const ref = repoRef.ref;
@@ -493,8 +521,9 @@ export async function fetchGithubSource(
     timeoutMs,
     token,
     signal: deadline,
+    callerSignal: opts.signal,
   });
-  const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_GITHUB_JSON_BYTES)) as {
+  const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_GITHUB_JSON_BYTES, opts.signal)) as {
     tree?: GithubTreeEntry[];
     truncated?: boolean;
   };
@@ -547,7 +576,10 @@ export async function fetchGithubSource(
     // wrong, so it must not gate the total.)
     const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
     const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
-    const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline);
+    const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline, opts.signal);
+    if (opts.signal?.aborted) {
+      throw new GithubSourceError("The request was aborted by the client.", "github_aborted");
+    }
     if (fetched.kind === "deadline_exceeded") {
       throw new GithubSourceError(
         `GitHub ingestion exceeded its overall time budget (${Math.round(overallTimeoutMs / 1000)} s) after ${files.length} file(s). Reduce the repository scope (e.g. a /tree/main/docs URL) or retry later.`,

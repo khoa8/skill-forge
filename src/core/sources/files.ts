@@ -81,15 +81,24 @@ export interface CollectedFile {
 /** Read a file (with extension + size checks) or walk a bounded directory. */
 export async function collectFiles(
   userPath: string,
-  opts: { recursive?: boolean } = {},
+  opts: { recursive?: boolean; signal?: AbortSignal } = {},
 ): Promise<{ files: CollectedFile[]; skipped: string[] }> {
+  if (opts.signal?.aborted) {
+    throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+  }
   const root = allowedRoot();
   const realRoot = await realpath(root).catch(() => root);
   const absolute = await resolveInsideRoot(root, userPath);
+  if (opts.signal?.aborted) {
+    throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+  }
   const info = await stat(absolute);
   const skipped: string[] = [];
 
   if (info.isFile()) {
+    if (opts.signal?.aborted) {
+      throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+    }
     const ext = extname(absolute).toLowerCase();
     if (!TEXT_EXTENSIONS.has(ext)) {
       throw new FileSourceError(
@@ -104,12 +113,18 @@ export async function collectFiles(
       );
     }
     const content = await readFile(absolute, "utf8");
+    if (opts.signal?.aborted) {
+      throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+    }
     return { files: [{ path: relative(root, absolute).split(sep).join("/"), content }], skipped };
   }
 
   const files: CollectedFile[] = [];
   let totalBytes = 0;
   await walk(realRoot, absolute, 0, opts.recursive ?? false, files, skipped, new Set());
+  if (opts.signal?.aborted) {
+    throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+  }
   if (files.length === 0) {
     throw new FileSourceError(
       `No supported documentation files (${[...TEXT_EXTENSIONS].slice(0, 5).join(", ")}…) found under "${userPath}".`,
@@ -128,6 +143,9 @@ export async function collectFiles(
     skipped: string[],
     seen: Set<string>,
   ): Promise<void> {
+    if (opts.signal?.aborted) {
+      throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+    }
     if (depth > MAX_DEPTH) {
       skipped.push(`${dir}: max depth ${MAX_DEPTH} exceeded`);
       return;
@@ -142,6 +160,9 @@ export async function collectFiles(
       return;
     }
     for (const entry of entries) {
+      if (opts.signal?.aborted) {
+        throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+      }
       if (out.length >= MAX_FILES) {
         skipped.push(`stopped: file limit (${MAX_FILES}) reached`);
         return;

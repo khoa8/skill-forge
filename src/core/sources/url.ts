@@ -140,12 +140,26 @@ function deadlineError(timeoutMs: number): UrlSourceError {
   );
 }
 
+/** Typed error for client abort. */
+function abortError(): UrlSourceError {
+  return new UrlSourceError("The request was aborted by the client.", "url_aborted");
+}
+
 /** Race a promise against the shared deadline so a stalled DNS resolution
  * cannot outlive the overall ingestion budget. */
-function raceDeadline<T>(promise: Promise<T>, deadline: AbortSignal, timeoutMs: number): Promise<T> {
+function raceDeadline<T>(
+  promise: Promise<T>,
+  deadline: AbortSignal,
+  timeoutMs: number,
+  callerSignal?: AbortSignal,
+): Promise<T> {
+  if (callerSignal?.aborted) return Promise.reject(abortError());
   if (deadline.aborted) return Promise.reject(deadlineError(timeoutMs));
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(deadlineError(timeoutMs));
+    const onAbort = () => {
+      if (callerSignal?.aborted) reject(abortError());
+      else reject(deadlineError(timeoutMs));
+    };
     deadline.addEventListener("abort", onAbort, { once: true });
     promise.then(
       (value) => {
@@ -195,13 +209,15 @@ export interface FetchUrlOptions {
   lookupImpl?: LookupAllFn;
   maxBytes?: number;
   timeoutMs?: number;
+  /** Caller-provided abort signal (e.g. client disconnect). */
+  signal?: AbortSignal;
 }
 
 /**
  * Fetch a documentation URL and turn it into a SourceInput.
  * Single page only — deliberately not a crawler.
  *
- * The deadline is ONE AbortSignal.timer over the whole operation: DNS
+ * The deadline is ONE AbortSignal over the whole operation: DNS
  * validation, every redirect hop, connection/headers, and the streamed body
  * all share the same budget. A server that sends headers and then stalls
  * cannot outlive it, and redirect chains cannot reset it.
@@ -214,8 +230,11 @@ export async function fetchUrlSource(
   const maxBytes = opts.maxBytes ?? MAX_URL_BYTES;
   const timeoutMs = opts.timeoutMs ?? URL_TIMEOUT_MS;
 
-  // ONE deadline for the entire ingestion (DNS + redirects + headers + body).
-  const deadline = AbortSignal.timeout(timeoutMs);
+  // Shared deadline combining caller cancellation (if provided) and overall timeout.
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const deadline = opts.signal
+    ? AbortSignal.any([opts.signal, timeoutSignal])
+    : timeoutSignal;
 
   async function request(url: URL): Promise<Response | SafeResponse> {
     const init = {
@@ -256,7 +275,7 @@ export async function fetchUrlSource(
   }
 
   let current = assertSafeUrl(rawUrl);
-  await raceDeadline(assertHopSafe(current), deadline, timeoutMs);
+  await raceDeadline(assertHopSafe(current), deadline, timeoutMs, opts.signal);
 
   const notes: string[] = [];
   let response: FetchedResponse | null = null;
@@ -265,6 +284,7 @@ export async function fetchUrlSource(
     try {
       res = adapt(await request(current));
     } catch (err) {
+      if (opts.signal?.aborted) throw abortError();
       if (err instanceof UrlSourceError) throw err;
       if (deadline.aborted) throw deadlineError(timeoutMs);
       const cause = err instanceof Error ? err.message : String(err);
@@ -281,7 +301,7 @@ export async function fetchUrlSource(
       }
       const next = new URL(location, current);
       assertSafeUrl(next.toString());
-      await raceDeadline(assertHopSafe(next), deadline, timeoutMs);
+      await raceDeadline(assertHopSafe(next), deadline, timeoutMs, opts.signal);
       current = next;
       continue;
     }
@@ -328,6 +348,7 @@ export async function fetchUrlSource(
       : await readBodyCapped({ text: () => Promise.resolve("") }, maxBytes, deadline);
   } catch (err) {
     response.cancel();
+    if (opts.signal?.aborted) throw abortError();
     if (err instanceof BodyTooLargeError) {
       throw new UrlSourceError(
         `The page exceeds ${maxBytes} bytes. Fetch a more specific page.`,
