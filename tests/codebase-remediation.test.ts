@@ -1272,7 +1272,7 @@ describe("Final-2 P1-2: CI working-directory context is preserved", () => {
       kind: "ci-run",
       purpose: "test",
       command: "npm test",
-      cwd: undefined,
+      cwd: "",
       evidence: ".github/workflows/ci.yml (CI run step)",
     });
   });
@@ -1351,7 +1351,7 @@ describe("Final-2 P1-2: CI working-directory context is preserved", () => {
     const dynamicStep = cmds.find((c) => c.command === "npm ci");
     expect(dynamicStep).toBeDefined();
     expect(dynamicStep?.cwd).toBeUndefined();
-    expect(cmds.find((c) => c.command === "npm test")?.cwd).toBeUndefined();
+    expect(cmds.find((c) => c.command === "npm test")?.cwd).toBe("");
   });
 
   it("multiline run blocks are preserved verbatim without cd synthesis", () => {
@@ -1373,7 +1373,7 @@ describe("Final-2 P1-2: CI working-directory context is preserved", () => {
       kind: "ci-run",
       purpose: "other",
       command: "cd packages/web\nnpm ci",
-      cwd: undefined,
+      cwd: "",
       evidence: ".github/workflows/ci.yml (CI run step)",
     });
   });

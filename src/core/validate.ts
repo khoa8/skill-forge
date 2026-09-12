@@ -10,6 +10,7 @@
  * `executed: false` in the report means validation did not run — the UI must
  * never present that state as success.
  */
+import { posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type {
   CanonicalSkill,
@@ -232,13 +233,27 @@ const brokenLinks = check("internal-links", "Internal file references resolve", 
   for (const file of skill.files) {
     if (!file.path.endsWith(".md")) continue;
     const body = splitFrontMatter(file.content)?.body ?? file.content;
+    const dir = posix.dirname(file.path);
     for (const m of body.matchAll(MD_LINK_RE)) {
       const href = m[1]!;
       if (href.startsWith("#")) continue;
       if (/^[a-z]+:\/\//i.test(href) || href.startsWith("mailto:")) continue;
       const clean = href.split("#")[0]!.trim();
       if (clean.length === 0) continue;
-      if (!paths.has(clean)) {
+
+      const target = clean.startsWith("/") ? clean.slice(1) : posix.join(dir, clean);
+      const normalized = posix.normalize(target);
+      const safe = safePackagePath(normalized);
+      if (safe === null || normalized === ".." || normalized.startsWith("../")) {
+        outcomes.push(
+          fail(
+            `Broken internal reference in ${file.path}: "${href}" escapes the skill package root.`,
+            file.path,
+          ),
+        );
+        continue;
+      }
+      if (!paths.has(safe)) {
         outcomes.push(
           fail(
             `Broken internal reference in ${file.path}: "${href}" does not match any file in the package.`,
