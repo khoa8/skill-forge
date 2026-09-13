@@ -4,6 +4,13 @@
   "description": "SkillForge — turn documentation, text, or repositories into validated, portable AI Agent Skills.",
   "type": "module",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khoa8/skill-forge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/khoa8/skill-forge/issues"
+  },
   "engines": {
     "node": ">=20"
   },
