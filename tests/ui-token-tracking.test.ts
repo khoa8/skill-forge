@@ -81,6 +81,21 @@ const response = (data: unknown, ok = true) => ({ ok, status: ok ? 200 : 503, js
 const decoded = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("UI request ownership and errors", () => {
+  it("enables PDF generation only with a path and submits the local-path contract", async () => {
+    const h = harness();
+    h.ui.state.activeTab = "pdf";
+    h.ui.updateGenerateButton();
+    expect(h.nodes.get("#generate-btn").disabled).toBe(true);
+    h.nodes.get("#source-pdf-path").value = "  docs/guide.pdf  ";
+    h.nodes.get("#source-pdf-path").listeners.get("input")();
+    expect(h.nodes.get("#generate-btn").disabled).toBe(false);
+    h.fetch.mockResolvedValueOnce(response({ error: "fixture stops before generation" }, false));
+    await h.ui.runGenerate();
+    expect(h.fetch.mock.calls[0]![0]).toBe("/api/generate");
+    expect(JSON.parse(h.fetch.mock.calls[0]![1].body)).toMatchObject({ sourceType: "pdf", path: "docs/guide.pdf" });
+    expect(h.ui.state.sourceType).toBe("pdf");
+  });
+
   it("rejects an older revalidation response even when its JSON finishes last", async () => {
     const h = harness();
     const old = deferred<any>();

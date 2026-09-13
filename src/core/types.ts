@@ -236,7 +236,7 @@ export type RepositoryAnalysis = z.infer<typeof RepositoryAnalysis>;
 // Source / analysis types
 // ---------------------------------------------------------------------------
 
-export const SourceType = z.enum(["text", "sample", "file", "github", "github-codebase"]);
+export const SourceType = z.enum(["text", "sample", "file", "pdf", "github", "github-codebase"]);
 export type SourceType = z.infer<typeof SourceType>;
 
 /**

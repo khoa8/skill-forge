@@ -41,6 +41,7 @@
           <button class="tab" data-tab="text" role="tab">Paste</button>
           <button class="tab" data-tab="url" role="tab">URL</button>
           <button class="tab" data-tab="file" role="tab">Local files</button>
+          <button class="tab" data-tab="pdf" role="tab">PDF</button>
           <button class="tab" data-tab="github" role="tab">GitHub repo</button>
         </div>
       </div>
@@ -70,6 +71,12 @@
         <label class="field-label" for="source-path">File or directory path</label>
         <input id="source-path" type="text" placeholder="docs/ or README.md" />
         <label class="checkline"><input type="checkbox" id="source-recursive" /> Include subdirectories (bounded: depth 6, 40 files)</label>
+      </div>
+
+      <div class="tab-body hidden" id="tab-pdf">
+        <p class="hint">Read a PDF under the server's allowed documentation root (SKILLFORGE_DOCS_ROOT; default: this workspace). Text layer only — no OCR, encrypted PDFs, or content execution. Up to 10 MB, 200 pages, and 1.5 MB of extracted text; omissions appear in Source notes.</p>
+        <label class="field-label" for="source-pdf-path">Server-side PDF path</label>
+        <input id="source-pdf-path" type="text" maxlength="1024" placeholder="docs/guide.pdf" />
       </div>
 
       <div class="tab-body hidden" id="tab-github">

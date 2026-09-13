@@ -86,7 +86,7 @@ body {
 .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 
 /* Tabs */
-.tabs { display: flex; gap: 6px; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tab {
   background: var(--bg-inset); color: var(--text-muted);
   border: 1px solid var(--border); border-radius: 8px;

@@ -13,7 +13,7 @@ npm install
 npm run dev          # open http://127.0.0.1:8787
 ```
 
-Then: **pick a source (bundled sample, pasted Markdown, a URL, local files, or a public GitHub repository) → Generate skill → inspect files → Download ZIP.** The bundled demo provider runs fully offline; no paid key is ever needed for the demo workflow.
+Then: **pick a source (bundled sample, pasted Markdown, a URL, local files, a PDF, or a public GitHub repository) → Generate skill → inspect files → Download ZIP.** The bundled demo provider runs fully offline; no paid key is ever needed for the demo workflow.
 
 Verify the same flow headlessly:
 
@@ -55,11 +55,14 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 | Pasted Markdown/text | Paste tab | Any instructional Markdown; HTML stripped, entities decoded. |
 | URL | URL tab | Single-page http(s) fetch with safety limits (below). |
 | Local files | Local files tab | File or directory under the allowed root (`SKILLFORGE_DOCS_ROOT`, default: the workspace). |
+| PDF document | PDF tab / server-side local path | Text-layer extraction under `SKILLFORGE_DOCS_ROOT`; bounded, no OCR or browser upload. |
 | GitHub repository | GitHub repo tab | Two explicit modes — **Documentation** or **Codebase** — via the GitHub API (below). |
 
 **URL safety limits:** http/https only; every address — literal or DNS-resolved, including each redirect target — must pass SkillForge's conservative public-Internet destination policy: private, local, link-local, unique-local, multicast, documentation/test/benchmark, reserved, protocol-special, and transitional/tunneled forms (IPv4-mapped, NAT64, 6to4, Teredo) are rejected, and malformed input fails closed; connections are pinned to the validated records at connection time (no DNS re-resolution/rebinding gap); max 3 redirects; 1 MB cap; one 15 s end-to-end deadline covering DNS, redirects, connection, and body streaming (a stalled response fails with `url_deadline_exceeded`, HTTP 504, instead of hanging); only text-like content types; page JavaScript is never executed (JS-rendered pages are reported as empty rather than guessed at).
 
 **Local file safety:** `SKILLFORGE_DOCS_ROOT` is the filesystem trust boundary — paths must resolve inside it (symlink escapes refused); extension allowlist (`.md`, `.txt`, `.rst`, …); per-file 800 KB / combined 1.4 MB caps; max 40 files, depth 6, and 10,000 enumerated directory entries; complete directory listings are sorted by name before selecting files. Reaching the traversal limit stops collection and omits the current directory, whose listing has not been confirmed complete, with an explicit note (or an error if no files were collected); no code execution. Documentation-like files inside the root are readable **including dotfiles** with allowed extensions (e.g. `.secret-notes.md`); use a docs-only root if the workspace holds sensitive Markdown.
+
+**PDF safety and limits:** The PDF tab accepts a server-side `.pdf` path under the same `SKILLFORGE_DOCS_ROOT` boundary, with realpath containment and symlink-escape refusal. Only regular files are read: at most 10,000,000 binary bytes, the first 200 pages, and 1,500,000 UTF-8 bytes of extracted text. The binary read is capped as well as checked before reading. Text is streamed in page order; a page that exceeds the remaining text budget and all later pages are omitted, with an explicit note. If the retained prefix lacks enough usable text, ingestion fails instead. Blank-page counts and omissions appear in Source notes. No PDF JavaScript, attachments, forms, or commands are executed; no rendering, OCR, or external resource fetching occurs. Literal markup/entities remain source text. Cancellation destroys parser resources and is checked between extraction chunks/pages; synchronous parser operations cannot be interrupted immediately, and there is no hard parse deadline. Only extracted text and notes are stored; subsequent preview, edits, revalidation, and export do not require the original PDF.
 
 **GitHub source limits:** `https://github.com/<owner>/<repo>` (or a `/tree/<ref>/<path>` URL) only; **public repositories only** — private repositories are deliberately not fetched (even if a configured token can access them). SkillForge reads public repositories without authentication; the optional `SKILLFORGE_GITHUB_TOKEN` in `.env` exists solely to raise `api.github.com` rate limits for public-repository discovery/tree requests (it is sent only to api.github.com, never to raw content hosts, and never grants access to private repositories). Requests go through the GitHub API and raw content endpoints; submodules are never followed; nothing is cloned, executed, or installed. Truncation is honest: skipped/omitted files are listed as notes in the generation log and the results panel.
 
@@ -70,7 +73,7 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 
 | Stage | Behavior |
 | --- | --- |
-| **Source** | One of the five input types above. Adapter notes — truncation, skipped files, followed redirects — are surfaced per-note in the generation log, in a "Source notes" panel, and persisted with the skill; skipping is never silent. |
+| **Source** | One of the supported input types above, including PDF text layers. Adapter notes — truncation, skipped files, followed redirects — are surfaced per-note in the generation log, in a "Source notes" panel, and persisted with the skill; skipping is never silent. |
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
 | **Validate** | A fixed registry of deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
@@ -109,7 +112,7 @@ The report states `passed`, `executed`, per-check status, file locations, and ac
 
 When configuring a remote model provider (`glm` or `openai`), source material leaves your machine:
 
-- **Egress scope for ordinary sources:** Generation requests for pasted text, bundled samples, URLs, local files, and GitHub documentation-mode inputs transmit up to the first 60,000 characters of normalized source text, plus prompt metadata (the source name and optional requested skill name), to the configured provider endpoint (`SKILLFORGE_BASE_URL` or the provider's default URL). Do not point a remote provider at sensitive, proprietary, or confidential source material unless you intend to disclose that material to that provider.
+- **Egress scope for ordinary sources:** Generation requests for pasted text, bundled samples, URLs, local files, PDFs, and GitHub documentation-mode inputs transmit up to the first 60,000 characters of normalized source text, plus prompt metadata (the source name and optional requested skill name), to the configured provider endpoint (`SKILLFORGE_BASE_URL` or the provider's default URL). For PDFs, only extracted normalized text is sent, never binary PDF bytes, images, or attachments. Do not point a remote provider at sensitive, proprietary, or confidential source material unless you intend to disclose that material to that provider.
 - **Narrower contract for GitHub codebase mode:** In codebase mode, remote providers receive only bounded, structured repository analysis metadata (detected frameworks, entrypoints, manifest metadata without script definitions, testing evidence, capped at 16 KB JSON total). Command bodies, manifest script definitions, convention text, and raw inspected source code are excluded and not transmitted to the remote model.
 - **Provider URL and credentials:** `SKILLFORGE_BASE_URL` defines the configured provider destination. The `SKILLFORGE_API_KEY` is used as the Bearer credential in the `Authorization` header for requests to the configured provider URL.
 
@@ -128,7 +131,7 @@ Runs one small bounded generation through the configured provider (`SKILLFORGE_P
 - GitHub source reads **public repositories only** (private repositories are deliberately unsupported even with an authenticated token); refs with slashes in `/tree/` URLs take the first segment as the ref; API rate limits apply as described above (with reset time reported on 429). Codebase-mode analysis is bounded and partial by design — it inspects a prioritized selection of files, never the whole repository, and says so in the generated skill.
 - The `glm`/`openai` providers require you to supply a key; live compatibility is not guaranteed by the test suite — validate your configuration with `npm run verify:provider`.
 - Evals are generated as manual grounding checks; SkillForge does not execute them.
-- PDF ingestion is not implemented.
+- PDF ingestion requires a usable text layer (at least 40 characters); scanned/image-only and encrypted/password-protected PDFs are unsupported. No OCR, browser upload, remote PDF fetch, or visual/table reconstruction is provided. Multi-column reading order and spacing may be imperfect. PDFs requiring unavailable external font/CMap data may fail or yield incomplete text; only embedded text resources are used. Byte/page limits apply as described above.
 - SkillForge has no built-in authentication; see the deployment scope above before binding beyond loopback.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the module map, [docs/CANONICAL_FORMAT.md](docs/CANONICAL_FORMAT.md) for the package format, and [docs/EXPORTERS.md](docs/EXPORTERS.md) for exporter contracts.

@@ -107,6 +107,7 @@ function bindEvents() {
 
   $("#source-url").addEventListener("input", updateGenerateButton);
   $("#source-path").addEventListener("input", updateGenerateButton);
+  $("#source-pdf-path").addEventListener("input", updateGenerateButton);
   $("#source-repo").addEventListener("input", updateGenerateButton);
 
   $("#prov-close").addEventListener("click", () => $("#provenance-dialog").close());
@@ -153,6 +154,10 @@ function updateGenerateButton() {
     const ok = /^https:\/\/(www\.)?github\.com\/[^/\s]+\/[^/\s]+/.test(repo);
     btn.disabled = !ok;
     btn.textContent = ok ? "Generate skill" : "Enter a github.com repository URL";
+  } else if (state.activeTab === "pdf") {
+    const p = $("#source-pdf-path").value.trim();
+    btn.disabled = p.length === 0;
+    btn.textContent = p.length > 0 ? "Generate skill" : "Enter a server-side PDF path";
   } else if (state.activeTab === "file") {
     const p = $("#source-path").value.trim();
     btn.disabled = p.length === 0;
@@ -231,6 +236,8 @@ async function runGenerate() {
   const body =
     state.activeTab === "sample"
       ? { sourceType: "sample", sampleId: state.selectedSampleId }
+      : state.activeTab === "pdf"
+        ? { sourceType: "pdf", path: $("#source-pdf-path").value.trim() }
       : state.activeTab === "url"
         ? { sourceType: "url", url: $("#source-url").value.trim() }
         : state.activeTab === "github"
