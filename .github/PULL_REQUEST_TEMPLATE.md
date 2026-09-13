@@ -8,7 +8,7 @@
 Explain changes to trust boundaries, or state that none are affected.
 Do not disclose vulnerabilities here. -->
 
-For vulnerability reporting, follow [SECURITY.md](../SECURITY.md), including its
+For vulnerability reporting, follow [SECURITY.md](https://github.com/khoa8/skill-forge/security/policy), including its
 instructions when private reporting is unavailable.
 
 ## Validation
