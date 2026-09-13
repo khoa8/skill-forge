@@ -134,4 +134,10 @@ Runs one small bounded generation through the configured provider (`SKILLFORGE_P
 - PDF ingestion requires a usable text layer (at least 40 characters); scanned/image-only and encrypted/password-protected PDFs are unsupported. No OCR, browser upload, remote PDF fetch, or visual/table reconstruction is provided. Multi-column reading order and spacing may be imperfect. PDFs requiring unavailable external font/CMap data may fail or yield incomplete text; only embedded text resources are used. Byte/page limits apply as described above.
 - SkillForge has no built-in authentication; see the deployment scope above before binding beyond loopback.
 
+SkillForge is pre-1.0 software for local / trusted self-hosted use. Public source
+availability does not add authentication or tenant isolation to the runtime.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to report non-security bugs or propose
+changes. SkillForge is licensed under the [MIT License](LICENSE).
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the module map, [docs/CANONICAL_FORMAT.md](docs/CANONICAL_FORMAT.md) for the package format, and [docs/EXPORTERS.md](docs/EXPORTERS.md) for exporter contracts.

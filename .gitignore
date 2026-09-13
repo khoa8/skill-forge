@@ -4,4 +4,6 @@ output/
 *.zip
 .DS_Store
 .env
+.env.*
+!.env.example
 .data/
