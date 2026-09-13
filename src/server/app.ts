@@ -17,6 +17,7 @@ import { exportPackage, buildZip, EXPORT_TARGET_INFO, ExportError } from "../cor
 import { listSamples, getSample } from "../core/samples.js";
 import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
 import { collectFiles, combineFiles, FileSourceError } from "../core/sources/files.js";
+import { readPdfSource, PdfSourceError, type PdfErrorCode } from "../core/sources/pdf.js";
 import { fetchGithubSource, GithubSourceError } from "../core/sources/github.js";
 import {
   createStore,
@@ -66,14 +67,14 @@ function asyncRoute(handler: AsyncRouteHandler): (req: Request, res: Response, n
 }
 
 const GenerateBody = z.object({
-  sourceType: z.enum(["text", "sample", "url", "file", "github"]),
+  sourceType: z.enum(["text", "sample", "url", "file", "pdf", "github"]),
   /** For `text`: the pasted content. Required when sourceType is "text". */
   content: z.string().min(1).max(2_000_000).optional(),
   /** For `sample`: bundled sample id. */
   sampleId: z.string().optional(),
   /** For `url`: the page to fetch. */
   url: z.string().max(2048).optional(),
-  /** For `file`: workspace-relative file or directory path. */
+  /** For `file` or `pdf`: server-side path under the documentation root. */
   path: z.string().max(1024).optional(),
   /** For `github`: a github.com repository or tree URL. */
   repo: z.string().max(2048).optional(),
@@ -87,6 +88,13 @@ const GenerateBody = z.object({
 });
 
 const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
+
+const PDF_ERROR_STATUS: Record<PdfErrorCode, number> = {
+  pdf_bad_path: 400, pdf_not_found: 404, pdf_outside_root: 403,
+  pdf_not_file: 400, pdf_bad_extension: 400, pdf_too_large: 413,
+  pdf_text_too_large: 413, pdf_encrypted: 422, pdf_no_text: 422,
+  pdf_invalid: 422, pdf_parse_failed: 500, pdf_aborted: 499,
+};
 
 const UpdateFileBody = z.object({
   /** Package-relative path of an existing generated text file. */
@@ -135,6 +143,7 @@ const PIPELINE_SOURCE_TYPE: Record<z.infer<typeof GenerateBody>["sourceType"], S
   sample: "sample",
   url: "text",
   file: "file",
+  pdf: "pdf",
   github: "github",
 };
 
@@ -318,6 +327,23 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
           error: err instanceof Error ? err.message : String(err),
           code,
         });
+        return;
+      }
+    } else if (body.sourceType === "pdf") {
+      if (!body.path?.trim()) {
+        res.status(400).json({ error: "sourceType 'pdf' requires `path` (a PDF under the server's allowed documentation root).", code: "pdf_bad_path" });
+        return;
+      }
+      try {
+        const fetched = await readPdfSource(body.path, { signal: cancellation.signal });
+        content = fetched.input.content;
+        name = body.name?.trim() || fetched.input.name;
+        adapterNotes = fetched.notes;
+      } catch (err) {
+        if (clientGone || res.writableEnded || cancellation.signal.aborted) return;
+        const error = err instanceof PdfSourceError ? err
+          : new PdfSourceError("PDF ingestion failed.", "pdf_parse_failed");
+        res.status(PDF_ERROR_STATUS[error.code]).json({ error: error.message, code: error.code });
         return;
       }
     } else if (body.sourceType === "file") {

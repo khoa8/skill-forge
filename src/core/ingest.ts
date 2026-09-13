@@ -66,11 +66,12 @@ export function normalizeSource(input: SourceInput): NormalizedSource {
   // markup, tags, and entities must survive untouched (inert text means
   // "do not execute", not "rewrite before analysis"). Only line endings are
   // normalized so provenance line numbers stay stable across platforms.
-  const isCodebase = input.type === "github-codebase";
+  // PDF text-layer markup/entities are literal evidence too, not HTML.
+  const isLiteralText = input.type === "github-codebase" || input.type === "pdf";
 
   const notes: string[] = [];
   let text = input.content.replace(/\r\n?/g, "\n");
-  if (isCodebase) {
+  if (isLiteralText) {
     // Preserve every interior character; only the very end is trimmed so the
     // trailing-newline convention (and lineCount) matches the docs path.
     text = text.replace(/\s+$/g, "") + "\n";
