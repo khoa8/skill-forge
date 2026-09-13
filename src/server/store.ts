@@ -11,7 +11,7 @@
  * isolated temporary directories and can never touch production data; the
  * module-level exports delegate to the default store for normal use.
  */
-import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -96,6 +96,30 @@ export class AsyncKeyLock {
   }
 }
 
+export class StoreReadError extends Error {
+  constructor(readonly code: "store_record_corrupt" | "store_read_failed") {
+    super(code === "store_record_corrupt"
+      ? "Stored skill record is corrupted and cannot be used."
+      : "Stored skill records could not be read.");
+    this.name = "StoreReadError";
+  }
+}
+
+function isMissing(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+export interface SaveOptions { signal?: AbortSignal }
+
+function checkCancellation(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw Object.assign(new Error("Skill persistence was cancelled."), { name: "AbortError", code: "store_aborted" });
+  }
+}
+
+// Only UUID v4 names emitted by randomUUID belong to this writer.
+const OWNED_TEMP = /^skill\.json\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/;
+
 export class SkillIdConflictError extends Error {
   readonly code = "skill_id_conflict";
   constructor(message: string = "A skill with this id already exists. Choose a different skill name before generating again.") {
@@ -112,6 +136,8 @@ export class SourceRenormalizationError extends Error {
 }
 
 export interface StoreTestHooks {
+  beforeRead?: (id: string) => Promise<void> | void;
+  afterCommit?: (id: string) => Promise<void> | void;
   afterLoad?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
   beforePersist?: (id: string, op: "updateFileContent" | "revalidateSkill") => Promise<void> | void;
   beforeEvict?: (id: string) => Promise<void> | void;
@@ -128,7 +154,7 @@ export interface SkillStore {
     source: StoredSkill["source"];
     validation: ValidationReport;
     createdAt: string;
-  }): Promise<void>;
+  }, options?: SaveOptions): Promise<void>;
   getSkill(id: string): Promise<StoredSkill | undefined>;
   listSkills(): Promise<
     { id: string; name: string; description: string; generator: string; createdAt: string; validationPassed: boolean; fileCount: number }[]
@@ -159,15 +185,31 @@ async function writeAtomicSkillRecord(
   payload: object,
   id: string,
   testHooks?: StoreTestHooks,
+  signal?: AbortSignal,
 ): Promise<void> {
   await mkdir(dir, { recursive: true });
+  // Called under the ID mutation lock; never sweep other skill directories.
+  for (const file of await readdir(dir, { withFileTypes: true })) {
+    if (file.isFile() && OWNED_TEMP.test(file.name)) await unlink(join(dir, file.name));
+  }
   const tmp = join(dir, `skill.json.${randomUUID()}.tmp`);
   try {
+    checkCancellation(signal);
     await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
     if (testHooks?.beforeRename) {
       await testHooks.beforeRename(id, tmp);
     }
-    await rename(tmp, join(dir, "skill.json"));
+    checkCancellation(signal);
+    const finalPath = join(dir, "skill.json");
+    await rename(tmp, finalPath);
+    // rename cannot be aborted. Arbitrate in this continuation, before any
+    // further await: cancellation observed while it was pending wins. Only
+    // generation supplies a signal (and its ID was absent under the lock).
+    if (signal?.aborted) {
+      await unlink(finalPath);
+      checkCancellation(signal);
+    }
+    // Successful completion observed without cancellation is the logical commit.
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
     throw err;
@@ -196,10 +238,12 @@ export function createStore(
     source: StoredSkill["source"];
     validation: ValidationReport;
     createdAt: string;
-  }): Promise<void> {
+  }, options: SaveOptions = {}): Promise<void> {
+    checkCancellation(options.signal);
     await mkdir(root, { recursive: true });
     return capacityLock.withLock("save", async () => {
       return lock.withLock(entry.id, async () => {
+        checkCancellation(options.signal);
         const existing = await getSkill(entry.id);
         if (existing) {
           throw new SkillIdConflictError(
@@ -211,9 +255,11 @@ export function createStore(
         const { analysis, ...rest } = entry;
         const payload = { storeVersion: STORE_VERSION, ...rest, analysisSummary: analysis };
         const dir = skillDir(entry.id);
-        const persist = () => writeAtomicSkillRecord(dir, payload, entry.id, testHooks);
+        const persist = () => writeAtomicSkillRecord(dir, payload, entry.id, testHooks, options.signal);
         if (ids.length < MAX_STORED) {
           await persist();
+          // persist has arbitrated rename completion; later abort cannot reverse commit.
+          await testHooks?.afterCommit?.(entry.id);
           return;
         }
 
@@ -221,17 +267,31 @@ export function createStore(
         // Lock order is capacity → incoming ID → victim ID. Mutations never
         // acquire capacity. Public reads wait until this transition completes.
         await lock.withLock(oldest, async () => {
+          const victimPath = join(skillDir(oldest), "skill.json");
+          const stagedVictim = join(skillDir(oldest), `skill.json.${randomUUID()}.tmp`);
+          let victimRemoved = false;
           try {
             // Finish all incoming I/O before touching the retained record.
             await persist();
             await testHooks?.beforeEvict?.(oldest);
-            // Removing ONE record is atomic; recursive deletion could partly
-            // destroy the victim before reporting failure.
-            await unlink(join(skillDir(oldest), "skill.json"));
+            checkCancellation(options.signal);
+            // Remove the final pathname atomically but retain the exact bytes
+            // until completion is arbitrated. Unlike unlink, rename is reversible.
+            await rename(victimPath, stagedVictim);
+            victimRemoved = true;
+            checkCancellation(options.signal);
+            // No await between observing success, checking abort, and commit.
           } catch (err) {
-            await rm(dir, { recursive: true, force: true });
+            // Restore before discarding incoming. If restoration itself fails,
+            // preserve both incoming and the staged evidence and surface I/O failure.
+            if (victimRemoved) await rename(stagedVictim, victimPath);
+            // Roll back only the incoming final record, preserving unknown files.
+            await rm(join(dir, "skill.json"), { force: true });
+            await rmdir(dir).catch(() => {});
             throw err;
           }
+          // Victim removal observed without cancellation commits the transition.
+          await testHooks?.afterCommit?.(entry.id);
           // The record transition is committed. Empty directory cleanup is
           // not part of save success and cannot invalidate the new record.
           await rm(skillDir(oldest), { recursive: true, force: true }).catch(() => {});
@@ -241,42 +301,41 @@ export function createStore(
   }
 
   async function getSkill(id: string): Promise<StoredSkill | undefined> {
+    const path = join(skillDir(id), "skill.json");
+    let raw: string;
     try {
-      const raw = await readFile(join(skillDir(id), "skill.json"), "utf8");
+      await testHooks?.beforeRead?.(id);
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      if (isMissing(err)) return undefined;
+      throw new StoreReadError("store_read_failed");
+    }
+    try {
       const parsed = StoredSkillSchema.safeParse(JSON.parse(raw));
-      return parsed.success ? parsed.data : undefined;
+      if (!parsed.success) throw new Error("Invalid record");
+      return parsed.data;
     } catch {
-      return undefined;
+      throw new StoreReadError("store_record_corrupt");
     }
   }
 
   async function listIds(): Promise<string[]> {
+    let entries: string[];
     try {
-      const entries = await readdir(root);
-      const withTime = await Promise.all(
-        entries.map(async (id) => {
-          if (!/^[a-z0-9-]{1,80}$/.test(id)) return null;
-          const meta = await getSkillMeta(id);
-          return meta ? { id, createdAt: meta.createdAt } : null;
-        }),
-      );
-      return withTime
-        .filter((x): x is { id: string; createdAt: string } => x !== null)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .map((x) => x.id);
-    } catch {
-      return [];
+      entries = await readdir(root);
+    } catch (err) {
+      if (isMissing(err)) return [];
+      throw new StoreReadError("store_read_failed");
     }
-  }
-
-  async function getSkillMeta(id: string): Promise<{ createdAt: string } | null> {
-    try {
-      const raw = await readFile(join(skillDir(id), "skill.json"), "utf8");
-      const data = JSON.parse(raw) as { createdAt?: string };
-      return typeof data.createdAt === "string" ? { createdAt: data.createdAt } : null;
-    } catch {
-      return null;
-    }
+    const withTime = await Promise.all(entries.map(async (id) => {
+      if (!/^[a-z0-9-]{1,80}$/.test(id)) return null;
+      const record = await getSkill(id);
+      return record ? { id, createdAt: record.createdAt } : null;
+    }));
+    return withTime
+      .filter((x): x is { id: string; createdAt: string } => x !== null)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((x) => x.id);
   }
 
   async function listSkills(): Promise<
