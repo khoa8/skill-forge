@@ -6,7 +6,10 @@
 
 <!-- Identify affected source, schema, validation, export, configuration, or deployment contracts.
 Explain changes to trust boundaries, or state that none are affected.
-Do not disclose vulnerabilities here; use a private maintainer channel. -->
+Do not disclose vulnerabilities here. -->
+
+For vulnerability reporting, follow [SECURITY.md](../SECURITY.md), including its
+instructions when private reporting is unavailable.
 
 ## Validation
 

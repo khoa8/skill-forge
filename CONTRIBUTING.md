@@ -76,4 +76,5 @@ For feature proposals, explain how the change helps create a useful agent skill
 and why existing source or export options do not meet the need.
 
 Do not disclose suspected vulnerabilities, exploit details, or secrets in public
-issues or PRs. Security reports need a private maintainer channel.
+issues or PRs. Follow [SECURITY.md](SECURITY.md) for private reporting instructions
+and what to do if reporting is unavailable.
