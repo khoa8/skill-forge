@@ -32,6 +32,7 @@ export interface PdfDocument {
   numPages: number;
   encrypted(): Promise<boolean>;
   page(number: number): Promise<PdfPage>;
+  notes?(): string[];
 }
 export interface PdfParserTask {
   document: Promise<PdfDocument>;
@@ -39,17 +40,27 @@ export interface PdfParserTask {
 }
 export type PdfParser = (bytes: Uint8Array) => PdfParserTask;
 
-// Fail closed if a PDF requires an external font/CMap. No URL is supplied,
-// and both main-thread resource factories and worker fetch are disabled.
-class NoExternalResources {
-  async fetch(): Promise<never> { throw new Error("External PDF resources are disabled."); }
-}
-
 async function loadParser(): Promise<PdfParser> {
   // Legacy ESM includes the JS compatibility helpers required on Node 20.
   // Its worker module lives in this production dependency, not in web/ or dist/.
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   return (bytes) => {
+    // No URL is supplied; resource factories never access disk or network.
+    // PDF.js can recover from a missing font, so report that explicitly.
+    let missingFont = false;
+    let missingCMap = false;
+    class NoExternalFonts {
+      async fetch(): Promise<never> {
+        missingFont = true;
+        throw new Error("External PDF font resources are disabled.");
+      }
+    }
+    class NoExternalCMaps {
+      async fetch(): Promise<never> {
+        missingCMap = true;
+        throw new Error("External PDF CMap resources are disabled.");
+      }
+    }
     const task = getDocument({
       data: bytes,
       verbosity: 0,
@@ -60,14 +71,15 @@ async function loadParser(): Promise<PdfParser> {
       isOffscreenCanvasSupported: false,
       isImageDecoderSupported: false,
       useWorkerFetch: false,
-      CMapReaderFactory: NoExternalResources,
-      StandardFontDataFactory: NoExternalResources,
+      CMapReaderFactory: NoExternalCMaps,
+      StandardFontDataFactory: NoExternalFonts,
       stopAtErrors: true,
     });
     return {
       destroy: () => task.destroy(),
       document: task.promise.then((doc): PdfDocument => ({
         numPages: doc.numPages,
+        notes: () => missingFont ? ["External font data was not loaded. Font-dependent text spacing or extraction may be incomplete."] : [],
         // Also rejects owner-encrypted PDFs that open without a password.
         encrypted: async () => {
           const { info } = await doc.getMetadata();
@@ -84,6 +96,7 @@ async function loadParser(): Promise<PdfParser> {
               try {
                 while (true) {
                   const { done, value } = await reader.read();
+                  if (missingCMap) throw new PdfSourceError("PDF requires an external character map. Provide a PDF with embedded text mappings or paste extracted text.", "pdf_invalid");
                   if (done) { complete = true; return; }
                   const items = value.items as Array<PdfTextItem | { type: string }>;
                   yield items.filter((item): item is PdfTextItem => "str" in item);
@@ -217,7 +230,7 @@ export async function readPdfSource(
     if (content.trim().length < MIN_SOURCE_CHARS) {
       throw new PdfSourceError("No usable PDF text layer was found. OCR is not supported; use a text-based PDF or paste extracted text (at least 40 characters).", "pdf_no_text");
     }
-    const notes = [`Processed ${processed} of ${doc.numPages} PDF page(s) from ${name}. Text layer only; no OCR or layout reconstruction.`];
+    const notes = [`Processed ${processed} of ${doc.numPages} PDF page(s) from ${name}. Text layer only; no OCR or layout reconstruction.`, ...(doc.notes?.() ?? [])];
     if (doc.numPages > MAX_PDF_PAGES) notes.push(`PDF page limit: only the first ${MAX_PDF_PAGES} pages were eligible; ${doc.numPages - MAX_PDF_PAGES} later page(s) were omitted.`);
     if (stoppedAt) notes.push(`Text byte limit: stopped before page ${stoppedAt}; ${doc.numPages - processed} page(s) were omitted from the source.`);
     if (blank.length) notes.push(`${blank.length} processed page(s) had no extractable text: ${blank.slice(0, 12).join(", ")}${blank.length > 12 ? `; and ${blank.length - 12} more` : ""}.`);

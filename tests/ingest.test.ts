@@ -4,6 +4,14 @@ import { normalizeSource, IngestError, MAX_SOURCE_BYTES } from "../src/core/inge
 const doc = (body: string) => ({ type: "text" as const, name: "test", content: body });
 
 describe("normalizeSource", () => {
+  it("keeps PDF markup and Unicode literal with stable re-normalized lines", () => {
+    const input = { type: "pdf" as const, name: "guide.pdf", content: '<div>Literal ﬀ and &amp; text remain source evidence.</div>\r\n\r\n\r\n  Indented procedure.\r\n' };
+    const normalized = normalizeSource(input);
+    expect(normalized.text).toBe(input.content.replace(/\r\n/g, "\n").trimEnd());
+    expect(normalizeSource({ ...input, content: normalized.text })).toEqual(normalized);
+    expect(normalized.notes).toEqual([]);
+  });
+
   it("normalizes line endings and collapses blank lines", () => {
     const src = normalizeSource(doc("# Title Heading\n\n\n\nBody line of the document goes right here.\n"));
     expect(src.text).toBe("# Title Heading\n\nBody line of the document goes right here.");

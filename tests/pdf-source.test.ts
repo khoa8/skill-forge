@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, open, rm, symlink, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readPdfSource, MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_PDF_TEXT_BYTES, type PdfParser, type PdfTextItem } from "../src/core/sources/pdf.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { collectFiles } from "../src/core/sources/files.js";
 import { PDF_GUIDE, pdfFixture } from "./helpers/pdf-fixture.js";
+
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 function parser(pages: PdfTextItem[][], encrypted = false) {
   const cleanup = vi.fn();
@@ -32,7 +38,7 @@ describe("bounded local PDF source", () => {
   afterEach(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks(); await rm(sandbox, { recursive: true, force: true }); });
 
   it("extracts real text in page order with stable literal provenance and inert actions", async () => {
-    await writeFile(join(root, "guide.pdf"), pdfFixture([PDF_GUIDE, [], ["Second page contains additional instructions for the widget client.", "https://example.invalid/document"]], true));
+    await writeFile(join(root, "guide.pdf"), pdfFixture([PDF_GUIDE, [], ["Second page contains additional instructions for the widget client.", "https://example.invalid/document"]], { activeContent: true }));
     const fetch = vi.fn(() => { throw new Error("Network forbidden"); });
     vi.stubGlobal("fetch", fetch);
     vi.stubGlobal("pdfExecuted", false);
@@ -43,6 +49,7 @@ describe("bounded local PDF source", () => {
     expect(first.input.content.indexOf("Widget API Guide")).toBeLessThan(first.input.content.indexOf("Second page"));
     expect(first.notes.join(" ")).toContain("no extractable text: 2");
     expect(first.notes.join(" ")).not.toContain(sandbox);
+    expect(first.notes.join(" ")).toContain("External font data was not loaded");
     const normalized = normalizeSource(first.input);
     expect(normalized.text).toContain('<div class="example">Literal markup &amp; stays text.</div>');
     expect(normalizeSource({ ...first.input, content: normalized.text })).toEqual(normalized);
@@ -67,13 +74,23 @@ describe("bounded local PDF source", () => {
     expect((await readPdfSource(join(root, "UPPER.PDF"))).input.name).toBe("UPPER.PDF");
   });
 
+  it("refuses a PDF needing external character maps without fetching resources", async () => {
+    await writeFile(join(root, "cmap.pdf"), pdfFixture([PDF_GUIDE], { externalCMap: true }));
+    const fetch = vi.fn(() => { throw new Error("Network forbidden"); });
+    vi.stubGlobal("fetch", fetch);
+    await expect(readPdfSource("cmap.pdf")).rejects.toMatchObject({ code: "pdf_invalid" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("rejects an oversized sparse binary before parsing", async () => {
     const file = await open(join(root, "big.pdf"), "w");
     await file.truncate(MAX_PDF_BYTES + 1);
     await file.close();
+    const openSpy = vi.mocked(fs.open).mockClear();
     const parse = vi.fn<PdfParser>();
     await expect(readPdfSource("big.pdf", { parse })).rejects.toMatchObject({ code: "pdf_too_large" });
     expect(parse).not.toHaveBeenCalled();
+    expect(openSpy).not.toHaveBeenCalled();
   });
 
   it("processes exactly the bounded prefix and reports all omitted pages", async () => {
@@ -140,6 +157,36 @@ describe("bounded local PDF source", () => {
     await expect(readPdfSource("guide.pdf", { parse, signal: active.signal })).rejects.toMatchObject({ code: "pdf_aborted" });
     expect(page).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("destroys a pending parser on abort and awaits cleanup before rejecting", async () => {
+    const controller = new AbortController();
+    let ready!: () => void;
+    const started = new Promise<void>((resolve) => { ready = resolve; });
+    let rejectDocument!: (reason: Error) => void;
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => { finishCleanup = resolve; });
+    let destroying!: () => void;
+    const destructionStarted = new Promise<void>((resolve) => { destroying = resolve; });
+    const destroy = vi.fn(async () => {
+      rejectDocument(new Error("destroyed"));
+      destroying();
+      await cleanup;
+    });
+    const parse: PdfParser = () => {
+      ready();
+      return { document: new Promise((_, reject) => { rejectDocument = reject; }), destroy };
+    };
+    const pending = readPdfSource("guide.pdf", { parse, signal: controller.signal });
+    let settled = false;
+    const observed = pending.catch((err) => { settled = true; return err; });
+    await started;
+    controller.abort();
+    await destructionStarted;
+    expect(settled).toBe(false);
+    finishCleanup();
+    expect(await observed).toMatchObject({ code: "pdf_aborted" });
     expect(destroy).toHaveBeenCalledOnce();
   });
 });

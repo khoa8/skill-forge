@@ -83,6 +83,7 @@ describe("PDF API integration", () => {
     await writeFile(join(sandbox, "outside.pdf"), pdfFixture());
     await writeFile(join(root, "blank.pdf"), pdfFixture([[]]));
     await writeFile(join(root, "invalid.pdf"), "not a PDF");
+    await writeFile(join(root, "encrypted.pdf"), pdfFixture([PDF_GUIDE], { encrypted: true }));
     const file = await open(join(root, "huge.pdf"), "w");
     await file.truncate(MAX_PDF_BYTES + 1);
     await file.close();
@@ -90,6 +91,7 @@ describe("PDF API integration", () => {
       [join(sandbox, "outside.pdf"), 403, "pdf_outside_root"], ["missing.pdf", 404, "pdf_not_found"],
       ["huge.pdf", 413, "pdf_too_large"], ["blank.pdf", 422, "pdf_no_text"], ["invalid.pdf", 422, "pdf_invalid"],
       ["bad\0.pdf", 400, "pdf_bad_path"],
+      ["encrypted.pdf", 422, "pdf_encrypted"],
     ] as const) {
       const res = await request(app).post("/api/generate").send({ sourceType: "pdf", path }).expect(status);
       expect(res.body.code).toBe(code);
