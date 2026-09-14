@@ -31,7 +31,7 @@ import {
   normalizeStoredSource,
   SourceRenormalizationError,
 } from "./store.js";
-import type { ExportTarget, SourceType, RepositoryAnalysis, CanonicalSkill } from "../core/types.js";
+import { ExportTarget, type SourceType, type RepositoryAnalysis, type CanonicalSkill } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 import { createHostValidationMiddleware } from "./host-guard.js";
@@ -87,7 +87,7 @@ const GenerateBody = z.object({
   requestedName: z.string().max(80).optional(),
 });
 
-const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
+const ExportBody = z.object({ target: ExportTarget });
 
 const PDF_ERROR_STATUS: Record<PdfErrorCode, number> = {
   pdf_bad_path: 400, pdf_not_found: 404, pdf_outside_root: 403,
@@ -680,7 +680,9 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       });
     } catch (err) {
       const code = err instanceof ExportError ? err.code : "export_failed";
-      const status = err instanceof ExportError && err.code === "export_target_unsupported" ? 400 : 500;
+      const status = err instanceof ExportError
+        ? err.code === "export_target_unsupported" ? 400 : err.code === "export_codex_metadata_invalid" ? 422 : 500
+        : 500;
       res.status(status).json({ error: err instanceof Error ? err.message : String(err), code });
     }
   }));
