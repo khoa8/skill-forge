@@ -46,7 +46,7 @@ describe("health & metadata", () => {
 
   it("lists exporters with format basis", async () => {
     const res = await request(app).get("/api/exporters").expect(200);
-    expect(res.body.targets).toHaveLength(2);
+    expect(res.body.targets.map((t: { target: string }) => t.target).sort()).toEqual(["claude-code", "generic", "openai-codex"]);
     for (const t of res.body.targets) expect(t.formatBasis).toBeTruthy();
   });
 
@@ -123,12 +123,12 @@ describe("skill inspection, validation, export", () => {
     expect(res.body.validation.checks.length).toBeGreaterThanOrEqual(14);
   });
 
-  it("exports a real ZIP with correct headers and entries", async () => {
+  it.each(["claude-code", "generic", "openai-codex"])("exports %s ZIP with correct headers and entries", async (target) => {
     const res = await request(app)
       .post(`/api/skills/${skillId}/export`)
       .buffer(true)
       .parse(binaryParser)
-      .send({ target: "claude-code" })
+      .send({ target })
       .expect(200);
     expect(res.headers["content-type"]).toBe("application/zip");
     expect(res.headers["content-disposition"]).toContain(".zip");
@@ -145,7 +145,7 @@ describe("skill inspection, validation, export", () => {
 
   it("refuses unsupported export targets with 400", async () => {
     const res = await request(app).post(`/api/skills/${skillId}/export`).send({ target: "not-a-target" }).expect(400);
-    expect(res.body.supported).toEqual(["claude-code", "generic"]);
+    expect(res.body.supported.sort()).toEqual(["claude-code", "generic", "openai-codex"]);
   });
 
   it("blocks export of packages with validation errors (422)", async () => {
@@ -169,6 +169,36 @@ describe("skill inspection, validation, export", () => {
       expect(exportRes.body.validation.executed).toBe(true);
       expect(exportRes.body.error).toContain("blocked");
     }
+  });
+
+  it("Codex preserves persisted edits and rejects incompatible target metadata", async () => {
+    const generated = await request(app).post("/api/generate")
+      .send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "codex-edited" }).expect(200);
+    const result = generated.text.trim().split("\n").map((line) => JSON.parse(line)).find((event) => event.type === "result");
+    const md = result.skill.files.find((file: { path: string }) => file.path === "SKILL.md");
+    const edited = md.content.replace(/^description: .*$/m, 'description: "Reviewed payment workflows"');
+    const updated = await request(app).post("/api/skills/codex-edited/update-file")
+      .send({ path: "SKILL.md", content: edited }).expect(200);
+    expect(updated.body.validation.passed).toBe(true);
+    expect(updated.body.skill.provenance.filter((p: { filePath: string }) => p.filePath === "SKILL.md")).toEqual([]);
+    const exported = await request(app).post("/api/skills/codex-edited/export")
+      .buffer(true).parse(binaryParser).send({ target: "openai-codex" }).expect(200);
+    const zip = await JSZip.loadAsync(exported.body);
+    const persisted = updated.body.skill.files.find((file: { path: string }) => file.path === "SKILL.md");
+    expect(await zip.file("codex-edited/SKILL.md")!.async("string")).toBe(persisted.content);
+    const manifest = JSON.parse(await zip.file("codex-edited/manifest.json")!.async("string"));
+    expect(manifest.files.find((file: { path: string }) => file.path === "SKILL.md").userEdited).toBe(true);
+    expect(await zip.file("codex-edited/manifest.json")!.async("string")).toBe(updated.body.skill.files.find((file: { path: string }) => file.path === "manifest.json").content);
+
+    // Valid canonical metadata can still violate the stricter Codex authoring contract.
+    const incompatible = persisted.content.replace(/^description: .*$/m, 'description: "Use <payment> workflows"');
+    const editedAgain = await request(app).post("/api/skills/codex-edited/update-file")
+      .send({ path: "SKILL.md", content: incompatible }).expect(200);
+    expect(editedAgain.body.validation.passed).toBe(true);
+    const blocked = await request(app).post("/api/skills/codex-edited/export")
+      .send({ target: "openai-codex" }).expect(422);
+    expect(blocked.body.code).toBe("export_codex_metadata_invalid");
+    expect(blocked.body.error).toContain("angle brackets");
   });
 
   it("returns 404 for unknown skills", async () => {

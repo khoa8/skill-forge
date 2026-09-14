@@ -78,7 +78,7 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
 | **Validate** | A fixed registry of deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
 | **Preview** | Inspect every generated file with its purpose and provenance before exporting. Provenance records are clickable and show the exact source lines (verbatim, never reconstructed). Generated files can be edited in place before export: edits are persisted, marked `user-edited` (their source provenance is dropped honestly, and the manifest file inventory records `userEdited: true`), manifest hashes are resynchronized, and deterministic validation re-runs — failing edits block export. Generated skills persist on disk (`.data/skills/`) and survive server restarts with concurrency and collision protection (`skill_id_conflict`). |
-| **Export** | Real ZIP downloads for **Claude Code** and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
+| **Export** | Real ZIP downloads for **Claude Code**, **OpenAI Codex**, and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
 
 ## Generated package
 
@@ -94,6 +94,8 @@ meridian-payments-api/
 ├── evals/                # deterministic, source-derived grounding checks (manual)
 └── manifest.json         # source identity (sha256), gap list, file inventory with hashes and userEdited flags
 ```
+
+The OpenAI Codex exporter preserves the canonical files and checks metadata against the [official OpenAI skill format](https://learn.chatgpt.com/docs/build-skills). Optional `agents/openai.yaml` metadata is omitted. Package structure is covered by tests; Codex runtime behavior has not been verified.
 
 Every file has a recorded purpose; ceremonial empty files are a validation error. Relative links inside verbatim excerpts are shown as paths (`` `docs/x.md` ``) instead of dangling links.
 

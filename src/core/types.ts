@@ -365,7 +365,7 @@ export type ValidationCheck = z.infer<typeof ValidationCheck>;
 // Export
 // ---------------------------------------------------------------------------
 
-export const ExportTarget = z.enum(["claude-code", "generic"]);
+export const ExportTarget = z.enum(["claude-code", "generic", "openai-codex"]);
 export type ExportTarget = z.infer<typeof ExportTarget>;
 
 export const ExportResult = z.object({

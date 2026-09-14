@@ -146,6 +146,41 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
   };
 }
 
+// Codex uses the canonical directory layout. Check the official skill-creator
+// contract without rewriting user content or inventing optional openai.yaml.
+function exportOpenaiCodex(skill: CanonicalSkill): ExportedPackage {
+  const invalid = (message: string): never => {
+    throw new ExportError(`Cannot export to openai-codex: ${message}`, "export_codex_metadata_invalid");
+  };
+  const skillMd = skill.files.find((f) => f.path === "SKILL.md");
+  const fm = skillMd?.content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!fm) return invalid("SKILL.md requires YAML front matter with name and description.");
+  let value: unknown;
+  try {
+    value = parseYaml(fm[1]!);
+  } catch {
+    return invalid("SKILL.md front matter must be valid YAML with unique keys.");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return invalid("SKILL.md front matter must be a YAML mapping.");
+  }
+  const metadata = value as Record<string, unknown>;
+  const allowed = new Set(["name", "description", "license", "allowed-tools", "metadata"]);
+  if (Object.keys(metadata).some((key) => !allowed.has(key))) {
+    return invalid("Supported front matter keys are name, description, license, allowed-tools, metadata.");
+  }
+  const { name, description } = metadata;
+  if (typeof name !== "string" || name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
+    return invalid("name must be a lowercase letters/digits slug of 1–64 characters, with single internal hyphens.");
+  }
+  if (name !== skill.meta.name) return invalid("Front matter name must match the canonical package name.");
+  if (typeof description !== "string" || !description.trim() || [...description.trim()].length > 1024 || /[<>]/.test(description)) {
+    return invalid("description must be non-empty, at most 1024 characters, and contain no angle brackets.");
+  }
+  // No file transformation: preserve manifest hashes, edits, provenance and order.
+  return { target: "openai-codex", skillName: skill.meta.name, files: skill.files, notes: [] };
+}
+
 // ---------------------------------------------------------------------------
 // generic exporter — ecosystem-neutral package following the AGENTS.md
 // convention: an AGENTS.md wrapper that tells any agent how to use the skill,
@@ -199,9 +234,16 @@ function exportGeneric(skill: CanonicalSkill): ExportedPackage {
 export const EXPORTERS: Record<ExportTarget, (skill: CanonicalSkill) => ExportedPackage> = {
   "claude-code": exportClaudeCode,
   generic: exportGeneric,
+  "openai-codex": exportOpenaiCodex,
 };
 
 export const EXPORT_TARGET_INFO: ExporterInfo[] = [
+  {
+    target: "openai-codex",
+    label: "OpenAI Codex",
+    description: "Skill folder with SKILL.md and all canonical supporting files. Optional OpenAI UI metadata is omitted.",
+    formatBasis: "OpenAI Build skills documentation and openai/skills skill-creator validator: required name/description YAML front matter. Package structure checked by exporter tests; Codex runtime behavior is not verified.",
+  },
   {
     target: "claude-code",
     label: "Claude Code",
