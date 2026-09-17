@@ -26,6 +26,8 @@ import type {
 } from "./types.js";
 import type { SkillPlan } from "./plan.js";
 import { slugify, sha256 } from "./util.js";
+import { allocateReferences, allocateWorkflows, deriveEvalItems, neutralizeRelativeLinks } from "./evals.js";
+export { neutralizeRelativeLinks } from "./evals.js";
 
 export const GAP_NOTE =
   "> Not specified in the source material. SkillForge marked this gap instead of inventing content — verify against the primary documentation before relying on it.";
@@ -114,32 +116,6 @@ export function detectEnvVarInputs(analysis: SourceAnalysis): { token: string; l
     s.text.split("\n").forEach((l, i) => scan(l, s.startLine + i));
   });
   return [...found.entries()].slice(0, 12).map(([token, line]) => ({ token, line }));
-}
-
-/** Allocate supporting paths once by the same rules for planning and synthesis. */
-function allocateReferences(analysis: SourceAnalysis) {
-  const sections = analysis.sections.some((s) => s.level === 2 && s.endLine > s.startLine)
-    ? analysis.sections.filter((s) => s.level === 2) : analysis.sections.filter((s) => s.level === 1);
-  const used = new Set<string>();
-  return sections.slice(0, 12).flatMap((section) => {
-    const body = section.text.split("\n").slice(1).join("\n").trim();
-    if (body.length < 20) return [];
-    const path = allocatePath(`references/${section.id}`, used);
-    return [{ section, body, path }];
-  });
-}
-
-function allocatePath(base: string, used: Set<string>): string {
-  let path = `${base}.md`;
-  let n = 2;
-  while (used.has(path)) path = `${base}-${n++}.md`;
-  used.add(path);
-  return path;
-}
-
-function allocateWorkflows(analysis: SourceAnalysis) {
-  const used = new Set<string>();
-  return analysis.procedures.slice(0, 8).map((proc) => ({ proc, path: allocatePath(`workflows/${slugify(proc.title)}`, used) }));
 }
 
 /** Derive the deterministic plan the mock provider uses. */
@@ -268,21 +244,6 @@ function constraintSentences(analysis: SourceAnalysis, max: number): string[] {
 }
 
 const HEADINGISH = /^#{1,6}\s/;
-
-/**
- * Relative markdown links inside *verbatim source excerpts* point at files in
- * the original repository — which do not exist inside a generated skill
- * package. Rewriting them to plain code spans keeps the text honest without
- * shipping dangling references (the internal-links check enforces this).
- * Absolute URLs and in-page anchors are left untouched.
- */
-export function neutralizeRelativeLinks(markdown: string): string {
-  return markdown.replace(/\[([^\]]*)\]\(([^)\n]+)\)/g, (match, label: string, target: string) => {
-    const t = target.trim();
-    if (/^[a-z]+:/i.test(t) || t.startsWith("#") || t.startsWith("/")) return match;
-    return `${label.replace(/\s+/g, " ")} \`${t}\``.trim();
-  });
-}
 
 export function dedupe(items: string[]): string[] {
   const seen = new Set<string>();
@@ -436,33 +397,7 @@ export function buildCanonicalSkill(
   }
 
   // --- Deterministic evals derived from source structure.
-  const evals: { id: string; kind: string; prompt: string; expect: string }[] = [];
-  for (const link of referenceLinks.slice(0, 6)) {
-    evals.push({
-      id: `eval-${evals.length + 1}`,
-      kind: "grounding",
-      prompt: `Does the skill describe "${link.heading}"?`,
-      expect: `SKILL.md or ${link.path} must cover this topic (source lines ${link.range}).`,
-    });
-  }
-  if (!isCodebase) {
-    for (const wf of workflowLinks.slice(0, 4)) {
-      evals.push({
-        id: `eval-${evals.length + 1}`,
-        kind: "procedure",
-        prompt: `Can the agent execute the "${wf.title}" procedure end to end?`,
-        expect: `${wf.path} lists ${wf.stepCount} steps matching the source.`,
-      });
-    }
-    if (analysis.commands.length > 0) {
-      evals.push({
-        id: `eval-${evals.length + 1}`,
-        kind: "grounding",
-        prompt: "Do any commands in the skill appear in the source?",
-        expect: `Commands must be traceable to the source (detected ${analysis.commands.length} command lines).`,
-      });
-    }
-  }
+  const evals = deriveEvalItems(source, analysis);
   if (evals.length > 0) {
     const evalsPath = "evals/evals.json";
     usedPaths.add(evalsPath);
@@ -479,11 +414,13 @@ export function buildCanonicalSkill(
         "# Evals",
         "",
         "These checks were derived deterministically from the source structure (sections,",
-        "procedures, commands). They are grounding checks: run them manually by asking an",
-        "agent the `prompt` and verifying the `expect` condition holds using only the",
-        "generated package and the original source.",
-        "",
-        "SkillForge does not execute evals automatically in this version.",
+        "procedures, commands). Each eval carries an optional structured assertion enabling",
+        "bounded, offline, deterministic evaluation: topic-retention checks verify a reference",
+        "file retains its source excerpt and stays discoverable from SKILL.md; procedure-fidelity",
+        "checks compare ordered step text in workflow files against the source. Nothing is ever",
+        "executed; evaluation is advisory, does not replace deterministic validation, and lists",
+        "pass, concern, or not-executable per check with no aggregate quality score.",
+        "Evals without assertions (manual grounding questions) and command checks remain manual.",
         "",
       ].join("\n"),
       "Explains what the evals are and that they are manual grounding checks.",
@@ -775,7 +712,7 @@ export function qualifyEditedFileContent(path: string, content: string, sourceNa
   }
 
   if (path === "evals/README.md") {
-    const origEvalNotice = "These checks were derived deterministically from the source structure (sections,\nprocedures, commands). They are grounding checks: run them manually by asking an\nagent the `prompt` and verifying the `expect` condition holds using only the\ngenerated package and the original source.";
+    const origEvalNotice = "These checks were derived deterministically from the source structure (sections,\nprocedures, commands). Each eval carries an optional structured assertion enabling\nbounded, offline, deterministic evaluation: topic-retention checks verify a reference\nfile retains its source excerpt and stays discoverable from SKILL.md; procedure-fidelity\nchecks compare ordered step text in workflow files against the source. Nothing is ever\nexecuted; evaluation is advisory, does not replace deterministic validation, and lists\npass, concern, or not-executable per check with no aggregate quality score.\nEvals without assertions (manual grounding questions) and command checks remain manual.";
     if (content.includes(origEvalNotice)) {
       return content.replace(
         origEvalNotice,
