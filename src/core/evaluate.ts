@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { lexer as lexMarkdown } from "marked";
 import type {
   CanonicalSkill,
   EvalAssertion,
@@ -98,27 +99,54 @@ function skillMdBody(skill: CanonicalSkill): string | null {
   return skillMd ? targetBody(skillMd) : null;
 }
 
-const MD_LINK_TARGET_RE = /\[[^\]]*\]\(([^)\n]+)\)/g;
-
 /**
- * Explicit Markdown link destinations in the SKILL.md body, resolved the way
- * the internal-link validator resolves root-relative links — as inert text
- * only (no filesystem access, no fetching).
- *
- * Discoverability is structural: a topic is discoverable when SKILL.md links
- * to its reference file, regardless of the language or script the prose is
- * written in. Token overlap across the document is deliberately not used: it
- * false-concerns on non-Latin documentation (whose words never tokenize) and
- * false-passes when generic words survive elsewhere after the link is gone.
+ * Hrefs of actual rendered Markdown links in the SKILL.md body. The Markdown
+ * lexer distinguishes live links from lookalikes: images, fenced code, inline
+ * code spans, HTML comments, and escaped text never produce link tokens,
+ * while titled (`[t](path "title")`) and angle-bracket (`[t](<path>)`)
+ * destinations lex to their real href. Iterative walk, so deeply nested input
+ * cannot overflow the stack. Text-only: nothing is fetched, resolved against
+ * a filesystem, or executed.
  */
 function skillMdLinkTargets(skillMd: string): Set<string> {
+  const hrefs = new Set<string>();
+  const stack: unknown[] = [lexMarkdown(skillMd)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) stack.push(node[i]);
+      continue;
+    }
+    if (typeof node !== "object" || node === null) continue;
+    const token = node as {
+      type?: unknown;
+      href?: unknown;
+      tokens?: unknown;
+      items?: unknown;
+      header?: unknown;
+      rows?: unknown;
+    };
+    if (token.type === "link") {
+      // Link text cannot nest another live link.
+      if (typeof token.href === "string") hrefs.add(token.href);
+      continue;
+    }
+    // Images, code, HTML (including comments), escapes, and link definitions
+    // render no navigable link.
+    if (
+      token.type === "image" || token.type === "code" || token.type === "codespan"
+      || token.type === "html" || token.type === "escape" || token.type === "def"
+    ) {
+      continue;
+    }
+    stack.push(token.tokens, token.items, token.header, token.rows);
+  }
   const targets = new Set<string>();
-  for (const match of skillMd.matchAll(MD_LINK_TARGET_RE)) {
-    const raw = match[1]!.split("#")[0]!.trim();
+  for (const href of hrefs) {
+    const raw = href.split("#")[0]!.trim();
     if (raw.length === 0 || raw.startsWith("#")) continue;
     if (/^[a-z]+:\/\//i.test(raw) || raw.startsWith("mailto:")) continue;
-    const clean = raw.startsWith("/") ? raw.slice(1) : raw;
-    const normalized = posix.normalize(clean);
+    const normalized = posix.normalize(raw.startsWith("/") ? raw.slice(1) : raw);
     if (normalized === ".." || normalized.startsWith("../")) continue;
     targets.add(normalized);
   }
