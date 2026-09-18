@@ -11,6 +11,11 @@
  * - submodules are never followed; linked repositories are never traversed;
  * - hard bounds: file count, per-file bytes, total bytes, path depth, a
  *   per-request timeout, and an overall ingestion deadline;
+ * - one ingestion run is pinned to a single immutable commit: the requested
+ *   ref (or default branch) is resolved once via the commits API, and the
+ *   recursive tree plus every raw file read use that commit SHA, so a branch
+ *   advancing mid-ingestion cannot mix tree metadata from one revision with
+ *   file contents from another;
  * - public repositories only: a token (SKILLFORGE_GITHUB_TOKEN) exists solely
  *   to raise the api.github.com rate limit for public repositories — it is
  *   never presented as enabling private-repo access, and is never sent to
@@ -227,7 +232,17 @@ export interface FetchGithubOptions {
 
 export interface GithubSourceResult {
   input: SourceInput;
-  repo: { owner: string; repo: string; ref: string; defaultBranchUsed: boolean };
+  repo: {
+    owner: string;
+    repo: string;
+    /** The requested/logical ref (branch, tag, explicit SHA, or resolved
+     * default branch) — what the user asked for, for display. */
+    ref: string;
+    /** The immutable commit SHA actually inspected: every tree and raw
+     * content read in this ingestion used this revision. */
+    commitSha: string;
+    defaultBranchUsed: boolean;
+  };
   files: CollectedFile[];
   notes: string[];
 }
@@ -281,8 +296,23 @@ export async function apiFetch(
       "github_fetch_failed",
     );
   }
-  throwForApiStatus(res, url);
+  try {
+    throwForApiStatus(res, url);
+  } catch (err) {
+    // The status body will never be consumed — release it without buffering
+    // so the connection does not linger. Cleanup never replaces the typed
+    // domain error below.
+    await cancelResponseBody(res);
+    throw err;
+  }
   return res;
+}
+
+/** Release an unconsumed response body without buffering it. Cleanup is
+ * failure-tolerant: a body that is already closed or errors on cancel must
+ * never replace the caller's typed domain error/result. */
+export async function cancelResponseBody(res: Response): Promise<void> {
+  await res.body?.cancel().catch(() => {});
 }
 
 /**
@@ -316,11 +346,12 @@ function throwForApiStatus(res: Response, url: string): void {
     }
   }
   if (res.status === 404) {
+    const isRefUrl = url.includes("/git/trees/") || url.includes("/commits/");
     throw new GithubSourceError(
-      url.includes("/git/trees/")
+      isRefUrl
         ? "The branch, tag, or commit was not found in this repository."
         : "Repository not found. SkillForge reads public repositories only — private repositories are not supported (they appear as not found without credentials, and are deliberately not fetched).",
-      url.includes("/git/trees/") ? "github_ref_not_found" : "github_not_found",
+      isRefUrl ? "github_ref_not_found" : "github_not_found",
     );
   }
   throw new GithubSourceError(
@@ -362,13 +393,22 @@ export async function fetchRawFile(
     if (overallSignal.aborted) return { kind: "deadline_exceeded" };
     return { kind: "unreachable" }; // reported as a skipped-file note by the caller
   }
-  if (!res.ok) return { kind: "unreachable" };
+  if (!res.ok) {
+    await cancelResponseBody(res);
+    return { kind: "unreachable" };
+  }
   // A redirect must land on GitHub's raw content hosts, never elsewhere.
   // (Manually constructed test responses have an empty final URL; the runtime
   // fetch always populates it.)
-  if (res.url !== "" && !RAW_HOSTS.has(new URL(res.url).hostname.toLowerCase())) return { kind: "unreachable" };
+  if (res.url !== "" && !RAW_HOSTS.has(new URL(res.url).hostname.toLowerCase())) {
+    await cancelResponseBody(res);
+    return { kind: "unreachable" };
+  }
   const declared = res.headers.get("content-length");
-  if (declared && Number.parseInt(declared, 10) > maxFileBytes) return { kind: "too_large" };
+  if (declared && Number.parseInt(declared, 10) > maxFileBytes) {
+    await cancelResponseBody(res);
+    return { kind: "too_large" };
+  }
   // The body is streamed under the per-file cap: an oversized or underreported
   // body is torn down mid-read instead of being buffered to completion first.
   try {
@@ -482,6 +522,60 @@ export async function resolvePublicGithubRepo(
   };
 }
 
+/** Immutable commit SHAs as returned by the GitHub commits API (40 lowercase
+ * hex characters; case-insensitive on read). */
+export const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/**
+ * Resolve a requested ref (branch, tag, or explicit/abbreviated SHA) to the
+ * single immutable commit SHA the rest of the ingestion must use.
+ *
+ * Uses `GET /repos/{owner}/{repo}/commits/{ref}` (GitHub documents `ref` as a
+ * commit SHA, branch name, or tag name; the response's top-level `sha` is the
+ * dereferenced commit — for an annotated tag this is the commit the tag
+ * points to, not the tag object). The top-level `sha` is validated as a
+ * commit SHA and anything else fails closed; the nested `commit.tree.sha` is
+ * a tree identity and is deliberately never used here.
+ *
+ * Resolution happens exactly once per ingestion, on api.github.com (token
+ * confinement unchanged), inside the overall deadline. Every downstream tree
+ * and raw content read must use the returned SHA — never re-resolve the
+ * mutable ref per file.
+ */
+export async function resolveCommitSha(
+  fetchImpl: typeof fetch,
+  apiBase: string,
+  ref: string,
+  opts: {
+    timeoutMs: number;
+    token?: string;
+    signal: AbortSignal;
+    callerSignal?: AbortSignal;
+    maxJsonBytes?: number;
+  },
+): Promise<string> {
+  const res = await apiFetch(fetchImpl, `${apiBase}/commits/${encodeURIComponent(ref)}`, {
+    timeoutMs: opts.timeoutMs,
+    token: opts.token,
+    signal: opts.signal,
+    callerSignal: opts.callerSignal,
+  });
+  const payload = (await readBodyWithDeadline(
+    res,
+    opts.signal,
+    "json",
+    opts.maxJsonBytes ?? MAX_GITHUB_JSON_BYTES,
+    opts.callerSignal,
+  )) as { sha?: unknown };
+  if (typeof payload.sha !== "string" || !COMMIT_SHA_RE.test(payload.sha)) {
+    throw new GithubSourceError(
+      `GitHub did not return a valid commit SHA for ref "${ref}".`,
+      "github_fetch_failed",
+    );
+  }
+  return payload.sha.toLowerCase();
+}
+
 /** Fetch a bounded documentation tree from a GitHub repository. */
 export async function fetchGithubSource(
   rawUrl: string,
@@ -516,8 +610,18 @@ export async function fetchGithubSource(
   const ref = repoRef.ref;
   const defaultBranchUsed = repoRef.defaultBranchUsed;
 
-  // One bounded recursive tree request.
-  const treeRes = await apiFetch(fetchImpl, `${apiBase}/git/trees/${encodeURIComponent(ref)}?recursive=1`, {
+  // Pin the mutable ref to one immutable commit before any revision-sensitive
+  // read. The tree and every raw file below use commitSha — never `ref`.
+  const commitSha = await resolveCommitSha(fetchImpl, apiBase, ref, {
+    timeoutMs,
+    token,
+    signal: deadline,
+    callerSignal: opts.signal,
+    maxJsonBytes: MAX_GITHUB_JSON_BYTES,
+  });
+
+  // One bounded recursive tree request, at the pinned revision.
+  const treeRes = await apiFetch(fetchImpl, `${apiBase}/git/trees/${commitSha}?recursive=1`, {
     timeoutMs,
     token,
     signal: deadline,
@@ -575,7 +679,7 @@ export async function fetchGithubSource(
     // exact post-fetch projection below — metadata `size` may be missing or
     // wrong, so it must not gate the total.)
     const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
-    const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
+    const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${commitSha}/${rawPath}`;
     const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline, opts.signal);
     if (opts.signal?.aborted) {
       throw new GithubSourceError("The request was aborted by the client.", "github_aborted");
@@ -626,10 +730,15 @@ export async function fetchGithubSource(
   } else {
     notes.push(`Read ${files.length} documentation file(s) from ${ref0.owner}/${ref0.repo}@${ref} under "${ref0.path}".`);
   }
+  // Human-readable snapshot provenance: the requested ref is kept for display
+  // while the exact inspected revision is recorded (this note also persists
+  // into the manifest source notes — docs mode has no structured repository
+  // block, so the note is the durable record of the pinned revision).
+  notes.push(`Pinned ${ref0.owner}/${ref0.repo}@${ref} to commit ${commitSha} for this ingestion; the repository tree and all file contents were read at that revision.`);
 
   return {
     input: combineGithubFiles(files, `${ref0.owner}/${ref0.repo}`),
-    repo: repoRef,
+    repo: { ...repoRef, commitSha },
     files,
     notes,
   };

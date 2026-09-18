@@ -170,6 +170,9 @@ const RAW: Record<string, string> = {
 function scopedFetchHarness() {
   return (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), {
         status: 200,
@@ -279,6 +282,9 @@ function accountingHarness(o: {
   };
   return (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
     }
@@ -480,6 +486,9 @@ describe("P1-7: sensitive files are never ingested", () => {
     };
     const impl = (async (input: string | URL | Request) => {
       const url = String(input);
+      if (url.includes("/commits/")) {
+        return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
         return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
       }
@@ -677,6 +686,9 @@ describe("P1-4: editing a codebase skill preserves repository provenance", () =>
     // 1. Generate a codebase skill via the API (stubbed GitHub).
     const impl = (async (input: string | URL | Request) => {
       const url = String(input);
+      if (url.includes("/commits/")) {
+        return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
         return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
       }
@@ -810,6 +822,9 @@ function leakyMonorepoHarness() {
   };
   return (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
     }
@@ -1044,6 +1059,9 @@ function generatedNoiseHarness() {
   };
   return (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
     }
@@ -1177,6 +1195,9 @@ function noRootHarness() {
   };
   return (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), { status: 200, headers: { "content-type": "application/json" } });
     }

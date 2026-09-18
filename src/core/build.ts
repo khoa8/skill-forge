@@ -576,7 +576,11 @@ export interface ManifestRepositoryBlock {
   url: string;
   owner: string;
   name: string;
+  /** The requested/logical ref, kept for display. */
   ref: string;
+  /** The immutable commit SHA actually inspected. Optional for backward
+   * compatibility with historical records that predate snapshot pinning. */
+  commitSha?: string;
   mode: "codebase";
   /** Subpath scope the analysis covers; absent = whole repository. */
   scope?: string;
@@ -599,6 +603,7 @@ export function manifestRepositoryBlock(repository: RepositoryAnalysis): Manifes
     owner: repository.repository.owner,
     name: repository.repository.name,
     ref: repository.repository.ref,
+    ...(repository.repository.commitSha ? { commitSha: repository.repository.commitSha } : {}),
     mode: repository.mode,
     ...(repository.repository.scope ? { scope: repository.repository.scope } : {}),
     inspectedFiles: repository.inspectedFiles,

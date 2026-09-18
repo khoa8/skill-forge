@@ -14,6 +14,8 @@ type FetchLog = { urls: string[]; apiHeaders: Record<string, string>; rawHeaders
 function githubFetch(o: {
   repo?: Record<string, unknown> | number;
   tree?: Record<string, unknown> | number;
+  /** Commit SHA returned by the ref-resolution request (GET …/commits/<ref>). */
+  commitSha?: string | number;
   raw?: Record<string, string>;
   rawStatus?: Record<string, number>;
   failUrls?: string[];
@@ -22,6 +24,8 @@ function githubFetch(o: {
   log?: FetchLog;
 }) {
   const record = o.log;
+  // Pinned snapshot identity used by default; individual tests override it.
+  const commitSha = typeof o.commitSha === "string" ? o.commitSha : "a".repeat(40);
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -32,10 +36,16 @@ function githubFetch(o: {
     record?.urls.push(url);
     if (o.firstResponse) return o.firstResponse;
     if (o.failUrls?.some((f) => url.includes(f))) throw new TypeError("network unreachable");
-    if (isApi && !url.includes("/git/trees/")) {
+    if (isApi && !url.includes("/git/trees/") && !url.includes("/commits/")) {
       const status = typeof o.repo === "number" ? o.repo : 200;
       const body = typeof o.repo === "number" ? { message: "Not Found" } : (o.repo ?? { default_branch: "main", private: false, visibility: "public" });
       return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/commits/")) {
+      if (typeof o.commitSha === "number") {
+        return new Response(JSON.stringify({ message: "Not Found" }), { status: o.commitSha, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ sha: commitSha }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (url.includes("/git/trees/")) {
       const status = typeof o.tree === "number" ? o.tree : 200;
@@ -167,10 +177,14 @@ describe("fetchGithubSource (injected fetch)", () => {
     });
     expect(result.repo.defaultBranchUsed).toBe(true);
     expect(result.repo.ref).toBe("main");
+    expect(result.repo.commitSha).toBe("a".repeat(40));
     expect(log.urls[0]).toBe("https://api.github.com/repos/acme/widgets");
-    expect(log.urls[1]).toContain("/git/trees/main?");
-    // Raw content URLs carry the resolved ref.
-    expect(log.urls.some((u) => u.startsWith("https://raw.githubusercontent.com/acme/widgets/main/"))).toBe(true);
+    // The requested ref is resolved once to an immutable commit …
+    expect(log.urls[1]).toContain("/commits/main");
+    // … and the tree plus every raw file use the pinned SHA, never the branch.
+    expect(log.urls[2]).toContain(`/git/trees/${"a".repeat(40)}?`);
+    expect(log.urls.some((u) => u.startsWith(`https://raw.githubusercontent.com/acme/widgets/${"a".repeat(40)}/`))).toBe(true);
+    expect(log.urls.some((u) => u.includes("/widgets/main/"))).toBe(false);
   });
 
   it("uses an explicit ref from tree URLs while validating publicness via metadata", async () => {
@@ -180,8 +194,10 @@ describe("fetchGithubSource (injected fetch)", () => {
     });
     expect(result.repo.defaultBranchUsed).toBe(false);
     expect(result.repo.ref).toBe("v2");
+    expect(result.repo.commitSha).toBe("a".repeat(40));
     expect(log.urls[0]).toBe("https://api.github.com/repos/acme/widgets");
-    expect(log.urls[1]).toContain("/git/trees/v2?");
+    expect(log.urls[1]).toContain("/commits/v2");
+    expect(log.urls[2]).toContain(`/git/trees/${"a".repeat(40)}?`);
   });
 
   it("combines documentation with path headers and README first, in deterministic order", async () => {
@@ -659,7 +675,9 @@ describe("fetchGithubSource (injected fetch)", () => {
                     { path: "docs/guide.md", type: "blob", size: GUIDE.length },
                   ],
                 }
-              : { default_branch: "main", private: false, visibility: "public" },
+              : url.includes("/commits/")
+                ? { sha: "a".repeat(40) }
+                : { default_branch: "main", private: false, visibility: "public" },
           ),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -690,7 +708,9 @@ describe("fetchGithubSource (injected fetch)", () => {
           JSON.stringify(
             url.includes("/git/trees/")
               ? { sha: "x", truncated: false, tree: [{ path: "README.md", type: "blob", size: README.length }] }
-              : { default_branch: "main", private: false, visibility: "public" },
+              : url.includes("/commits/")
+                ? { sha: "a".repeat(40) }
+                : { default_branch: "main", private: false, visibility: "public" },
           ),
           { status: 200, headers: { "content-type": "application/json" } },
         );
