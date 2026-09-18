@@ -20,13 +20,13 @@
     },
     {
       "path": "evals/evals.json",
-      "bytes": 1892,
-      "sha256": "7a44c12f8c3f815912b5e377ea1130e5908bcb99b4dbecfd3f5ca714bd3118e2"
+      "bytes": 4395,
+      "sha256": "6bc10cc6ca477540b3f8c092bbc5a2fa54e5e72fe20ea3c898bb01bcd07b08c7"
     },
     {
       "path": "evals/README.md",
-      "bytes": 357,
-      "sha256": "cd08a0b02003f51baf181ec0d6c9055c23cf4fcbb08de65c2325238dacf1210a"
+      "bytes": 686,
+      "sha256": "b785f514e9f89ff8c545bbb6e8b63d57d18f56533bc5146b4232f43d89434344"
     },
     {
       "path": "examples/creating-a-payment-bash.sh",

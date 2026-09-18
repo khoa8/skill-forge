@@ -361,11 +361,50 @@ export const ValidationReport = z.object({
 export type ValidationReport = z.infer<typeof ValidationReport>;
 export type ValidationCheck = z.infer<typeof ValidationCheck>;
 
+export const EvalAssertion = z.object({
+  type: z.enum(["topic-retention", "procedure-fidelity"]),
+  filePath: z.string().min(1).max(256),
+  sourceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceLines: z.tuple([z.number().int().min(1), z.number().int().min(1)]),
+}).strict();
+export type EvalAssertion = z.infer<typeof EvalAssertion>;
+
+export const EvalItem = z.object({
+  id: z.string().regex(/^eval-[a-z0-9-]+$/).max(120),
+  kind: z.enum(["grounding", "procedure"]),
+  prompt: z.string().trim().min(5).max(4096),
+  expect: z.string().trim().min(5).max(4096),
+  assertions: z.array(EvalAssertion).length(1).optional(),
+}).strict();
+export type EvalItem = z.infer<typeof EvalItem>;
+
+export const EvaluationCheck = z.object({
+  id: z.string(),
+  title: z.string(),
+  status: z.enum(["pass", "concern", "not-executable"]),
+  filePath: z.string().optional(),
+  message: z.string(),
+  sourceLines: z.tuple([z.number().int().min(1), z.number().int().min(1)]).optional(),
+});
+export type EvaluationCheck = z.infer<typeof EvaluationCheck>;
+
+export const EvaluationReport = z.object({
+  evaluatorVersion: z.string(),
+  executed: z.boolean(),
+  counts: z.object({
+    passed: z.number().int().min(0),
+    concern: z.number().int().min(0),
+    notExecutable: z.number().int().min(0),
+  }),
+  checks: z.array(EvaluationCheck),
+});
+export type EvaluationReport = z.infer<typeof EvaluationReport>;
+
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
-export const ExportTarget = z.enum(["claude-code", "generic"]);
+export const ExportTarget = z.enum(["claude-code", "generic", "openai-codex"]);
 export type ExportTarget = z.infer<typeof ExportTarget>;
 
 export const ExportResult = z.object({

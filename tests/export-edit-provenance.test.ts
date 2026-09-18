@@ -86,7 +86,7 @@ describe("F-02: Claude export semantic YAML & final manifest integrity", () => {
     }
   });
 
-  it("F02-C: server export endpoint validates post-transformation package and refuses invalidity (HTTP 422)", async () => {
+  it.each(["generic", "openai-codex"] as const)("F02-C: %s validates post-transformation package (HTTP 422)", async (target) => {
     const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
     try {
       const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
@@ -106,13 +106,13 @@ describe("F-02: Claude export semantic YAML & final manifest integrity", () => {
         const exported = actualExport(skill, target);
         // Only the final representation is broken. The stored canonical input
         // remains valid, proving this request reaches the second gate.
-        exported.files = exported.files.map((f) => f.path === "AGENTS.md" ? { ...f, content: f.content + "\nChanged after manifest creation.\n" } : f);
+        exported.files = exported.files.map((f) => f.path === "SKILL.md" ? { ...f, content: f.content + "\nChanged after manifest creation.\n" } : f);
         return exported;
       });
       const zip = vi.spyOn(exporterModule, "buildZip");
       try {
         const res = await request(app).post("/api/skills/export-val/export")
-          .send({ target: "generic" }).expect(422);
+          .send({ target }).expect(422);
         expect(transform).toHaveBeenCalledOnce();
         expect(zip).not.toHaveBeenCalled();
         expect(res.body.error).toContain("in the exported package");

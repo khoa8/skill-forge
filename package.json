@@ -30,7 +30,7 @@
   "dependencies": {
     "express": "^4.21.2",
     "jszip": "^3.10.1",
-    "marked": "^16.4.1",
+    "marked": "^18.0.12",
     "pdfjs-dist": "4.10.38",
     "yaml": "^2.8.1",
     "zod": "^3.25.76"
