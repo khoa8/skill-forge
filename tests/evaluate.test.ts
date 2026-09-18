@@ -3,6 +3,7 @@ import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill, derivePlanFromAnalysis, manifestFor } from "../src/core/build.js";
 import { evaluateSkill } from "../src/core/evaluate.js";
+import { validatePackage } from "../src/core/validate.js";
 
 function fixture() {
   const source = normalizeSource({
@@ -134,5 +135,27 @@ describe("evaluateSkill", () => {
     expect(report.executed).toBe(true);
     expect(report.counts.concern).toBe(0);
     expect(report.checks.filter((c) => c.status === "pass").length).toBeGreaterThan(0);
+  });
+
+  it("reports an oversized procedure step as not-executable, not a concern (F-02 bounds)", () => {
+    const longStep = `Migrate the legacy datastore by exporting every record (${"detail ".repeat(620).trim()}) and confirm the export checksum.`;
+    const source = normalizeSource({
+      type: "text",
+      name: "guide",
+      content: `# Guide\n\nDocumentation for a deterministic local workflow.\n\n## Setup\n\nRead the configuration before proceeding with this operation.\n\n1. Read the configuration.\n2. ${longStep}\n3. Verify the result.\n`,
+    });
+    expect(longStep.length).toBeGreaterThan(4000);
+    const analysis = analyzeSource(source);
+    expect(analysis.procedures).toHaveLength(1);
+    expect(analysis.procedures[0]!.steps).toHaveLength(3);
+    const skill = buildCanonicalSkill(source, analysis, derivePlanFromAnalysis(analysis), "mock");
+    const validation = validatePackage({ skill, sourceText: source.text, sourceType: source.sourceType });
+    expect(validation.passed).toBe(true);
+    const report = evaluateSkill({ skill, source });
+    expect(report.executed).toBe(true);
+    const procedure = report.checks.find((c) => c.id === "eval-2");
+    expect(procedure?.status).toBe("not-executable");
+    expect(procedure?.message).toMatch(/comparison window|at most 4000/i);
+    expect(report.counts.concern).toBe(0);
   });
 });

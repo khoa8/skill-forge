@@ -605,11 +605,29 @@ function evaluateProcedure(ctx: ProcedureContext): void {
   }
   let fidelity = 0;
   const canonicalSteps = expected.canonicalSteps.slice(0, MAX_PROCEDURE_STEPS);
-  for (let index = 0; index < canonicalSteps.length; index++) {
+  const normalizedSteps = canonicalSteps.map((step) => normalizeWhitespace(step));
+  const oversized = normalizedSteps.find((step) => step.length > MAX_STEP_CHARS);
+  if (oversized !== undefined) {
+    // Bounded uncertainty stays honest: a step that cannot be fully
+    // represented within the comparison window cannot support a fidelity
+    // claim, so the procedure is not-executable rather than a concern.
+    // Truncating only the expected side would either manufacture a pass
+    // (weak prefix match) or a false concern (length-delta rejection).
+    ctx.record({
+      id: ctx.item.id,
+      title: ctx.item.prompt,
+      status: "not-executable",
+      filePath: target.path,
+      message: `A source step exceeds the evaluator comparison window (${MAX_STEP_CHARS} characters); ordered-step fidelity was not evaluated, not passed.`,
+      sourceLines: ctx.assertion.sourceLines,
+    });
+    return;
+  }
+  for (let index = 0; index < normalizedSteps.length; index++) {
     // Canonical-to-canonical: the workflow file holds neutralized step text
-    // (shared allocation in evals.ts), so compare against that — never raw
-    // source text against transformed output.
-    const expectedText = normalizeWhitespace(canonicalSteps[index]!).slice(0, MAX_STEP_CHARS);
+    // (shared allocation in evals.ts), so compare full step text against
+    // full step text — never a truncated expectation against full output.
+    const expectedText = normalizedSteps[index]!;
     const found = orderedSteps
       .slice(fidelity)
       .findIndex((candidate) => Math.abs(candidate.length - expectedText.length) <= MAX_STEP_LENGTH_DELTA && normalizeWhitespace(candidate).includes(expectedText));
