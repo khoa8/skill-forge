@@ -117,7 +117,7 @@ Eval items extend the original manual format with an optional structured asserti
 }
 ```
 
-- `topic-retention`: the target file exists, is not user-edited, carries verifiable provenance, retains the source excerpt text for the cited lines (whitespace-normalized containment), and the topic remains discoverable from `SKILL.md` body text.
+- `topic-retention`: the target file exists, is not user-edited, carries verifiable provenance, retains the source excerpt text for the cited lines (whitespace-normalized containment), and the topic remains discoverable from `SKILL.md` via an explicit Markdown link to the reference file.
 - `procedure-fidelity`: the workflow file retains all source-derived ordered steps as text (inert comparison — nothing is ever executed).
 - Assertions cite `sourceSha256` + `sourceLines`; the evaluator iterates the re-derived expected specification (not the stored inventory) and treats a missing, mismatching, modified, malformed, duplicated, unknown, or oversized specification as **not-executable**, never as a pass — every source-derived expectation reaches an explicit outcome. Command-grounding evals stay manual by design.
 - Evaluation is bounded (source/package/eval-size caps), deterministic, offline, and advisory: the report (`EvaluationReport` in `src/core/types.ts`) has per-check `pass` / `concern` / `not-executable` statuses with no aggregate quality score. Export gating is exclusively deterministic validation. The full structured repository analysis (codebase mode) is not part of the package; codebase-mode evals cover only selected source references.

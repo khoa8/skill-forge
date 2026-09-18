@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import type {
   CanonicalSkill,
   EvalAssertion,
@@ -30,8 +31,6 @@ const MAX_STEP_CHARS = 4_000;
 const MAX_STEP_LENGTH_DELTA = 400;
 const MAX_PROCEDURE_LINE_SPAN = 2_000;
 
-const TOPIC_DISCOVERY_TOKENS = 3;
-
 function normalizedLines(source: NormalizedSource): string[] | null {
   if (Buffer.byteLength(source.text, "utf8") > MAX_SOURCE_BYTES) return null;
   const lines = source.text.split("\n");
@@ -42,13 +41,6 @@ function normalizedLines(source: NormalizedSource): string[] | null {
 
 function normalizeWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-function docTokens(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 3);
 }
 
 function evalsFile(skill: CanonicalSkill): SkillFile | null {
@@ -104,6 +96,33 @@ function targetBody(target: SkillFile): string {
 function skillMdBody(skill: CanonicalSkill): string | null {
   const skillMd = fileFor(skill, "SKILL.md");
   return skillMd ? targetBody(skillMd) : null;
+}
+
+const MD_LINK_TARGET_RE = /\[[^\]]*\]\(([^)\n]+)\)/g;
+
+/**
+ * Explicit Markdown link destinations in the SKILL.md body, resolved the way
+ * the internal-link validator resolves root-relative links — as inert text
+ * only (no filesystem access, no fetching).
+ *
+ * Discoverability is structural: a topic is discoverable when SKILL.md links
+ * to its reference file, regardless of the language or script the prose is
+ * written in. Token overlap across the document is deliberately not used: it
+ * false-concerns on non-Latin documentation (whose words never tokenize) and
+ * false-passes when generic words survive elsewhere after the link is gone.
+ */
+function skillMdLinkTargets(skillMd: string): Set<string> {
+  const targets = new Set<string>();
+  for (const match of skillMd.matchAll(MD_LINK_TARGET_RE)) {
+    const raw = match[1]!.split("#")[0]!.trim();
+    if (raw.length === 0 || raw.startsWith("#")) continue;
+    if (/^[a-z]+:\/\//i.test(raw) || raw.startsWith("mailto:")) continue;
+    const clean = raw.startsWith("/") ? raw.slice(1) : raw;
+    const normalized = posix.normalize(clean);
+    if (normalized === ".." || normalized.startsWith("../")) continue;
+    targets.add(normalized);
+  }
+  return targets;
 }
 
 function verifiedProvenance(
@@ -495,15 +514,14 @@ function evaluateTopic(ctx: EvaluationContext): void {
     });
     return;
   }
-  const discoveryTokens = docTokens(expectedFull).filter((token) => ctx.discovery.toLowerCase().includes(token));
-  const uniqueDiscoveryTokens = new Set(discoveryTokens);
-  if (uniqueDiscoveryTokens.size < TOPIC_DISCOVERY_TOKENS) {
+  const linkTargets = skillMdLinkTargets(ctx.discovery);
+  if (!linkTargets.has(ctx.assertion.filePath)) {
     ctx.record({
       id: ctx.item.id,
       title: ctx.item.prompt,
       status: "concern",
       filePath: target.path,
-      message: `The retained excerpt is discoverable from SKILL.md only via ${uniqueDiscoveryTokens.size} of ${TOPIC_DISCOVERY_TOKENS} required tokens; discovery is too weak.`,
+      message: `Target file "${target.path}" retains the source excerpt but SKILL.md contains no Markdown link to it; the topic is not discoverable from the skill entry point.`,
       sourceLines: ctx.assertion.sourceLines,
     });
     return;
