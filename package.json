@@ -28,7 +28,7 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^4.22.3",
     "jszip": "^3.10.1",
     "marked": "^18.0.12",
     "pdfjs-dist": "4.10.38",
