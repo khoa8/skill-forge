@@ -66,7 +66,7 @@ function harness() {
   const url = Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
   const context: any = { document, fetch, URL: url, console, setTimeout: vi.fn(), TextDecoder, Blob };
   const source = readFileSync(new URL("../web/app.js", import.meta.url), "utf8").replace(/\ninit\(\);\s*$/, "");
-  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton, runGenerate, consumeNdjson };", context);
+  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton, runGenerate, consumeNdjson, renderEvaluationState, runEvaluation };", context);
   const ui = context.ui;
   ui.bindEvents();
   const original = { executed: true, passed: true, checks: [], warningCount: 0, errorCount: 0 };
@@ -199,6 +199,25 @@ describe("UI request ownership and errors", () => {
     expect(h.ui.state.validation).toBe(report);
     expect(h.url.createObjectURL).not.toHaveBeenCalled();
     expect(h.nodes.get("#revalidate-btn").disabled).toBe(false);
+  });
+
+  it("a saved edit invalidates an in-flight evaluation for the previous package (F-03)", async () => {
+    const h = harness();
+    const evalBody = deferred<any>();
+    h.fetch.mockResolvedValueOnce({ ok: true, json: () => evalBody.promise });
+    const evaluation = h.ui.runEvaluation();
+    await decoded();
+    h.ui.startEdit({ path: "SKILL.md", content: "changed" });
+    const edited = { files: [{ path: "SKILL.md", content: "changed", userEdited: true }] };
+    const report = { ...h.original, passed: false, errorCount: 1 };
+    h.fetch.mockResolvedValueOnce(response({ skill: edited, validation: report }));
+    await h.ui.saveEdit();
+    const staleReport = { executed: true, counts: { passed: 1, concern: 0, notExecutable: 0 }, checks: [] };
+    evalBody.resolve({ evaluation: staleReport });
+    await evaluation;
+    expect(h.ui.state.skill).toBe(edited);
+    expect(h.ui.state.evaluation).not.toBe(staleReport);
+    expect(h.ui.state.evaluationSkillId).not.toBe("skill-a");
   });
 
   it("a stale export error cannot replace the new skill's validation", async () => {

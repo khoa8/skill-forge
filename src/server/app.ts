@@ -14,6 +14,7 @@ import { runPipeline } from "../core/pipeline.js";
 import { validatePackage } from "../core/validate.js";
 import { normalizeSource, sourceSlice } from "../core/ingest.js";
 import { exportPackage, buildZip, EXPORT_TARGET_INFO, ExportError } from "../core/export/exporters.js";
+import { evaluateSkill } from "../core/evaluate.js";
 import { listSamples, getSample } from "../core/samples.js";
 import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
 import { collectFiles, combineFiles, FileSourceError } from "../core/sources/files.js";
@@ -530,6 +531,31 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       excerptLimit: partial ? MAX_EXCERPT_LINES : undefined,
       totalLines: normalized.lineCount,
       text: sourceSlice(normalized, start, effectiveEnd),
+    });
+  }));
+
+  // Deterministic skill evaluation (advisory): re-derives source-derived
+  // expectations from the stored normalized source and evaluates the stored
+  // package against them. Read-only — it never mutates state, never gates
+  // export (validation owns that gate), and never calls a model.
+  app.get("/api/skills/:id/evaluation", asyncRoute(async (req, res) => {
+    const stored = await loadSkillImpl(req.params.id!);
+    if (!stored) {
+      res.status(404).json({ error: `No skill with id "${req.params.id}".` });
+      return;
+    }
+    let normalized;
+    try {
+      normalized = normalizeStoredSource(stored.source);
+    } catch (err) {
+      res.status(409).json({
+        error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        code: "source_renormalization_failed",
+      });
+      return;
+    }
+    res.json({
+      evaluation: evaluateSkill({ skill: stored.skill, source: normalized }),
     });
   }));
 

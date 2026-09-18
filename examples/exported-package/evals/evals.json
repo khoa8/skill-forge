@@ -4,44 +4,121 @@
     {
       "id": "eval-1",
       "kind": "grounding",
-      "prompt": "Does the skill describe \"Authentication\"?",
-      "expect": "SKILL.md or references/authentication.md must cover this topic (source lines 8–21)."
+      "prompt": "Does the skill retain and expose the source topic \"Authentication\"?",
+      "expect": "references/authentication.md retains the source excerpt and is discoverable from SKILL.md (source lines 8–21).",
+      "assertions": [
+        {
+          "type": "topic-retention",
+          "filePath": "references/authentication.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            8,
+            21
+          ]
+        }
+      ]
     },
     {
       "id": "eval-2",
       "kind": "grounding",
-      "prompt": "Does the skill describe \"Creating a payment\"?",
-      "expect": "SKILL.md or references/creating-a-payment.md must cover this topic (source lines 23–48)."
+      "prompt": "Does the skill retain and expose the source topic \"Creating a payment\"?",
+      "expect": "references/creating-a-payment.md retains the source excerpt and is discoverable from SKILL.md (source lines 23–48).",
+      "assertions": [
+        {
+          "type": "topic-retention",
+          "filePath": "references/creating-a-payment.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            23,
+            48
+          ]
+        }
+      ]
     },
     {
       "id": "eval-3",
       "kind": "grounding",
-      "prompt": "Does the skill describe \"Refunding a payment\"?",
-      "expect": "SKILL.md or references/refunding-a-payment.md must cover this topic (source lines 57–71)."
+      "prompt": "Does the skill retain and expose the source topic \"Refunding a payment\"?",
+      "expect": "references/refunding-a-payment.md retains the source excerpt and is discoverable from SKILL.md (source lines 57–71).",
+      "assertions": [
+        {
+          "type": "topic-retention",
+          "filePath": "references/refunding-a-payment.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            57,
+            71
+          ]
+        }
+      ]
     },
     {
       "id": "eval-4",
       "kind": "grounding",
-      "prompt": "Does the skill describe \"Error handling\"?",
-      "expect": "SKILL.md or references/error-handling.md must cover this topic (source lines 73–90)."
+      "prompt": "Does the skill retain and expose the source topic \"Error handling\"?",
+      "expect": "references/error-handling.md retains the source excerpt and is discoverable from SKILL.md (source lines 73–90).",
+      "assertions": [
+        {
+          "type": "topic-retention",
+          "filePath": "references/error-handling.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            73,
+            90
+          ]
+        }
+      ]
     },
     {
       "id": "eval-5",
       "kind": "grounding",
-      "prompt": "Does the skill describe \"Rate limits\"?",
-      "expect": "SKILL.md or references/rate-limits.md must cover this topic (source lines 92–96)."
+      "prompt": "Does the skill retain and expose the source topic \"Rate limits\"?",
+      "expect": "references/rate-limits.md retains the source excerpt and is discoverable from SKILL.md (source lines 92–96).",
+      "assertions": [
+        {
+          "type": "topic-retention",
+          "filePath": "references/rate-limits.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            92,
+            96
+          ]
+        }
+      ]
     },
     {
       "id": "eval-6",
       "kind": "grounding",
-      "prompt": "Does the skill describe \"Webhooks\"?",
-      "expect": "SKILL.md or references/webhooks.md must cover this topic (source lines 98–104)."
+      "prompt": "Does the skill retain and expose the source topic \"Webhooks\"?",
+      "expect": "references/webhooks.md retains the source excerpt and is discoverable from SKILL.md (source lines 98–104).",
+      "assertions": [
+        {
+          "type": "topic-retention",
+          "filePath": "references/webhooks.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            98,
+            104
+          ]
+        }
+      ]
     },
     {
       "id": "eval-7",
       "kind": "procedure",
-      "prompt": "Can the agent execute the \"Refunding a payment\" procedure end to end?",
-      "expect": "workflows/refunding-a-payment.md lists 4 steps matching the source."
+      "prompt": "Does the skill retain the ordered \"Refunding a payment\" procedure?",
+      "expect": "workflows/refunding-a-payment.md retains all 4 source steps in order; text comparison only, not execution.",
+      "assertions": [
+        {
+          "type": "procedure-fidelity",
+          "filePath": "workflows/refunding-a-payment.md",
+          "sourceSha256": "51756ec909e23182cea1cb55e1854cbe574c2c788ee989f914c0611b4479a033",
+          "sourceLines": [
+            62,
+            65
+          ]
+        }
+      ]
     },
     {
       "id": "eval-8",

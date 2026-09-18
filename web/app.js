@@ -12,6 +12,8 @@ const state = {
   skillId: null,
   skill: null,
   validation: null,
+  evaluation: null,
+  evaluationSkillId: null,
   activeTab: "sample",
   exportTargets: [],
   editingPath: null,
@@ -21,6 +23,7 @@ const state = {
   sourceNotes: null,
   sourceNotesSkillId: null,
   validateSeq: 0,
+  evaluationSeq: 0,
   editSeq: 0,
   provenanceSeq: 0,
   exportSeq: 0,
@@ -218,11 +221,13 @@ async function runGenerate() {
   const genToken = ++state.generationSeq;
   // Changing the displayed generation invalidates its outstanding requests,
   // even if a later result happens to reuse the same skill ID.
-  for (const key of ["sourceNotesSeq", "validateSeq", "editSeq", "provenanceSeq", "exportSeq"]) state[key]++;
+  for (const key of ["sourceNotesSeq", "validateSeq", "evaluationSeq", "editSeq", "provenanceSeq", "exportSeq"]) state[key]++;
   cancelEdit();
   state.skillId = null;
   state.skill = null;
   state.validation = null;
+  state.evaluation = null;
+  state.evaluationSkillId = null;
   updateGenerateButton();
   $("#generate-error").classList.add("hidden");
   $("#progress-log").innerHTML = "";
@@ -424,6 +429,7 @@ function renderResults(skill, validation) {
   }
 
   renderValidation(validation, true);
+  renderEvaluationState();
   renderFiles(skill);
   renderExportCards();
   renderSourceNotes();
@@ -569,8 +575,114 @@ function renderValidation(validation, fresh) {
   }
 }
 
-async function revalidate() {
+// ---------------------------------------------------------------------------
+// Evaluation (advisory, deterministic — distinct from validation)
+// ---------------------------------------------------------------------------
+
+const EVAL_STATUS_ICON = { pass: "✓", concern: "⚠", "not-executable": "○" };
+
+function evaluationStatusLine(evaluation) {
+  const parts = [];
+  if (evaluation.counts.passed > 0) parts.push(`${evaluation.counts.passed} passed`);
+  if (evaluation.counts.concern > 0) parts.push(`${evaluation.counts.concern} concern(s)`);
+  if (evaluation.counts.notExecutable > 0) parts.push(`${evaluation.counts.notExecutable} not executable / manual`);
+  return parts.length > 0 ? parts.join(", ") : "no evaluable checks";
+}
+
+function renderEvaluationState() {
+  const head = $("#evaluation-head");
+  const checksEl = $("#evaluation-checks");
+  const stale = state.evaluation && state.evaluationSkillId !== state.skillId;
+  head.innerHTML = "";
+  checksEl.innerHTML = "";
+
+  const strong = document.createElement("strong");  const sub = document.createElement("div");
+  sub.className = "sub";
+  const runBtn = document.createElement("button");
+  runBtn.id = "evaluate-btn";
+  runBtn.className = "btn";
+  runBtn.style.marginTop = "8px";
+  runBtn.addEventListener("click", runEvaluation);
+  const status = document.createElement("div");
+  status.id = "evaluation-request-status";
+  status.setAttribute("role", "status");
+
+  const evaluation = state.evaluation;
+  const staleAfterEdit =
+    evaluation && state.evaluationSkillId !== state.skillId;
+  if (!evaluation) {
+    head.className = "evaluation-head skipped";
+    strong.textContent = "Evaluation not run — no quality claims are made.";
+    sub.textContent = "Evaluation is advisory: it compares the package against source-derived expectations without executing anything.";
+  } else if (staleAfterEdit) {
+    head.className = "evaluation-banner skipped";
+    strong.textContent = "Evaluation is stale — the package changed after this report was produced.";
+    sub.textContent = evaluationStatusLine(evaluation) + " — this report described the package before the edit; re-run it for current results.";
+  } else if (!evaluation.executed) {
+    head.className = "evaluation-banner skipped";
+    strong.textContent = "Evaluation could not run — no result is claimed.";
+    sub.textContent = evaluation.checks[0]?.message ?? "Evaluation was skipped, not passed.";
+  } else {
+    head.className = "evaluation-banner pass";
+    strong.textContent = `Evaluation — ${evaluationStatusLine(evaluation)}.`;
+    sub.textContent = "Advisory source-coverage checks. This does not prove the skill works in a real agent runtime, and it does not gate export (validation does).";
+  }
+  head.append(strong, sub, runBtn, status);
+
+  if (!evaluation || staleAfterEdit) return;
+  for (const check of evaluation.checks) {
+    const row = document.createElement("div");
+    row.className = "check";
+    const statusEl = document.createElement("span");
+    statusEl.className = `status ${check.status === "pass" ? "pass" : check.status === "concern" ? "warn" : "skipped"}`;
+    statusEl.textContent = `${EVAL_STATUS_ICON[check.status] ?? "○"} ${check.status}`;
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "body";
+    const title = document.createElement("div");
+    title.textContent = check.title;
+    bodyEl.append(title);
+    const msg = document.createElement("div");
+    msg.className = "msg";
+    msg.textContent = check.message;
+    bodyEl.append(msg);
+    if (check.filePath) {
+      const loc = document.createElement("span");
+      loc.className = "loc";
+      loc.textContent = check.filePath;
+      bodyEl.append(loc);
+    }
+    row.append(statusEl, bodyEl);
+    checksEl.append(row);
+  }
+}
+
+async function runEvaluation() {
   if (!state.skillId) return;
+  const skillId = state.skillId;
+  const token = ++state.evaluationSeq;
+  const btn = $("#evaluate-btn");
+  if (btn) btn.disabled = true;
+  $("#evaluation-request-status").textContent = "Evaluating…";
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/evaluation`);
+    if (state.skillId !== skillId || state.evaluationSeq !== token) return;
+    const data = await res.json();
+    if (state.skillId !== skillId || state.evaluationSeq !== token) return;
+    if (!res.ok || !data.evaluation) throw new Error(data.error ?? `Evaluation failed (HTTP ${res.status}).`);
+    state.evaluation = data.evaluation;
+    state.evaluationSkillId = skillId;
+    renderEvaluationState();
+  } catch (err) {
+    if (state.skillId !== skillId || state.evaluationSeq !== token) return;
+    $("#evaluation-request-status").textContent = `Evaluation failed: ${err.message ?? err}. No result claimed.`;
+  } finally {
+    if (state.skillId === skillId && state.evaluationSeq === token && btn) {
+      btn.disabled = false;
+    }
+  }
+}
+
+async function revalidate() {  if (!state.skillId) return;
   const skillId = state.skillId;
   const token = ++state.validateSeq;
   const revalidateBtn = $("#revalidate-btn");
@@ -754,12 +866,17 @@ async function saveEdit() {
     // returned the full updated package + validation.
     // Pending validation/downloads refer to the package before this edit.
     state.validateSeq++;
+    state.evaluationSeq++;
     state.exportSeq++;
     setStep("export", null);
     state.skill = data.skill;
     state.validation = data.validation;
+    if (state.evaluation && state.evaluationSkillId === skillId) {
+      state.evaluationSkillId = null;
+    }
     cancelEdit();
     renderValidation(data.validation, false);
+    renderEvaluationState();
     renderFiles(data.skill, path);
     renderExportCards();
   } catch (err) {
