@@ -342,11 +342,13 @@ describe("initialized preview controls and truthful steps", () => {
 });
 
 
-describe("advisory evaluation summary styling (A-03)", () => {
+describe("advisory evaluation summary styling (A-03, F-02)", () => {
   function rendered(counts: { passed: number; concern: number; notExecutable: number }) {
     const h = harness();
     const checks = [
-      { id: "eval-1", title: "Topic", status: "pass", message: "Retained and discoverable.", filePath: "references/setup.md" },
+      ...(counts.passed > 0
+        ? [{ id: "eval-1", title: "Topic", status: "pass", message: "Retained and discoverable.", filePath: "references/setup.md" }]
+        : []),
       ...(counts.concern > 0
         ? [{ id: "eval-2", title: "Topic", status: "concern", message: "No SKILL.md link.", filePath: "references/other.md" }]
         : []),
@@ -367,12 +369,32 @@ describe("advisory evaluation summary styling (A-03)", () => {
     expect(h.text(head)).toContain("2 concern(s)");
     expect(h.text(head)).toContain("4 not executable / manual");
   });
-  it("keeps the pass treatment only for executed reports without concerns", () => {
-    const h = rendered({ passed: 3, concern: 0, notExecutable: 1 });
+  it("keeps the pass treatment only when every check is executable and passed", () => {
+    const h = rendered({ passed: 3, concern: 0, notExecutable: 0 });
     const head = h.nodes.get("#evaluation-head");
     expect(head.className).toContain("pass");
     expect(h.text(head)).toContain("3 passed");
+  });
+  it("gives a mixed pass/manual report neutral treatment, not aggregate pass or failure", () => {
+    const h = rendered({ passed: 3, concern: 0, notExecutable: 1 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("neutral");
+    expect(head.className).not.toContain("pass");
+    expect(head.className).not.toContain("concern");
+    expect(head.className).not.toContain("fail");
+    expect(h.text(head)).toContain("3 passed");
     expect(h.text(head)).toContain("1 not executable / manual");
+  });
+  it("gives an all-manual report neutral treatment with honest counts", () => {
+    const h = rendered({ passed: 0, concern: 0, notExecutable: 4 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("neutral");
+    expect(head.className).not.toContain("pass");
+    expect(head.className).not.toContain("concern");
+    expect(head.className).not.toContain("fail");
+    expect(h.text(head)).toContain("4 not executable / manual");
+    const statuses = h.nodes.get("#evaluation-checks").children.map((row: any) => row.children[0].textContent);
+    expect(statuses).toEqual(["○ not-executable"]);
   });
   it("still renders checks, advisory copy, and the re-run control", () => {
     const h = rendered({ passed: 1, concern: 1, notExecutable: 1 });

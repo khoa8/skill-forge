@@ -623,9 +623,15 @@ function renderEvaluationState() {
     strong.textContent = "Evaluation could not run — no result is claimed.";
     sub.textContent = evaluation.checks[0]?.message ?? "Evaluation was skipped, not passed.";
   } else {
-    // Advisory, never an aggregate pass: a report containing concerns keeps a
-    // concern-oriented treatment instead of the success/green styling.
-    head.className = evaluation.counts.concern > 0 ? "evaluation-banner concern" : "evaluation-banner pass";
+    // No aggregate pass exists: green requires every check executable and
+    // passed. Reports with concerns stay amber; reports with manual checks
+    // (or no passes at all) stay neutral gray — manual work is advisory,
+    // never failure and never an all-pass result.
+    const { passed, concern, notExecutable } = evaluation.counts;
+    head.className =
+      concern > 0 ? "evaluation-banner concern"
+      : passed > 0 && notExecutable === 0 ? "evaluation-banner pass"
+      : "evaluation-banner neutral";
     strong.textContent = `Evaluation — ${evaluationStatusLine(evaluation)}.`;
     sub.textContent = "Advisory source-coverage checks. This does not prove the skill works in a real agent runtime, and it does not gate export (validation does).";
   }
