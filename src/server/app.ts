@@ -14,6 +14,7 @@ import { runPipeline } from "../core/pipeline.js";
 import { validatePackage } from "../core/validate.js";
 import { normalizeSource, sourceSlice } from "../core/ingest.js";
 import { exportPackage, buildZip, EXPORT_TARGET_INFO, ExportError } from "../core/export/exporters.js";
+import { evaluateSkill } from "../core/evaluate.js";
 import { listSamples, getSample } from "../core/samples.js";
 import { fetchUrlSource, UrlSourceError } from "../core/sources/url.js";
 import { collectFiles, combineFiles, FileSourceError } from "../core/sources/files.js";
@@ -31,7 +32,7 @@ import {
   normalizeStoredSource,
   SourceRenormalizationError,
 } from "./store.js";
-import type { ExportTarget, SourceType, RepositoryAnalysis, CanonicalSkill } from "../core/types.js";
+import { ExportTarget, type SourceType, type RepositoryAnalysis, type CanonicalSkill } from "../core/types.js";
 import { fetchGithubCodebaseSource, GithubCodebaseError } from "../core/sources/github-codebase.js";
 import { PROVIDER_IDS } from "../core/providers/index.js";
 import { createHostValidationMiddleware } from "./host-guard.js";
@@ -87,7 +88,7 @@ const GenerateBody = z.object({
   requestedName: z.string().max(80).optional(),
 });
 
-const ExportBody = z.object({ target: z.enum(["claude-code", "generic"]) });
+const ExportBody = z.object({ target: ExportTarget });
 
 const PDF_ERROR_STATUS: Record<PdfErrorCode, number> = {
   pdf_bad_path: 400, pdf_not_found: 404, pdf_outside_root: 403,
@@ -533,6 +534,31 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     });
   }));
 
+  // Deterministic skill evaluation (advisory): re-derives source-derived
+  // expectations from the stored normalized source and evaluates the stored
+  // package against them. Read-only — it never mutates state, never gates
+  // export (validation owns that gate), and never calls a model.
+  app.get("/api/skills/:id/evaluation", asyncRoute(async (req, res) => {
+    const stored = await loadSkillImpl(req.params.id!);
+    if (!stored) {
+      res.status(404).json({ error: `No skill with id "${req.params.id}".` });
+      return;
+    }
+    let normalized;
+    try {
+      normalized = normalizeStoredSource(stored.source);
+    } catch (err) {
+      res.status(409).json({
+        error: `The stored source could not be re-normalized: ${err instanceof Error ? err.message : String(err)}`,
+        code: "source_renormalization_failed",
+      });
+      return;
+    }
+    res.json({
+      evaluation: evaluateSkill({ skill: stored.skill, source: normalized }),
+    });
+  }));
+
   // Re-run deterministic validation on demand.
   app.post("/api/skills/:id/validate", asyncRoute(async (req, res) => {
     const target = typeof req.body?.target === "string" ? (req.body.target as ExportTarget) : undefined;
@@ -680,7 +706,9 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
       });
     } catch (err) {
       const code = err instanceof ExportError ? err.code : "export_failed";
-      const status = err instanceof ExportError && err.code === "export_target_unsupported" ? 400 : 500;
+      const status = err instanceof ExportError
+        ? err.code === "export_target_unsupported" ? 400 : err.code === "export_codex_metadata_invalid" ? 422 : 500
+        : 500;
       res.status(status).json({ error: err instanceof Error ? err.message : String(err), code });
     }
   }));

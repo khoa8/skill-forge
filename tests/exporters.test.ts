@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
+import { parse as parseYaml } from "yaml";
+import { ExportTarget } from "../src/core/types.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill, derivePlanFromAnalysis } from "../src/core/build.js";
@@ -39,7 +41,7 @@ describe("safePackagePath", () => {
 
 describe("exporters", () => {
   it("expose exactly the documented targets with format basis", () => {
-    expect(EXPORT_TARGET_INFO.map((t) => t.target).sort()).toEqual(["claude-code", "generic"]);
+    expect(EXPORT_TARGET_INFO.map((t) => t.target).sort()).toEqual(["claude-code", "generic", "openai-codex"]);
     for (const info of EXPORT_TARGET_INFO) {
       expect(info.formatBasis.length).toBeGreaterThan(30);
     }
@@ -112,15 +114,61 @@ describe("buildZip", () => {
     expect(await entry!.async("string")).toBe(exported.files.find((f) => f.path === "AGENTS.md")!.content);
   });
 
-  it("refuses to write unsafe paths into the ZIP (zip-slip)", async () => {
+  it.each(ExportTarget.options)("%s refuses unsafe ZIP paths", async (target) => {
     const evil = skill();
     evil.files = [...evil.files, { path: "../../evil.txt", content: "gotcha", purpose: "evil" }];
-    await expect(buildZip(exportPackage(evil, "claude-code"))).rejects.toThrow(ExportError);
+    await expect(buildZip(exportPackage(evil, target))).rejects.toThrow(ExportError);
   });
 
-  it("refuses duplicate entries", async () => {
+  it.each(ExportTarget.options)("%s refuses duplicate ZIP entries", async (target) => {
     const evil = skill();
     evil.files = [...evil.files, { ...evil.files[0]! }];
-    await expect(buildZip(exportPackage(evil, "claude-code"))).rejects.toThrow(/Duplicate ZIP entry/);
+    await expect(buildZip(exportPackage(evil, target))).rejects.toThrow(/Duplicate ZIP entry/);
+  });
+});
+
+
+describe("OpenAI Codex", () => {
+  it("preserves every file, manifest and edited content through a real ZIP", async () => {
+    const canonical = skill();
+    const exported = exportPackage(canonical, ExportTarget.parse("openai-codex"));
+    expect(exported).toEqual(exportPackage(canonical, "openai-codex"));
+    expect(exported.files).toEqual(canonical.files);
+    expect(exported.notes).toEqual([]);
+    expect(validatePackage({ skill: { ...canonical, files: exported.files }, target: "openai-codex" }).passed).toBe(true);
+    const archive = await buildZip(exported);
+    expect(archive.fileName).toBe("meridian-payments-api-openai-codex.zip");
+    const entries = await readZip(archive.buffer);
+    expect(entries.map((f) => f.name).sort()).toEqual(canonical.files.map((f) => `meridian-payments-api/${f.path}`).sort());
+    for (const file of canonical.files) {
+      expect(await entries.find((e) => e.name === `meridian-payments-api/${file.path}`)!.async("string")).toBe(file.content);
+    }
+    const md = exported.files.find((f) => f.path === "SKILL.md")!;
+    expect(parseYaml(md.content.match(/^---\n([\s\S]*?)\n---/)![1]!)).toMatchObject({ name: canonical.meta.name, description: canonical.meta.description });
+  });
+
+  it("retains valid custom YAML and userEdited flags without normalizing", () => {
+    const canonical = skill();
+    const md = canonical.files.find((f) => f.path === "SKILL.md")!;
+    md.content = md.content.replace(/^name: .*$/m, `name: "${canonical.meta.name}"`).replace(/^description: .*$/m, 'description: "User-authored description"\nmetadata:\n  short-description: "Custom display text"');
+    md.userEdited = true;
+    const before = structuredClone(canonical);
+    expect(exportPackage(canonical, "openai-codex").files).toEqual(before.files);
+    expect(canonical).toEqual(before);
+  });
+
+  it.each([
+    "no front matter",
+    "---\nname: [\n---\nBody",
+    "---\n- array\n---\nBody",
+    "---\nnull\n---\nBody",
+    "---\nname: doc\nname: doc\ndescription: text\n---\nBody",
+    ...["Upper", "bad--name", "bad-", "-bad", "a".repeat(65), "other-id"].map((name) => `---\nname: ${name}\ndescription: text\n---\nBody`),
+    ...[null, 42, "", " ", "<tag>", "a".repeat(1025)].map((description) => `---\nname: meridian-payments-api\ndescription: ${JSON.stringify(description)}\n---\nBody`),
+    "---\nname: meridian-payments-api\ndescription: text\ninvented: true\n---\nBody",
+  ])("fails closed for incompatible front matter %#", (content) => {
+    const canonical = skill();
+    canonical.files.find((f) => f.path === "SKILL.md")!.content = content;
+    expect(() => exportPackage(canonical, "openai-codex")).toThrow(expect.objectContaining({ code: "export_codex_metadata_invalid" }));
   });
 });

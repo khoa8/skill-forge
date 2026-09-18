@@ -46,8 +46,8 @@ describe("bundled demo end-to-end (offline, no key)", () => {
       }
       expect(result.skill.provenance.length).toBeGreaterThan(0);
 
-      // Both export targets produce inspectable, non-empty ZIPs.
-      for (const target of ["claude-code", "generic"] as const) {
+      // All export targets produce inspectable, non-empty ZIPs.
+      for (const target of ["claude-code", "generic", "openai-codex"] as const) {
         const exported = exportPackage(result.skill, target);
         const zip = await buildZip(exported);
         expect(zip.buffer.length).toBeGreaterThan(1000);
