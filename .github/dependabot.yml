@@ -6,9 +6,19 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    allow:
+      - dependency-type: direct
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    allow:
+      - dependency-type: direct
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
