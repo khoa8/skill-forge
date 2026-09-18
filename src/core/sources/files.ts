@@ -91,7 +91,8 @@ export interface CollectedFile {
 }
 
 /** Chunk size for bounded handle reads. At most MAX_FILE_BYTES + 1 bytes are
- * ever retained, so an over-limit file is detected without unbounded growth. */
+ * ever read, so an over-limit file is detected with one sentinel byte and
+ * without unbounded growth. */
 const READ_CHUNK_BYTES = 64 * 1024;
 
 function abortError(): FileSourceError {
@@ -142,7 +143,12 @@ async function readBoundedTextFile(
     let position = 0;
     for (;;) {
       if (signal?.aborted) throw abortError();
-      const buf = Buffer.alloc(READ_CHUNK_BYTES);
+      // Clamp the final read so overflow detection costs at most one sentinel
+      // byte past the cap. size <= MAX_FILE_BYTES holds at this point
+      // (overflow throws below), so want >= 1 and the loop always terminates:
+      // EOF yields bytesRead 0 while any other read grows size.
+      const want = Math.min(READ_CHUNK_BYTES, MAX_FILE_BYTES + 1 - size);
+      const buf = Buffer.alloc(want);
       const { bytesRead } = await handle.read(buf, 0, buf.length, position);
       if (bytesRead === 0) break;
       position += bytesRead;
@@ -299,15 +305,13 @@ export async function collectFiles(
         skipped.push(`${rel}: stat failed`);
         continue;
       }
-      // Pre-read sizes are an optimization only. Actual accepted bytes counted
-      // below are authoritative, so stale metadata cannot bypass either budget.
+      // Pre-read sizes are a fast path only. A stale individually-oversized
+      // size skips just that file; the combined total is decided from actual
+      // accepted bytes below, so stale metadata can neither bypass either
+      // budget nor stop collection before the real total is reached.
       if (info.size > MAX_FILE_BYTES) {
         skipped.push(`${rel}: too large (${(info.size / 1000).toFixed(0)} KB)`);
         continue;
-      }
-      if (totalBytes + info.size > MAX_TOTAL_BYTES) {
-        skipped.push(`${rel}: total size limit reached`);
-        return;
       }
       let content: string;
       let bytes: number;

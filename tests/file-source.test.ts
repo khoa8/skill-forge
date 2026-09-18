@@ -309,4 +309,64 @@ describe("bounded handle reads", () => {
     });
     expect(closed).toBe(true);
   });
+
+  it("reads no more than MAX_FILE_BYTES + 1 actual bytes to detect an oversized file", async () => {
+    const dir = await fixtureDir("sentinel");
+    await writeFile(join(dir, "big.md"), "s".repeat(MAX_FILE_BYTES + 100_000));
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    // Reach the bounded read loop despite accurate on-disk size: pre-read
+    // metadata under-reports, modeling a file that grew after stat.
+    vi.mocked(stat).mockImplementationOnce(
+      (async () => ({ size: 32, isFile: () => true })) as unknown as typeof stat,
+    );
+    let cumulative = 0;
+    vi.mocked(open).mockImplementationOnce((async (...args: unknown[]) => {
+      const handle = await (actualFs.open as (...a: unknown[]) => Promise<{
+        read: (...a: unknown[]) => Promise<{ bytesRead: number }>;
+        close: (...a: unknown[]) => Promise<unknown>;
+        stat: () => Promise<{ isFile: () => boolean }>;
+      }>)(...args);
+      const origRead = handle.read.bind(handle);
+      handle.read = (async (...readArgs: unknown[]) => {
+        const res = await origRead(...readArgs as never[]);
+        cumulative += res.bytesRead;
+        return res;
+      }) as never;
+      return handle;
+    }) as unknown as typeof open);
+    await expect(collectFiles("sentinel/big.md")).rejects.toMatchObject({ code: "file_too_large" });
+    expect(cumulative).toBeLessThanOrEqual(MAX_FILE_BYTES + 1);
+  });
+
+  it("accepts a file of exactly MAX_FILE_BYTES bytes", async () => {
+    const dir = await fixtureDir("exact-limit");
+    await writeFile(join(dir, "exact.md"), "e".repeat(MAX_FILE_BYTES));
+    const { files, skipped } = await collectFiles("exact-limit/exact.md");
+    expect(files).toHaveLength(1);
+    expect(Buffer.byteLength(files[0]!.content, "utf8")).toBe(MAX_FILE_BYTES);
+    expect(skipped).toHaveLength(0);
+  });
+
+  it("accepts directory files that fit by actual bytes despite over-reported pre-read sizes", async () => {
+    const dir = await fixtureDir("stale-overreport");
+    await writeFile(join(dir, "a.md"), "a".repeat(500_000));
+    await writeFile(join(dir, "b.md"), "b".repeat(500_000));
+    await writeFile(join(dir, "c.md"), "c".repeat(100_000));
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    // Deterministic fault injection: pre-read metadata over-reports c.md as
+    // 500,000 bytes while the file actually holds 100,000 bytes.
+    vi.mocked(stat).mockImplementation(((path: unknown, options?: unknown) => {
+      if (typeof path === "string" && path.endsWith("c.md")) {
+        return Promise.resolve({ size: 500_000, isFile: () => true, isDirectory: () => false });
+      }
+      return (actualFs.stat as (p: unknown, o?: unknown) => Promise<unknown>)(path, options);
+    }) as unknown as typeof stat);
+    const { files } = await collectFiles("stale-overreport");
+    expect(files.map((f) => f.path)).toEqual([
+      "stale-overreport/a.md",
+      "stale-overreport/b.md",
+      "stale-overreport/c.md",
+    ]);
+    expect(files.reduce((sum, f) => sum + Buffer.byteLength(f.content, "utf8"), 0)).toBe(1_100_000);
+  });
 });
