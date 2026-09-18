@@ -9,7 +9,11 @@ export function allocateReferences(analysis: SourceAnalysis) {
     const body = section.text.split("\n").slice(1).join("\n").trim();
     if (body.length < 20) return [];
     const path = allocatePath(`references/${section.id}`, used);
-    return [{ section, body, path }];
+    // The canonical body is computed once, here: the builder writes exactly
+    // this text into the reference file, and the evaluator compares exactly
+    // this text against the package. Sharing the computation (rather than
+    // re-deriving it per consumer) keeps builder and evaluator from drifting.
+    return [{ section, body, path, canonicalBody: neutralizeRelativeLinks(body) }];
   });
 }
 
@@ -23,7 +27,13 @@ function allocatePath(base: string, used: Set<string>): string {
 
 export function allocateWorkflows(analysis: SourceAnalysis) {
   const used = new Set<string>();
-  return analysis.procedures.slice(0, 8).map((proc) => ({ proc, path: allocatePath(`workflows/${slugify(proc.title)}`, used) }));
+  return analysis.procedures.slice(0, 8).map((proc) => ({
+    proc,
+    path: allocatePath(`workflows/${slugify(proc.title)}`, used),
+    // Canonical step texts, computed once and shared by the builder (which
+    // writes them) and the evaluator (which compares them) — see above.
+    canonicalSteps: proc.steps.map((step) => neutralizeRelativeLinks(step.text)),
+  }));
 }
 
 export function neutralizeRelativeLinks(markdown: string): string {
@@ -51,7 +61,7 @@ export function deriveEvalItems(source: NormalizedSource, analysis: SourceAnalys
         id: `eval-${items.length + 1}`,
         kind: "procedure",
         prompt: `Does the skill retain the ordered "${proc.title}" procedure?`,
-        expect: `${path} retains all ${proc.steps.length} source steps in order and is discoverable from SKILL.md; text comparison only, not execution.`,
+        expect: `${path} retains all ${proc.steps.length} source steps in order; text comparison only, not execution.`,
         assertions: [{ type: "procedure-fidelity", filePath: path, sourceSha256: source.sha256, sourceLines: [proc.line, proc.steps[proc.steps.length - 1]!.line] }],
       });
     }

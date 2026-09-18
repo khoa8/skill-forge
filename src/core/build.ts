@@ -26,7 +26,7 @@ import type {
 } from "./types.js";
 import type { SkillPlan } from "./plan.js";
 import { slugify, sha256 } from "./util.js";
-import { allocateReferences, allocateWorkflows, deriveEvalItems, neutralizeRelativeLinks } from "./evals.js";
+import { allocateReferences, allocateWorkflows, deriveEvalItems } from "./evals.js";
 export { neutralizeRelativeLinks } from "./evals.js";
 
 export const GAP_NOTE =
@@ -327,14 +327,14 @@ export function buildCanonicalSkill(
   const usedPaths = new Set<string>(["SKILL.md"]);
   const referenceLinks: { path: string; heading: string; range: string }[] = [];
 
-  for (const { section, body, path } of allocateReferences(analysis)) {
+  for (const { section, canonicalBody, path } of allocateReferences(analysis)) {
     usedPaths.add(path);
     const content = [
       `# ${section.heading}`,
       "",
       `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
       "",
-      neutralizeRelativeLinks(body),
+      canonicalBody,
       "",
       `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
       "",
@@ -353,7 +353,7 @@ export function buildCanonicalSkill(
   // into executable workflow files.
   const workflowLinks: { path: string; title: string; stepCount: number }[] = [];
   if (!isCodebase) {
-    for (const { proc, path } of allocateWorkflows(analysis)) {
+    for (const { proc, path, canonicalSteps } of allocateWorkflows(analysis)) {
       usedPaths.add(path);
       const endLine = proc.steps[proc.steps.length - 1]!.line;
       const content = [
@@ -361,7 +361,7 @@ export function buildCanonicalSkill(
         "",
         `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
         "",
-        ...proc.steps.map((s, i) => `${i + 1}. ${neutralizeRelativeLinks(s.text)} _(source line ${s.line})_`),
+        ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
         "",
       ].join("\n");
       addFile(
@@ -423,7 +423,7 @@ export function buildCanonicalSkill(
         "Evals without assertions (manual grounding questions) and command checks remain manual.",
         "",
       ].join("\n"),
-      "Explains what the evals are and that they are manual grounding checks.",
+      "Structured eval questions with executable assertions for advisory deterministic evaluation, plus manual grounding checks.",
       { extraction: "eval explanation", sourceLines: [1, source.lineCount] },
     );
   }

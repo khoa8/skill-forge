@@ -866,6 +866,7 @@ async function saveEdit() {
     // returned the full updated package + validation.
     // Pending validation/downloads refer to the package before this edit.
     state.validateSeq++;
+    state.evaluationSeq++;
     state.exportSeq++;
     setStep("export", null);
     state.skill = data.skill;

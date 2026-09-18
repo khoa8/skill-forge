@@ -1,8 +1,10 @@
 # Evals
 
 These checks were derived deterministically from the source structure (sections,
-procedures, commands). They are grounding checks: run them manually by asking an
-agent the `prompt` and verifying the `expect` condition holds using only the
-generated package and the original source.
-
-SkillForge does not execute evals automatically in this version.
+procedures, commands). Each eval carries an optional structured assertion enabling
+bounded, offline, deterministic evaluation: topic-retention checks verify a reference
+file retains its source excerpt and stays discoverable from SKILL.md; procedure-fidelity
+checks compare ordered step text in workflow files against the source. Nothing is ever
+executed; evaluation is advisory, does not replace deterministic validation, and lists
+pass, concern, or not-executable per check with no aggregate quality score.
+Evals without assertions (manual grounding questions) and command checks remain manual.
