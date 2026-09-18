@@ -5,11 +5,21 @@
  * or an explicitly configured docs directory). Safety rules:
  * - paths must resolve inside the allowed root (no traversal via symlink or ..);
  * - extension allowlist for text formats; size-bounded per file and in total;
+ * - accepted content is read through a bounded file handle (O_NOFOLLOW open,
+ *   handle-level regular-file verification, actual-byte caps), never through
+ *   an unbounded pathname read trusting stale pre-read size metadata;
  * - directory ingestion is non-recursive by default, recursive only with an
  *   explicit flag, bounded depth and file count;
  * - no code execution — files are read as text only.
+ *
+ * Threat model: ordinary pathname/symlink containment for trusted self-hosted
+ * use. Reads resist final-component file-to-symlink replacement and
+ * concurrently growing files. Atomic containment against a malicious local
+ * process concurrently replacing parent directories is not claimed.
  */
-import { readFile, opendir, stat, realpath } from "node:fs/promises";
+import { open, opendir, stat, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import { join, relative, extname, basename, isAbsolute, sep } from "node:path";
 import type { Dirent } from "node:fs";
 import type { SourceInput } from "../types.js";
@@ -80,6 +90,78 @@ export interface CollectedFile {
   content: string;
 }
 
+/** Chunk size for bounded handle reads. At most MAX_FILE_BYTES + 1 bytes are
+ * ever retained, so an over-limit file is detected without unbounded growth. */
+const READ_CHUNK_BYTES = 64 * 1024;
+
+function abortError(): FileSourceError {
+  return new FileSourceError("The request was aborted by the client.", "file_aborted");
+}
+
+/**
+ * Read a text file through its opened handle, bounding actual bytes.
+ *
+ * The file must already have passed ordinary containment and extension
+ * checks. The open uses O_NOFOLLOW (same defensive pattern as the PDF
+ * adapter), so a final component swapped to a symlink after earlier pathname
+ * checks is refused instead of followed. The opened object is verified as a
+ * regular file through the handle, and at most MAX_FILE_BYTES + 1 actual
+ * bytes are read: the pre-read stat size is never authoritative, so a file
+ * that grew after stat cannot bypass the byte budget. Cancellation is checked
+ * on every chunk and the handle is always closed.
+ */
+async function readBoundedTextFile(
+  absolute: string,
+  opts: { signal?: AbortSignal },
+): Promise<{ content: string; bytes: number }> {
+  const { signal } = opts;
+  if (signal?.aborted) throw abortError();
+  let handle: FileHandle;
+  try {
+    handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (err) {
+    if (signal?.aborted) throw abortError();
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === "ELOOP" || code === "EMLINK") {
+      throw new FileSourceError(
+        `"${basename(absolute)}" was refused: the file changed into a symlink before it could be read.`,
+        "file_outside_root",
+      );
+    }
+    if (code === "ENOENT") {
+      throw new FileSourceError(`"${basename(absolute)}" is no longer available.`, "file_not_found");
+    }
+    throw err;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw new FileSourceError(`"${basename(absolute)}" is not a regular file.`, "file_not_found");
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let position = 0;
+    for (;;) {
+      if (signal?.aborted) throw abortError();
+      const buf = Buffer.alloc(READ_CHUNK_BYTES);
+      const { bytesRead } = await handle.read(buf, 0, buf.length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      size += bytesRead;
+      if (size > MAX_FILE_BYTES) {
+        throw new FileSourceError(
+          `"${basename(absolute)}" exceeds the per-file limit of ${(MAX_FILE_BYTES / 1000).toFixed(0)} KB; over-limit bytes were not retained.`,
+          "file_too_large",
+        );
+      }
+      chunks.push(buf.subarray(0, bytesRead));
+    }
+    if (signal?.aborted) throw abortError();
+    return { content: Buffer.concat(chunks, size).toString("utf8"), bytes: size };
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Read a file (with extension + size checks) or walk a bounded directory. */
 export async function collectFiles(
   userPath: string,
@@ -114,10 +196,10 @@ export async function collectFiles(
         "file_too_large",
       );
     }
-    const content = await readFile(absolute, { encoding: "utf8", signal: opts.signal }).catch((err) => {
-      if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
-      throw err;
-    });
+    // Fast path only: the authoritative per-file cap is enforced on actual
+    // bytes by the bounded handle read below, so stale stat metadata cannot
+    // bypass the budget.
+    const { content } = await readBoundedTextFile(absolute, { signal: opts.signal });
     if (opts.signal?.aborted) {
       throw new FileSourceError("The request was aborted by the client.", "file_aborted");
     }
@@ -217,6 +299,8 @@ export async function collectFiles(
         skipped.push(`${rel}: stat failed`);
         continue;
       }
+      // Pre-read sizes are an optimization only. Actual accepted bytes counted
+      // below are authoritative, so stale metadata cannot bypass either budget.
       if (info.size > MAX_FILE_BYTES) {
         skipped.push(`${rel}: too large (${(info.size / 1000).toFixed(0)} KB)`);
         continue;
@@ -225,13 +309,27 @@ export async function collectFiles(
         skipped.push(`${rel}: total size limit reached`);
         return;
       }
-      const content = await readFile(full, { encoding: "utf8", signal: opts.signal }).catch(() => {
+      let content: string;
+      let bytes: number;
+      try {
+        ({ content, bytes } = await readBoundedTextFile(full, { signal: opts.signal }));
+      } catch (err) {
+        if (err instanceof FileSourceError && err.code === "file_aborted") throw err;
+        if (err instanceof FileSourceError && err.code === "file_too_large") {
+          skipped.push(`${rel}: too large (exceeds ${(MAX_FILE_BYTES / 1000).toFixed(0)} KB during read; bytes not retained)`);
+          continue;
+        }
         if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+        // Symlink refusal, vanished files, and unreadable files are skipped
+        // honestly without leaking filesystem diagnostics.
         skipped.push(`${rel}: unreadable`);
-        return null;
-      });
-      if (content === null) continue;
-      totalBytes += info.size;
+        continue;
+      }
+      if (totalBytes + bytes > MAX_TOTAL_BYTES) {
+        skipped.push(`${rel}: total size limit reached`);
+        return;
+      }
+      totalBytes += bytes;
       out.push({ path: rel, content });
     }
   }

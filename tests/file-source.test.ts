@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, opendir, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, opendir, readdir, open, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,14 +8,14 @@ import {
   resolveInsideRoot,
   FileSourceError,
   allowedRoot,
-  MAX_VISITED_ENTRIES, MAX_FILES, MAX_DEPTH, MAX_TOTAL_BYTES,
+  MAX_VISITED_ENTRIES, MAX_FILES, MAX_DEPTH, MAX_TOTAL_BYTES, MAX_FILE_BYTES,
 } from "../src/core/sources/files.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, opendir: vi.fn(actual.opendir) };
+  return { ...actual, opendir: vi.fn(actual.opendir), open: vi.fn(actual.open), stat: vi.fn(actual.stat) };
 });
-afterEach(() => { vi.mocked(opendir).mockReset(); });
+afterEach(() => { vi.mocked(opendir).mockReset(); vi.mocked(open).mockReset(); vi.mocked(stat).mockReset(); });
 
 let rootBackup: string | undefined;
 let sandbox: string;
@@ -206,6 +206,107 @@ describe("bounded deterministic traversal", () => {
     }) as unknown as Awaited<ReturnType<typeof opendir>>);
     await expect(collectFiles("cancel-walk", { signal: controller.signal })).rejects.toMatchObject({ code: "file_aborted" });
     expect(visited).toBe(1);
+    expect(closed).toBe(true);
+  });
+});
+
+describe("bounded handle reads", () => {
+  async function fixtureDir(name: string): Promise<string> {
+    const dir = join(sandbox, name);
+    await mkdir(dir, { recursive: true });
+    return dir;
+  }
+  /** Real stat for non-markdown paths (e.g. the collected directory itself);
+   * stale tiny metadata for markdown files, so only the bounded handle read
+   * can enforce either byte budget. */
+  async function staleStat() {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(stat).mockImplementation((async (path: unknown, options?: unknown) => {
+      if (typeof path === "string" && path.endsWith(".md")) {
+        return { size: 24, isFile: () => true, isDirectory: () => false };
+      }
+      return (actualFs.stat as (p: unknown, o?: unknown) => Promise<unknown>)(path, options);
+    }) as unknown as typeof stat);
+  }
+
+  it("refuses a final-component file-to-symlink replacement at the read boundary", async () => {
+    const dir = await fixtureDir("swap");
+    await writeFile(join(dir, "victim.md"), "# Victim\n\nOriginal content.\n");
+    // Deterministic fault injection: between containment checks and open, the
+    // final component became a symlink, so open refuses with ELOOP.
+    vi.mocked(open).mockRejectedValueOnce(
+      Object.assign(new Error("ELOOP: too many symbolic links encountered"), { code: "ELOOP" }),
+    );
+    await expect(collectFiles("swap/victim.md")).rejects.toMatchObject({ code: "file_outside_root" });
+  });
+
+  it("enforces the per-file cap on actual bytes when pre-read metadata underreports size", async () => {
+    const dir = await fixtureDir("stale-single");
+    await writeFile(join(dir, "grown.md"), "g".repeat(MAX_FILE_BYTES + 128));
+    // Deterministic fault injection: pre-read stat claims a tiny file.
+    vi.mocked(stat).mockImplementationOnce(
+      (async () => ({ size: 32, isFile: () => true })) as unknown as typeof stat,
+    );
+    await expect(collectFiles("stale-single/grown.md")).rejects.toMatchObject({ code: "file_too_large" });
+  });
+
+  it("skips directory files that exceed the cap during actual read and never retains their bytes", async () => {
+    const dir = await fixtureDir("stale-dir");
+    const marker = "GROWN-MARKER-UNIQUE-STRING";
+    await writeFile(join(dir, "aaa-grown.md"), `${marker}\n` + "g".repeat(MAX_FILE_BYTES));
+    await writeFile(join(dir, "keep-one.md"), "# Keep one\n\nSmall documented content.\n");
+    await writeFile(join(dir, "keep-two.md"), "# Keep two\n\nMore small documented content.\n");
+    await staleStat();
+    const { files, skipped } = await collectFiles("stale-dir");
+    expect(files.map((f) => f.path).sort()).toEqual(["stale-dir/keep-one.md", "stale-dir/keep-two.md"]);
+    expect(skipped.join("\n")).toContain("too large");
+    expect(files.map((f) => f.content).join("\n")).not.toContain(marker);
+  });
+
+  it("accounts directory totals with actual accepted bytes, not stale metadata", async () => {
+    const dir = await fixtureDir("stale-total");
+    const chunk = "t".repeat(500_000);
+    await writeFile(join(dir, "a.md"), chunk);
+    await writeFile(join(dir, "b.md"), chunk);
+    await writeFile(join(dir, "c.md"), chunk);
+    await staleStat();
+    const { files, skipped } = await collectFiles("stale-total");
+    // Stale metadata claims 24 bytes each (72 total); actual bytes are
+    // 500_000 each, so the third file must stop collection at the real total.
+    expect(files.map((f) => f.path)).toEqual(["stale-total/a.md", "stale-total/b.md"]);
+    expect(skipped.join("\n")).toContain("total size limit reached");
+    expect(files.reduce((sum, f) => sum + Buffer.byteLength(f.content, "utf8"), 0)).toBe(1_000_000);
+  });
+
+  it("aborts a bounded read with file_aborted and closes the handle", async () => {
+    const dir = await fixtureDir("abort-read");
+    await writeFile(join(dir, "big.md"), "q".repeat(200_000));
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const controller = new AbortController();
+    let closed = false;
+    vi.mocked(open).mockImplementationOnce((async (...args: unknown[]) => {
+      const handle = await (actualFs.open as (...a: unknown[]) => Promise<{
+        read: (...a: unknown[]) => Promise<unknown>;
+        close: (...a: unknown[]) => Promise<unknown>;
+        stat: () => Promise<{ isFile: () => boolean }>;
+      }>)(...args);
+      const origRead = handle.read.bind(handle);
+      let reads = 0;
+      handle.read = async (...readArgs: unknown[]) => {
+        reads++;
+        if (reads === 2) controller.abort();
+        return origRead(...readArgs as never[]);
+      };
+      const origClose = handle.close.bind(handle);
+      handle.close = async (...closeArgs: unknown[]) => {
+        closed = true;
+        return origClose(...closeArgs as never[]);
+      };
+      return handle;
+    }) as unknown as typeof open);
+    await expect(collectFiles("abort-read/big.md", { signal: controller.signal })).rejects.toMatchObject({
+      code: "file_aborted",
+    });
     expect(closed).toBe(true);
   });
 });
