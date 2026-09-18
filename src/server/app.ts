@@ -707,7 +707,7 @@ export function createApp(config: AppConfig, overrides: AppOverrides = {}): Expr
     } catch (err) {
       const code = err instanceof ExportError ? err.code : "export_failed";
       const status = err instanceof ExportError
-        ? err.code === "export_target_unsupported" ? 400 : err.code === "export_codex_metadata_invalid" ? 422 : 500
+        ? err.code === "export_target_unsupported" ? 400 : err.code === "export_codex_metadata_invalid" || err.code === "export_claude_metadata_invalid" ? 422 : 500
         : 500;
       res.status(status).json({ error: err instanceof Error ? err.message : String(err), code });
     }
