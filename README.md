@@ -77,8 +77,9 @@ SkillForge is built for **local / trusted self-hosted use**. It has **no built-i
 | **Analyze** | Deterministic line-based extraction: sections, fenced code, shell commands, ordered procedures (≥3 steps), warnings, constraint statements. Every extraction keeps exact source line numbers. |
 | **Generate** | A provider turns the analysis into a validated skill plan; a shared builder produces the canonical package. The default provider is deterministic and offline; an OpenAI-compatible adapter (GLM, etc.) is available via env config. |
 | **Validate** | A fixed registry of deterministic checks (see below). Warnings don't block export; errors do. The UI never claims success for skipped validation. |
-| **Preview** | Inspect every generated file with its purpose and provenance before exporting. Provenance records are clickable and show the exact source lines (verbatim, never reconstructed). Generated files can be edited in place before export: edits are persisted, marked `user-edited` (their source provenance is dropped honestly, and the manifest file inventory records `userEdited: true`), manifest hashes are resynchronized, and deterministic validation re-runs — failing edits block export. Generated skills persist on disk (`.data/skills/`) and survive server restarts with concurrency and collision protection (`skill_id_conflict`). |
-| **Export** | Real ZIP downloads for **Claude Code** and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
+| **Evaluate** | On-demand, advisory, and fully offline: source-derived topic/procedure expectations are compared against the package as inert text (no commands are executed, no model is called). Findings are advisory and never gate export — validation owns the export gate. Legacy/manual evals are reported as not executable, never as passes. |
+| **Preview** | Inspect every generated file with its purpose and provenance before exporting. Provenance records are clickable and show the exact source lines (verbatim, never reconstructed). Generated files can be edited in place before export: edits are persisted, marked `user-edited` (their source provenance is dropped honestly, and the manifest file inventory records `userEdited: true`), manifest hashes are resynchronized, and deterministic validation re-runs — failing edits block export. Evaluation is re-run on demand after edits; a stale report is never shown as current. Generated skills persist on disk (`.data/skills/`) and survive server restarts with concurrency and collision protection (`skill_id_conflict`). |
+| **Export** | Real ZIP downloads for **Claude Code**, **OpenAI Codex**, and **Generic (AGENTS.md)** targets. The server re-validates and refuses (HTTP 422) packages with errors. |
 
 ## Generated package
 
@@ -91,9 +92,11 @@ meridian-payments-api/
 ├── references/           # verbatim source excerpts with line-range provenance
 ├── workflows/            # multi-step procedures detected in the source
 ├── examples/             # verbatim code blocks from the source
-├── evals/                # deterministic, source-derived grounding checks (manual)
+├── evals/                # deterministic, source-derived grounding checks (structured assertions; advisory evaluation, manual fallback)
 └── manifest.json         # source identity (sha256), gap list, file inventory with hashes and userEdited flags
 ```
+
+The OpenAI Codex exporter preserves the canonical files and checks metadata against the [official OpenAI skill format](https://learn.chatgpt.com/docs/build-skills). Optional `agents/openai.yaml` metadata is omitted. Package structure is covered by tests; Codex runtime behavior has not been verified.
 
 Every file has a recorded purpose; ceremonial empty files are a validation error. Relative links inside verbatim excerpts are shown as paths (`` `docs/x.md` ``) instead of dangling links.
 
@@ -130,7 +133,7 @@ Runs one small bounded generation through the configured provider (`SKILLFORGE_P
 - The grounding check is heuristic (token overlap), not proof of correctness; review generated skills.
 - GitHub source reads **public repositories only** (private repositories are deliberately unsupported even with an authenticated token); refs with slashes in `/tree/` URLs take the first segment as the ref; API rate limits apply as described above (with reset time reported on 429). Codebase-mode analysis is bounded and partial by design — it inspects a prioritized selection of files, never the whole repository, and says so in the generated skill.
 - The `glm`/`openai` providers require you to supply a key; live compatibility is not guaranteed by the test suite — validate your configuration with `npm run verify:provider`.
-- Evals are generated as manual grounding checks; SkillForge does not execute them.
+- Evals carry structured, source-derived assertions that SkillForge can evaluate deterministically (topic excerpt retention + SKILL.md discoverability; ordered procedure step fidelity as inert text). Evaluation is advisory, runs on demand via `GET /api/skills/:id/evaluation` or the Preview panel, never executes commands or calls a model, and never gates export — validation remains the export gate. Evals without assertions (manual questions, command grounding) are reported as not executable, not as passes. Evaluation compares text only; it does not prove a skill works in a real agent runtime.
 - PDF ingestion requires a usable text layer (at least 40 characters); scanned/image-only and encrypted/password-protected PDFs are unsupported. No OCR, browser upload, remote PDF fetch, or visual/table reconstruction is provided. Multi-column reading order and spacing may be imperfect. PDFs requiring unavailable external font/CMap data may fail or yield incomplete text; only embedded text resources are used. Byte/page limits apply as described above.
 - SkillForge has no built-in authentication; see the deployment scope above before binding beyond loopback.
 
