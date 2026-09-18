@@ -7,9 +7,23 @@
  * - extension allowlist for text formats; size-bounded per file and in total;
  * - directory ingestion is non-recursive by default, recursive only with an
  *   explicit flag, bounded depth and file count;
+ * - file contents are read through O_NOFOLLOW handle opens with fstat type
+ *   checks and capped actual-byte reads, so a file swapped for a symlink (or
+ *   grown) between the metadata check and the read cannot leak outside-root
+ *   bytes or exceed the byte budgets via stale stat sizes;
  * - no code execution — files are read as text only.
+ *
+ * Residual limitation (documented, not claimed away): O_NOFOLLOW binds only
+ * the final path component. A parent directory swapped for a symlink and held
+ * in place across both the containment re-check and the handle open could
+ * still redirect a read. The re-checks below close persistent swaps; a
+ * transient toggle confined to the check-to-open window is not fully
+ * closable with portable Node APIs (it would need openat-style
+ * directory-relative resolution).
  */
-import { readFile, opendir, stat, realpath } from "node:fs/promises";
+import { open, opendir, stat, realpath } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
+import { constants } from "node:fs";
 import { join, relative, extname, basename, isAbsolute, sep } from "node:path";
 import type { Dirent } from "node:fs";
 import type { SourceInput } from "../types.js";
@@ -80,6 +94,62 @@ export interface CollectedFile {
   content: string;
 }
 
+/** Chunk size for capped handle reads. */
+const READ_CHUNK_BYTES = 64 * 1024;
+
+function abortError(): FileSourceError {
+  return new FileSourceError("The request was aborted by the client.", "file_aborted");
+}
+
+/** True when `realPath` lies outside the resolved allowlist root. */
+function isOutsideRoot(realRoot: string, realPath: string): boolean {
+  const rel = relative(realRoot, realPath);
+  return rel === "" || rel.startsWith("..") || isAbsolute(rel);
+}
+
+/**
+ * Open a path for reading without following a swapped final symlink,
+ * mirroring the PDF adapter. ELOOP callers map to containment refusal;
+ * every other open failure propagates to the caller.
+ */
+async function openForRead(path: string, signal?: AbortSignal): Promise<FileHandle> {
+  if (signal?.aborted) throw abortError();
+  try {
+    return await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (err) {
+    if (signal?.aborted) throw abortError();
+    throw err;
+  }
+}
+
+/**
+ * Read at most `cap + 1` bytes from an open handle so growth between the
+ * metadata check and the read is observed, not trusted. Returns the decoded
+ * text, the exact bytes accepted, and whether the cap was exceeded.
+ */
+async function readCapped(
+  handle: FileHandle,
+  cap: number,
+  signal?: AbortSignal,
+): Promise<{ content: string; bytes: number; overflow: boolean }> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  let overflow = false;
+  const buf = Buffer.alloc(Math.min(READ_CHUNK_BYTES, cap + 1));
+  for (;;) {
+    if (signal?.aborted) throw abortError();
+    const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, cap + 1 - bytes), null);
+    if (bytesRead === 0) break;
+    bytes += bytesRead;
+    chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
+    if (bytes > cap) {
+      overflow = true;
+      break;
+    }
+  }
+  return { content: Buffer.concat(chunks).toString("utf8"), bytes, overflow };
+}
+
 /** Read a file (with extension + size checks) or walk a bounded directory. */
 export async function collectFiles(
   userPath: string,
@@ -114,14 +184,52 @@ export async function collectFiles(
         "file_too_large",
       );
     }
-    const content = await readFile(absolute, { encoding: "utf8", signal: opts.signal }).catch((err) => {
-      if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
-      throw err;
-    });
-    if (opts.signal?.aborted) {
-      throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+    // Handle-bound read: O_NOFOLLOW refuses a final component swapped for a
+    // symlink after the containment check, fstat re-verifies the type, and
+    // the capped read enforces MAX_FILE_BYTES on actual bytes — not on the
+    // stale stat size above (which remains only as a fast path).
+    let handle: FileHandle | undefined;
+    try {
+      try {
+        handle = await openForRead(absolute, opts.signal);
+      } catch (err) {
+        if (err instanceof FileSourceError) throw err;
+        if ((err as NodeJS.ErrnoException)?.code === "ELOOP") {
+          throw new FileSourceError(
+            `"${basename(absolute)}" resolves outside the allowed root. Set SKILLFORGE_DOCS_ROOT to widen access deliberately.`,
+            "file_outside_root",
+          );
+        }
+        throw err;
+      }
+      if (opts.signal?.aborted) throw abortError();
+      // A parent directory held swapped for an outside symlink across the
+      // initial check would still redirect this open; refuse persistent swaps.
+      const realAgain = await realpath(absolute).catch(() => null);
+      if (realAgain === null || isOutsideRoot(realRoot, realAgain)) {
+        throw new FileSourceError(
+          `"${basename(absolute)}" resolves outside the allowed root. Set SKILLFORGE_DOCS_ROOT to widen access deliberately.`,
+          "file_outside_root",
+        );
+      }
+      if (!(await handle.stat()).isFile()) {
+        throw new FileSourceError(`"${basename(absolute)}" is no longer a regular file.`, "file_not_found");
+      }
+      const read = await readCapped(handle, MAX_FILE_BYTES, opts.signal);
+      if (opts.signal?.aborted) {
+        throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+      }
+      if (read.overflow) {
+        throw new FileSourceError(
+          `"${basename(absolute)}" exceeds the per-file limit of ${(MAX_FILE_BYTES / 1000).toFixed(0)} KB.`,
+          "file_too_large",
+        );
+      }
+      const content = read.content;
+      return { files: [{ path: relative(root, absolute).split(sep).join("/"), content }], skipped };
+    } finally {
+      await handle?.close().catch(() => {});
     }
-    return { files: [{ path: relative(root, absolute).split(sep).join("/"), content }], skipped };
   }
 
   const budget = opts.maxVisitedEntries ?? MAX_VISITED_ENTRIES;
@@ -164,6 +272,14 @@ export async function collectFiles(
     }
     if (seen.has(dir)) return; // symlink cycle guard
     seen.add(dir);
+    // Re-verify containment at use time: a directory replaced by an outside
+    // symlink after the parent enumeration must not be descended into. This
+    // closes persistent swaps; see the module header for the residual window.
+    const realDir = await realpath(dir).catch(() => null);
+    if (realDir === null || isOutsideRoot(rootDir, realDir)) {
+      skipped.push(`${relative(rootDir, dir).split(sep).join("/") || dir}: resolves outside the allowed root`);
+      return;
+    }
     const entries: Dirent[] = [];
     try {
       // Incremental enumeration bounds memory/work even for huge ignored directories.
@@ -212,26 +328,58 @@ export async function collectFiles(
       const ext = extname(entry.name).toLowerCase();
       if (!TEXT_EXTENSIONS.has(ext)) continue;
       const rel = relative(rootDir, full).split(sep).join("/");
-      const info = await stat(full).catch(() => null);
-      if (!info) {
+      // Refuse a file whose parent chain persistently resolves outside the
+      // root at use time; the O_NOFOLLOW open below then atomically refuses a
+      // swapped final symlink, and the capped read enforces the byte budgets
+      // on actual bytes rather than the stale sizes below.
+      const realFull = await realpath(full).catch(() => null);
+      if (realFull === null) {
         skipped.push(`${rel}: stat failed`);
         continue;
       }
-      if (info.size > MAX_FILE_BYTES) {
-        skipped.push(`${rel}: too large (${(info.size / 1000).toFixed(0)} KB)`);
+      if (isOutsideRoot(rootDir, realFull)) {
+        skipped.push(`${rel}: resolves outside the allowed root`);
         continue;
       }
-      if (totalBytes + info.size > MAX_TOTAL_BYTES) {
-        skipped.push(`${rel}: total size limit reached`);
-        return;
-      }
-      const content = await readFile(full, { encoding: "utf8", signal: opts.signal }).catch(() => {
-        if (opts.signal?.aborted) throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+      let fileHandle: FileHandle | undefined;
+      try {
+        fileHandle = await openForRead(full, opts.signal);
+      } catch (err) {
+        if (err instanceof FileSourceError) throw err;
+        if ((err as NodeJS.ErrnoException)?.code === "ELOOP") {
+          skipped.push(`${rel}: symlink refused`);
+          continue;
+        }
         skipped.push(`${rel}: unreadable`);
-        return null;
-      });
-      if (content === null) continue;
-      totalBytes += info.size;
+        continue;
+      }
+      let content: string;
+      try {
+        if (opts.signal?.aborted) {
+          throw new FileSourceError("The request was aborted by the client.", "file_aborted");
+        }
+        if (!(await fileHandle.stat()).isFile()) {
+          skipped.push(`${entry.name}: not a regular file`);
+          continue;
+        }
+        const read = await readCapped(fileHandle, MAX_FILE_BYTES, opts.signal);
+        if (read.overflow) {
+          skipped.push(`${rel}: too large (over ${(MAX_FILE_BYTES / 1000).toFixed(0)} KB)`);
+          continue;
+        }
+        if (totalBytes + read.bytes > MAX_TOTAL_BYTES) {
+          skipped.push(`${rel}: total size limit reached`);
+          return;
+        }
+        content = read.content;
+        totalBytes += read.bytes;
+      } catch (err) {
+        if (err instanceof FileSourceError) throw err;
+        skipped.push(`${rel}: unreadable`);
+        continue;
+      } finally {
+        await fileHandle.close().catch(() => {});
+      }
       out.push({ path: rel, content });
     }
   }

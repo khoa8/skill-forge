@@ -1,5 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, opendir, readdir } from "node:fs/promises";
+import { open, stat, readFile } from "node:fs/promises";
+import { promises as fsReal } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,14 +10,26 @@ import {
   resolveInsideRoot,
   FileSourceError,
   allowedRoot,
+  MAX_FILE_BYTES,
   MAX_VISITED_ENTRIES, MAX_FILES, MAX_DEPTH, MAX_TOTAL_BYTES,
 } from "../src/core/sources/files.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, opendir: vi.fn(actual.opendir) };
+  return {
+    ...actual,
+    opendir: vi.fn(actual.opendir),
+    open: vi.fn(actual.open),
+    stat: vi.fn(actual.stat),
+    readFile: vi.fn(actual.readFile),
+  };
 });
-afterEach(() => { vi.mocked(opendir).mockReset(); });
+afterEach(() => {
+  vi.mocked(opendir).mockReset();
+  vi.mocked(open).mockReset();
+  vi.mocked(stat).mockReset();
+  vi.mocked(readFile).mockReset();
+});
 
 let rootBackup: string | undefined;
 let sandbox: string;
@@ -207,5 +221,161 @@ describe("bounded deterministic traversal", () => {
     await expect(collectFiles("cancel-walk", { signal: controller.signal })).rejects.toMatchObject({ code: "file_aborted" });
     expect(visited).toBe(1);
     expect(closed).toBe(true);
+  });
+});
+
+describe("read-boundary hardening (TOCTOU)", () => {
+  // Deterministic fault injection for check-to-use races: the wrappers below
+  // force the exact interleaving a concurrent mutator would win only
+  // probabilistically (a live race was also reproduced against the previous
+  // implementation during validation). `node:fs` stays unmocked, so
+  // delegation always reaches the real filesystem.
+  async function swapToOutside(victim: string, target: string): Promise<void> {
+    await fsReal.rm(victim, { recursive: true, force: true });
+    await fsReal.symlink(target, victim).catch(() => {});
+  }
+
+  function injectSwap(victimReal: string, victim: string, target: string): void {
+    // Module paths reach the adapter resolved (realpath); resolve the victim
+    // once up front (macOS tmpdirs are symlinked) and fire the swap on the
+    // first matching call. Re-fires are unnecessary: one swap persists.
+    let fired = false;
+    const shouldFire = async (p: unknown): Promise<boolean> => {
+      if (fired) return false;
+      const real = await fsReal.realpath(String(p)).catch(() => String(p));
+      return real === victimReal;
+    };
+    vi.mocked(stat).mockImplementation((async (p: unknown) => {
+      if (await shouldFire(p)) {
+        fired = true;
+        await swapToOutside(victim, target);
+      }
+      return fsReal.stat(p as string);
+    }) as unknown as typeof stat);
+    vi.mocked(open).mockImplementation((async (p: unknown, flags: unknown, mode: unknown) => {
+      if (await shouldFire(p)) {
+        fired = true;
+        await swapToOutside(victim, target);
+      }
+      return fsReal.open(p as string, flags as number, mode as number);
+    }) as unknown as typeof open);
+    vi.mocked(readFile).mockImplementation((async (...args: unknown[]) => {
+      if (await shouldFire(args[0])) {
+        fired = true;
+        await swapToOutside(victim, target);
+      }
+      return (fsReal.readFile as (...a: unknown[]) => Promise<unknown>)(...args);
+    }) as unknown as typeof readFile);
+  }
+
+  /** Report `size` for fixture stats while the bytes on disk stay real. */
+  function lieAboutSize(match: string, size: number): void {
+    vi.mocked(stat).mockImplementation((async (p: unknown) => {
+      const st = await fsReal.stat(p as string);
+      if (String(p).includes(match)) {
+        return Object.assign(Object.create(Object.getPrototypeOf(st) as object), st, { size });
+      }
+      return st;
+    }) as unknown as typeof stat);
+  }
+
+  it("single-file: a file swapped for an outside symlink cannot leak bytes", async () => {
+    const dir = join(sandbox, "race-single");
+    await mkdir(dir, { recursive: true });
+    const victim = join(dir, "a.md");
+    await writeFile(victim, "in-root content\n");
+    const outsideDir = await mkdtemp(join(tmpdir(), "race-secret-"));
+    try {
+      const secret = join(outsideDir, "secret.md");
+      await fsReal.writeFile(secret, "OUTSIDE-SECRET-should-never-leak\n");
+      injectSwap(await fsReal.realpath(victim), victim, secret);
+      await expect(collectFiles("race-single/a.md")).rejects.toMatchObject({ code: "file_outside_root" });
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("directory: a file swapped for an outside symlink cannot leak bytes", async () => {
+    const dir = join(sandbox, "race-dir");
+    await mkdir(dir, { recursive: true });
+    const victim = join(dir, "a.md");
+    await writeFile(victim, "in-root content\n");
+    const outsideDir = await mkdtemp(join(tmpdir(), "race-secret-"));
+    try {
+      const secret = join(outsideDir, "secret.md");
+      await fsReal.writeFile(secret, "OUTSIDE-SECRET-should-never-leak\n");
+      injectSwap(await fsReal.realpath(victim), victim, secret);
+      // The only candidate is refused, so collection reports nothing usable —
+      // and no outside-root content may appear in any returned file.
+      await expect(collectFiles("race-dir")).rejects.toMatchObject({ code: "file_none_found" });
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("single-file: underreported metadata cannot exceed the per-file cap", async () => {
+    const dir = join(sandbox, "shrink-single");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "big.md"), "B".repeat(MAX_FILE_BYTES + 100_000));
+    lieAboutSize("shrink-single", 10);
+    await expect(collectFiles("shrink-single/big.md")).rejects.toMatchObject({ code: "file_too_large" });
+  });
+
+  it("directory: underreported metadata cannot exceed the per-file cap", async () => {
+    const dir = join(sandbox, "shrink-one");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "big.md"), "B".repeat(MAX_FILE_BYTES + 100_000));
+    lieAboutSize("shrink-one", 10);
+    await expect(collectFiles("shrink-one")).rejects.toMatchObject({ code: "file_none_found" });
+  });
+
+  it("directory: total budget accounts actual bytes, not stale stat sizes", async () => {
+    const dir = join(sandbox, "shrink-total");
+    await mkdir(dir, { recursive: true });
+    // Real bytes (750 KB + 750 KB) exceed the 1.4 MB total; lied stats (100 B
+    // each) would let both through if accounting trusted metadata.
+    await writeFile(join(dir, "a.md"), "A".repeat(750_000));
+    await writeFile(join(dir, "b.md"), "B".repeat(750_000));
+    lieAboutSize("shrink-total", 100);
+    const { files, skipped } = await collectFiles("shrink-total");
+    const retained = files.reduce((sum, f) => sum + Buffer.byteLength(f.content, "utf8"), 0);
+    expect(retained).toBeLessThanOrEqual(MAX_TOTAL_BYTES);
+    expect(files).toHaveLength(1);
+    expect(files[0]!.path).toBe("shrink-total/a.md");
+    expect(skipped.join("\n")).toContain("total size limit");
+  });
+
+  it("directory: a swapped parent resolving outside the root is refused", async () => {
+    const dir = join(sandbox, "race-parent");
+    await mkdir(join(dir, "sub"), { recursive: true });
+    await writeFile(join(dir, "sub", "a.md"), "in-root content\n");
+    const outsideDir = await mkdtemp(join(tmpdir(), "race-parent-outside-"));
+    try {
+      await fsReal.writeFile(join(outsideDir, "evil.md"), "OUTSIDE-PARENT-SECRET\n");
+      // Capture the parent listing while `sub` is still a real directory, then
+      // swap it for an outside link before the descent: the walk-entry
+      // containment re-check must refuse it. Without the re-check the descent
+      // would enumerate and read the outside directory.
+      vi.mocked(opendir).mockImplementation(async (p) => {
+        if (!String(p).endsWith("race-parent")) return fsReal.opendir(p as string);
+        const entries = await fsReal.readdir(p as string, { withFileTypes: true });
+        return {
+          async *[Symbol.asyncIterator]() {
+            for (const entry of entries) {
+              yield entry;
+              if (entry.name === "sub") await swapToOutside(join(dir, "sub"), outsideDir);
+            }
+          },
+        } as unknown as Awaited<ReturnType<typeof opendir>>;
+      });
+      await expect(collectFiles("race-parent", { recursive: true })).rejects.toMatchObject({
+        code: "file_none_found",
+      });
+    } finally {
+      await fsReal.unlink(join(dir, "sub")).catch(() => {});
+      await mkdir(join(dir, "sub"), { recursive: true });
+      await writeFile(join(dir, "sub", "a.md"), "in-root content\n");
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 });
