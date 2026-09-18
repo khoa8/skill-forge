@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "express": "^4.22.3",
-    "jszip": "^3.10.1",
+    "jszip": "^3.10.2",
     "marked": "^18.0.12",
     "pdfjs-dist": "4.10.38",
     "yaml": "^2.8.1",
