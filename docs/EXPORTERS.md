@@ -6,11 +6,21 @@ Exporters are the only place vendor-specific format differences live (AGENTS.md 
 
 | Target | Label | Layout | Format basis |
 | --- | --- | --- | --- |
-| `claude-code` | Claude Code | `<skill-id>/SKILL.md` with `name` + `description` YAML front matter, plus canonical supporting files (`references/`, `workflows/`, `examples/`, `evals/`, `manifest.json`) | Anthropic Agent Skills format: `name` ≤64 chars lowercase-hyphen, `description` ≤1024 chars. The exporter enforces these constraints, using semantic YAML parsing to preserve valid custom quoting, formatting, and descriptions while keeping the slug name synchronized. Structure verified by this repo's tests. |
+| `claude-code` | Claude Code | `<skill-id>/SKILL.md` with `name` + `description` YAML front matter, plus canonical supporting files (`references/`, `workflows/`, `examples/`, `evals/`, `manifest.json`) | Local Claude Code skill packaging (`.claude/skills/` layouts). SkillForge exports only canonical-valid v1 packages — intentionally a stricter subset of what Claude Code loads locally (Claude Code permits `name`/`description` to be optional). Extension frontmatter fields are preserved; only local constraints (`compatibility` string ≤500 chars, reserved `synced` folder) are enforced. claude.ai upload / Skills API compatibility is not claimed. Structure verified by this repo's tests. |
 | `generic` | Generic (AGENTS.md) | Same as canonical plus a root `AGENTS.md` orientation wrapper | The AGENTS.md convention: a root markdown instruction file any agent can read. The wrapper orients agents toward the authoritative `SKILL.md` and canonical package files. Verified by this repo's tests. |
 | `openai-codex` | OpenAI Codex | Canonical skill folder with root `SKILL.md` and all supporting files unchanged | [OpenAI Build skills](https://learn.chatgpt.com/docs/build-skills) and the [official skill-creator validator](https://github.com/openai/skills/blob/main/skills/.system/skill-creator/scripts/quick_validate.py). Structure covered by repository tests; runtime behavior not verified. |
 
 **Honesty rule:** we claim only what is tested. All exporters are covered by unit + end-to-end tests (structure, front-matter constraints, manifest resync, ZIP round-trip). Package-structure tests do not guarantee runtime behavior inside Claude Code or other agent runtimes; validate compatibility in the target runtime.
+
+## Claude Code contract
+
+`claude-code` targets local Claude Code skill packaging (personal `~/.claude/skills/` and project `.claude/skills/` layouts). SkillForge exports only packages that already satisfy SkillForge canonical v1, so its output is intentionally a stricter subset of the local Claude Code format. Claude Code itself permits some frontmatter fields to be optional; SkillForge canonical v1 still requires its canonical `name` and `description` — those are SkillForge requirements, not claims about Claude Code.
+
+- **Canonical validity is a precondition.** A package that fails canonical validation (missing `SKILL.md`, frontmatter, `name`, `description`, or metadata consistency) cannot be exported to `claude-code`. The exporter never backfills or repairs identity; it fails closed.
+- **Canonical rules stay canonical.** The lowercase-hyphen slug and length rules on `name`, and the description-length guidance, are enforced by canonical validation for every target — never described as Claude Code requirements.
+- **Extension fields are preserved.** User-authored Claude Code fields (e.g. `when_to_use`, `argument-hint`, `arguments`, `disable-model-invocation`, `user-invocable`, `allowed-tools`, `disallowed-tools`, `model`, `effort`, `context`, `agent`, `background`, `hooks`, `paths`, `shell`, `metadata`) pass through export unchanged. No closed upload allowlist is applied.
+- **Target-specific constraints (additive only):** `compatibility`, when present, must be a string of at most 500 characters (Claude Code accepts the field but does not act on it); the resulting skill folder must not be `synced` in any capitalization (reserved for skills synced from claude.ai).
+- **Not claimed:** claude.ai upload / Skills API / `package_skill.py` compatibility. Those paths restrict frontmatter to six fields (`name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`) and impose their own limits; this target does not enforce them.
 
 ## Codex contract
 

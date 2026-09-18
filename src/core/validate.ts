@@ -20,7 +20,7 @@ import type {
   ValidationReport,
 } from "./types.js";
 import { ExportTarget } from "./types.js";
-import { safePackagePath, sha256 } from "./util.js";
+import { safePackagePath, sha256, slugify } from "./util.js";
 
 export const VALIDATOR_VERSION = "1.0.0";
 
@@ -152,7 +152,7 @@ const frontMatterParses = check("frontmatter-parse", "SKILL.md front matter is w
   return pass();
 });
 
-const frontMatterFields = check("frontmatter-fields", "Front matter has valid name and description", ({ skill, target }) => {
+const frontMatterFields = check("frontmatter-fields", "Front matter has valid name and description", ({ skill }) => {
   const skillMd = skill.files.find((f) => f.path === "SKILL.md");
   if (!skillMd) return pass();
   const split = splitFrontMatter(skillMd.content);
@@ -176,9 +176,11 @@ const frontMatterFields = check("frontmatter-fields", "Front matter has valid na
         fail(`Front matter \`name\` "${name}" must be lowercase letters, digits, and hyphens (no leading/trailing hyphen).`, "SKILL.md"),
       );
     }
-    const maxName = target === "claude-code" ? 64 : 64;
-    if (name.length > maxName) {
-      outcomes.push(fail(`Front matter \`name\` exceeds ${maxName} characters (${name.length}).`, "SKILL.md"));
+    // Canonical SkillForge v1 policy (unchanged for every export target):
+    // Claude Code local skills may omit `name`, but SkillForge does not emit
+    // that broader subset.
+    if (name.length > 64) {
+      outcomes.push(fail(`Front matter \`name\` exceeds 64 characters (${name.length}).`, "SKILL.md"));
     }
   }
 
@@ -186,8 +188,11 @@ const frontMatterFields = check("frontmatter-fields", "Front matter has valid na
   if (typeof description !== "string" || description.trim().length === 0) {
     outcomes.push(fail("Front matter `description` is missing; agents use it to decide when to load the skill.", "SKILL.md"));
   } else if (description.length > 1024) {
+    // Canonical guidance only: a recommendation, never a target-specific hard
+    // error. Local Claude Code truncates long listing text; it does not
+    // reject it, so no target upgrades this warning to a failure.
     outcomes.push(
-      (target === "claude-code" ? fail : warn)(`Front matter \`description\` is ${description.length} characters; ${target === "claude-code" ? "the claude-code limit" : "the recommended limit"} is 1024.`, "SKILL.md"),
+      warn(`Front matter \`description\` is ${description.length} characters; the recommended limit is 1024.`, "SKILL.md"),
     );
   }
   return outcomes.length === 0 ? pass() : outcomes;
@@ -749,6 +754,61 @@ const canonicalMetadataConsistency = check(
   },
 );
 
+// Claude Code local-skill constraints: additive target validation for
+// `target === "claude-code"` only. Canonical validation always runs first and
+// remains mandatory — SkillForge intentionally exports a stricter
+// canonical-valid subset of what Claude Code loads locally (Claude Code
+// permits `name`/`description` to be optional with body fallback; SkillForge
+// canonical v1 still requires them). This check adds only real local Claude
+// Code requirements: the `compatibility` type/limit and the reserved `synced`
+// folder name. Upload/API-only rules (Agent Skills six-field allowlist,
+// description hard limits, angle-bracket bans, `claude`/`anthropic` name
+// bans) are not local Claude Code requirements and are not enforced here.
+const claudeCodeLocalConstraints = check(
+  "claude-code-local",
+  "Claude Code local-skill constraints",
+  ({ skill, target }) => {
+    if (target !== "claude-code") return pass();
+    const outcomes: CheckOutcome[] = [];
+    const skillMd = skill.files.find((f) => f.path === "SKILL.md");
+    const split = skillMd && splitFrontMatter(skillMd.content);
+    if (split) {
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        const v = parseYaml(split.fm);
+        if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+          parsed = v as Record<string, unknown>;
+        }
+      } catch {
+        // Malformed front matter is owned by frontmatter-parse; no duplicate finding here.
+      }
+      if (parsed && "compatibility" in parsed) {
+        // Local Claude Code accepts `compatibility` but does not act on it:
+        // absent or a string of at most 500 characters is valid.
+        const compatibility = parsed.compatibility;
+        if (typeof compatibility !== "string") {
+          outcomes.push(
+            fail("Front matter `compatibility` must be a string of at most 500 characters for claude-code.", "SKILL.md"),
+          );
+        } else if (compatibility.length > 500) {
+          outcomes.push(
+            fail(`Front matter \`compatibility\` is ${compatibility.length} characters; the claude-code limit is 500.`, "SKILL.md"),
+          );
+        }
+      }
+    }
+    // The exported skill folder derives from canonical identity. Claude Code
+    // reserves the local folder name `synced` (any capitalization) for skills
+    // downloaded from claude.ai and skips an authored skill using that name.
+    if (slugify(skill.meta.name, 48) === "synced") {
+      outcomes.push(
+        fail(`Skill folder "${skill.meta.name}" is reserved for claude-code: the local folder name "synced" (any capitalization) is used for skills synced from claude.ai.`, "SKILL.md"),
+      );
+    }
+    return outcomes.length === 0 ? pass() : outcomes;
+  },
+);
+
 // Repository provenance (codebase mode). Two layers:
 // 1. A manifest that DECLARES a source.repository block must be internally
 //    consistent (mode, counts, unique inspected files).
@@ -863,6 +923,7 @@ export const CHECKS: Check[] = [
   frontMatterFields,
   requiredSkillSections,
   canonicalMetadataConsistency,
+  claudeCodeLocalConstraints,
   emptySections,
   brokenLinks,
   jsonParses,

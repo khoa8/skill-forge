@@ -80,18 +80,26 @@ function withFiles(base: CanonicalSkill, added: SkillFile[], notes: string[]): S
 }
 
 // ---------------------------------------------------------------------------
-// claude-code exporter — Anthropic Agent Skills layout (skill folder with
-// SKILL.md carrying `name`/`description` YAML front matter, plus supporting
-// files). Format basis: the Agent Skills documented format (name ≤64 chars,
-// lowercase-hyphen slug; description ≤1024 chars).
+// claude-code exporter — local Claude Code skill packaging (`.claude/skills/`
+// and `~/.claude/skills/` layouts).
+//
+// Consumes a canonical-valid SkillForge v1 package and preserves it
+// unchanged. Canonical validation (SKILL.md, front matter, `name`,
+// `description`, metadata consistency) is the precondition and is never
+// repaired here: a missing name/description or identity drift fails closed
+// instead of being backfilled. SkillForge therefore intentionally emits a
+// stricter subset of what Claude Code itself loads locally (Claude Code
+// permits `name`/`description` to be optional with body fallback). Only real
+// local Claude Code constraints are enforced: the `compatibility` type/limit
+// and the reserved `synced` folder name. Claude Code extension frontmatter
+// fields are preserved as authored. claude.ai upload / Skills API /
+// `package_skill.py` restrictions are not claimed by this target.
 // ---------------------------------------------------------------------------
 
 function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
-  const notes: string[] = [];
   const skillMd = skill.files.find((f) => f.path === "SKILL.md");
   if (!skillMd) throw new ExportError("Cannot export without SKILL.md.", "export_missing_skill_md");
 
-  // Enforce claude-code front matter constraints (name/description live in SKILL.md).
   const fm = skillMd.content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!fm) {
     throw new ExportError("SKILL.md is missing YAML front matter; cannot export to claude-code.", "export_bad_frontmatter");
@@ -109,40 +117,44 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
     throw new ExportError(`SKILL.md has invalid YAML front matter: ${err instanceof Error ? err.message : String(err)}`, "export_bad_frontmatter");
   }
 
-  const nameOk = typeof parsed.name === "string" && parsed.name === skill.meta.name;
-  const description = typeof parsed.description === "string" && parsed.description.trim().length > 0
-    ? parsed.description : skill.meta.description;
-  if (description.length > 1024) {
-    throw new ExportError("Description exceeds the claude-code 1024-character limit.", "export_description_too_long");
+  const invalid = (message: string): never => {
+    throw new ExportError(`Cannot export to claude-code: ${message}`, "export_claude_metadata_invalid");
+  };
+  // Fail closed on canonical-invalid identity through direct callers. The
+  // server-side export gate runs target-aware validation first; this guards
+  // direct exporter use from turning canonical-invalid input into output.
+  const name = parsed.name;
+  if (typeof name !== "string" || name.length === 0) {
+    invalid("Front matter `name` is missing; SkillForge canonical v1 requires it.");
   }
-  let files = skill.files;
-  if (!nameOk) {
-    notes.push("Front matter `name` did not match the package id; exporter rewrote it.");
-    files = skill.files.map((f) => {
-      if (f.path !== "SKILL.md") return f;
-      const content = f.content.replace(
-        /^---\n[\s\S]*?\n---/,
-        `---\nname: ${skill.meta.name}\ndescription: ${JSON.stringify(description)}\n---`,
-      );
-      return { ...f, content };
-    });
-    const baseManifest = skill.files.find((f) => f.path === "manifest.json")?.content;
-    const resyncedManifest = rebuildManifest(baseManifest, files, notes);
-    if (resyncedManifest) {
-      files = files.filter((f) => f.path !== "manifest.json").concat(resyncedManifest);
+  if (name !== skill.meta.name) {
+    invalid("Front matter `name` must match the canonical package name; identity drift is not repaired.");
+  }
+  const description = parsed.description;
+  if (typeof description !== "string" || description.trim().length === 0) {
+    invalid("Front matter `description` is missing; SkillForge canonical v1 requires it.");
+  }
+  // Real local Claude Code constraints only (agree with the
+  // `claude-code-local` validator check).
+  if ("compatibility" in parsed) {
+    const compatibility = parsed.compatibility;
+    if (typeof compatibility !== "string") {
+      invalid("Front matter `compatibility` must be a string of at most 500 characters.");
+    }
+    if ((compatibility as string).length > 500) {
+      invalid("Front matter `compatibility` exceeds 500 characters.");
     }
   }
-  if (skill.meta.name.length > 64) {
-    throw new ExportError(
-      `Skill name "${skill.meta.name}" exceeds the claude-code 64-character limit.`,
-      "export_name_too_long",
-    );
+  if (slugify(skill.meta.name, 48) === "synced") {
+    invalid(`Skill folder "${skill.meta.name}" is reserved: the local claude-code folder name "synced" is used for skills synced from claude.ai.`);
   }
+  // No transformation: extension fields, user edits, manifest hashes, and
+  // file order are preserved exactly as authored.
   return {
     target: "claude-code",
     skillName: skill.meta.name,
-    files,
-    notes,
+    files: skill.files,
+    notes: [],
   };
 }
 
@@ -248,7 +260,7 @@ export const EXPORT_TARGET_INFO: ExporterInfo[] = [
     target: "claude-code",
     label: "Claude Code",
     description: "Skill folder with SKILL.md (name/description front matter) plus supporting files. Drop into .claude/skills/.",
-    formatBasis: "Anthropic Agent Skills format: SKILL.md with `name` (≤64 chars, lowercase-hyphen) and `description` (≤1024 chars) YAML front matter. Structure verified by this repository's exporter tests.",
+    formatBasis: "Local Claude Code skill packaging (.claude/skills/ layouts): SkillForge exports only canonical-valid v1 packages, intentionally a stricter subset of what Claude Code loads locally (Claude Code permits name/description to be optional). Extension frontmatter fields are preserved; only local constraints (compatibility string of at most 500 characters, reserved synced folder) are enforced. claude.ai upload / Skills API compatibility is not claimed. Structure verified by this repository's exporter tests.",
   },
   {
     target: "generic",

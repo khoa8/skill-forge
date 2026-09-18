@@ -516,29 +516,28 @@ describe("canonical body and target description export gates", () => {
       } finally { zip.mockRestore(); }
     } finally { await cleanup(); }
   });
-  it("preserves 1024-character YAML and rejects 1025 only for Claude before ZIP", async () => {
+  it("keeps long descriptions advisory and exports for Claude and generic", async () => {
     const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
     try {
       const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
       await request(app).post("/api/generate").send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "description-gate" });
       const stored = await request(app).get("/api/skills/description-gate").expect(200);
       const original = stored.body.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
-      for (const length of [1024, 1025]) {
+      for (const length of [1024, 1025, 1500]) {
         const content = original.replace(/^description:.*$/m, `description: '${"x".repeat(length)}' # preserve formatting`);
         const edited = await request(app).post("/api/skills/description-gate/update-file").send({ path: "SKILL.md", content }).expect(200);
         expect(edited.body.validation.passed).toBe(true);
-        if (length === 1025) {
-          expect(() => exportPackage(edited.body.skill, "claude-code")).toThrow(/1024/);
-          const zip = vi.spyOn(exporterModule, "buildZip");
-          try {
-            await request(app).post("/api/skills/description-gate/export").send({ target: "claude-code" }).expect(422);
-            expect(zip).not.toHaveBeenCalled();
-          } finally { zip.mockRestore(); }
+        if (length > 1024) {
+          expect(edited.body.validation.checks).toContainEqual(
+            expect.objectContaining({ id: "frontmatter-fields", status: "warn" }),
+          );
         }
-        const target = length === 1024 ? "claude-code" : "generic";
-        const res = await request(app).post("/api/skills/description-gate/export").send({ target }).parse(binaryParser).expect(200);
-        const zip = await JSZip.loadAsync(res.body);
-        expect(await zip.file("description-gate/SKILL.md")!.async("string")).toContain(`description: '${"x".repeat(length)}' # preserve formatting`);
+        // Local Claude Code imposes no upload-derived description hard limit.
+        for (const target of ["claude-code", "generic"] as const) {
+          const res = await request(app).post("/api/skills/description-gate/export").send({ target }).parse(binaryParser).expect(200);
+          const zip = await JSZip.loadAsync(res.body);
+          expect(await zip.file("description-gate/SKILL.md")!.async("string")).toContain(`description: '${"x".repeat(length)}' # preserve formatting`);
+        }
       }
     } finally { await cleanup(); }
   });

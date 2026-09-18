@@ -1,19 +1,41 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { parse as parseYaml } from "yaml";
+import request from "supertest";
 import { ExportTarget } from "../src/core/types.js";
+import type { CanonicalSkill } from "../src/core/types.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
 import { buildCanonicalSkill, derivePlanFromAnalysis } from "../src/core/build.js";
 import { exportPackage, buildZip, ExportError, EXPORT_TARGET_INFO } from "../src/core/export/exporters.js";
 import { validatePackage } from "../src/core/validate.js";
 import { getSample } from "../src/core/samples.js";
-import { safePackagePath } from "../src/core/util.js";
+import { safePackagePath, sha256 } from "../src/core/util.js";
+import { createApp } from "../src/server/app.js";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
 
-function skill() {
+function skill(name?: string) {
   const normalized = normalizeSource({ type: "text", name: "doc", content: getSample("meridian-payments-api").content });
   const analysis = analyzeSource(normalized);
-  return buildCanonicalSkill(normalized, analysis, derivePlanFromAnalysis(analysis), "mock");
+  const plan = derivePlanFromAnalysis(analysis);
+  if (name) plan.name = name;
+  return buildCanonicalSkill(normalized, analysis, plan, "mock");
+}
+
+/** Rewrite SKILL.md front matter, then resync manifest hashes so the package
+ * stays canonical-valid (proving the frontmatter change itself is accepted). */
+function withFrontMatter(s: CanonicalSkill, mutate: (fm: string) => string): CanonicalSkill {
+  const skillMd = s.files.find((f) => f.path === "SKILL.md")!;
+  const m = skillMd.content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/)!;
+  skillMd.content = `---\n${mutate(m[1]!)}\n---\n${m[2] ?? ""}`;
+  const manifestFile = s.files.find((f) => f.path === "manifest.json")!;
+  const manifest = JSON.parse(manifestFile.content);
+  manifest.files = s.files
+    .filter((f) => f.path !== "manifest.json")
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.content, "utf8"), sha256: sha256(f.content) }));
+  manifestFile.content = JSON.stringify(manifest, null, 2) + "\n";
+  return s;
 }
 
 async function readZip(buffer: Buffer) {
@@ -127,6 +149,154 @@ describe("buildZip", () => {
   });
 });
 
+
+describe("claude-code local contract", () => {
+  it("missing canonical name stays invalid and cannot export to claude-code", () => {
+    const s = withFrontMatter(skill(), (fm) => fm.split("\n").filter((l) => !l.startsWith("name:")).join("\n"));
+    // Canonical precondition: invalid for every target, not just claude-code.
+    for (const target of ExportTarget.options) {
+      const report = validatePackage({ skill: s, target });
+      expect(report.passed).toBe(false);
+      expect(report.checks).toContainEqual(expect.objectContaining({ id: "frontmatter-fields", status: "fail" }));
+    }
+    // Claude Code itself loads nameless local skills, but SkillForge canonical
+    // v1 does not emit them — the exporter fails closed instead of repairing.
+    expect(() => exportPackage(s, "claude-code")).toThrow(
+      expect.objectContaining({ code: "export_claude_metadata_invalid" }),
+    );
+  });
+
+  it("missing canonical description stays invalid and cannot export to claude-code", () => {
+    const s = withFrontMatter(skill(), (fm) => fm.split("\n").filter((l) => !l.startsWith("description:")).join("\n"));
+    for (const target of ExportTarget.options) {
+      expect(validatePackage({ skill: s, target }).passed).toBe(false);
+    }
+    expect(() => exportPackage(s, "claude-code")).toThrow(
+      expect.objectContaining({ code: "export_claude_metadata_invalid" }),
+    );
+  });
+
+  it("refuses canonical identity drift instead of repairing it", () => {
+    const s = withFrontMatter(skill(), (fm) => fm.replace(/^name: .*$/m, "name: some-other-name"));
+    expect(validatePackage({ skill: s, target: "claude-code" }).passed).toBe(false);
+    expect(() => exportPackage(s, "claude-code")).toThrow(/must match the canonical package name/);
+  });
+
+  it.each(["claude-migration-notes", "anthropic-api-patterns"])(
+    "accepts canonical-valid name %s (no upload-style substring ban)",
+    (name) => {
+      const s = skill(name);
+      expect(s.meta.name).toBe(name);
+      expect(validatePackage({ skill: s, target: "claude-code" }).passed).toBe(true);
+      const exported = exportPackage(s, "claude-code");
+      expect(exported.files).toEqual(s.files);
+      expect(exported.notes).toEqual([]);
+    },
+  );
+
+  it("accepts angle brackets in canonical descriptions (no upload-style sanitization rule)", () => {
+    const s = withFrontMatter(skill(), (fm) =>
+      fm.replace(/^description:.*$/m, 'description: "Handles <charge> and <refund> flows. Use when charging cards."'),
+    );
+    expect(validatePackage({ skill: s, target: "claude-code" }).passed).toBe(true);
+    const exported = exportPackage(s, "claude-code");
+    expect(exported.files).toEqual(s.files);
+    expect(exported.files.find((f) => f.path === "SKILL.md")!.content).toContain("<charge>");
+  });
+
+  it("preserves Claude Code extension fields through export", () => {
+    const s = withFrontMatter(skill(), (fm) =>
+      `${fm}\nwhen_to_use: "Use when handling payments."\nargument-hint: "[charge-id]"\nallowed-tools: "Read Grep"\ncompatibility: "Requires terminal access."\nmetadata:\n  version: "3"`,
+    );
+    expect(validatePackage({ skill: s, target: "claude-code" }).passed).toBe(true);
+    const exported = exportPackage(s, "claude-code");
+    expect(exported.files).toEqual(s.files);
+    const outFm = parseYaml(
+      exported.files.find((f) => f.path === "SKILL.md")!.content.match(/^---\n([\s\S]*?)\n---/)![1]!,
+    ) as Record<string, unknown>;
+    expect(outFm).toMatchObject({
+      when_to_use: "Use when handling payments.",
+      "argument-hint": "[charge-id]",
+      "allowed-tools": "Read Grep",
+      compatibility: "Requires terminal access.",
+    });
+  });
+
+  it.each([["short string", "Requires terminal access."], ["exactly 500 characters", "c".repeat(500)]])(
+    "accepts compatibility %s",
+    (_label, compatibility) => {
+      const s = withFrontMatter(skill(), (fm) => `${fm}\ncompatibility: ${JSON.stringify(compatibility)}`);
+      expect(validatePackage({ skill: s, target: "claude-code" }).passed).toBe(true);
+      expect(exportPackage(s, "claude-code").files).toEqual(s.files);
+    },
+  );
+
+  it("keeps the canonical description-length guidance advisory for claude-code", () => {
+    const s = withFrontMatter(skill(), (fm) => fm.replace(/^description:.*$/m, `description: "${"x".repeat(1500)}"`));
+    const report = validatePackage({ skill: s, target: "claude-code" });
+    expect(report.passed).toBe(true);
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "frontmatter-fields", status: "warn" }));
+    // Formerly rejected only by the upload-derived hard limit; now exports.
+    expect(exportPackage(s, "claude-code").files).toEqual(s.files);
+  });
+
+  it("rejects non-string compatibility for claude-code without leaking into generic", () => {
+    const s = withFrontMatter(skill(), (fm) => `${fm}\ncompatibility: 42`);
+    const report = validatePackage({ skill: s, target: "claude-code" });
+    expect(report.passed).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "claude-code-local", status: "fail" }));
+    expect(() => exportPackage(s, "claude-code")).toThrow(
+      expect.objectContaining({ code: "export_claude_metadata_invalid" }),
+    );
+    expect(validatePackage({ skill: s, target: "generic" }).passed).toBe(true);
+    expect(exportPackage(s, "generic").files.length).toBeGreaterThan(0);
+  });
+
+  it("rejects over-long compatibility for claude-code without leaking into generic", () => {
+    const s = withFrontMatter(skill(), (fm) => `${fm}\ncompatibility: ${JSON.stringify("c".repeat(501))}`);
+    expect(validatePackage({ skill: s, target: "claude-code" }).passed).toBe(false);
+    expect(() => exportPackage(s, "claude-code")).toThrow(/compatibility/);
+    expect(validatePackage({ skill: s, target: "generic" }).passed).toBe(true);
+  });
+
+  it("rejects the reserved synced folder for claude-code without leaking into generic or codex", () => {
+    const s = skill("synced");
+    const report = validatePackage({ skill: s, target: "claude-code" });
+    expect(report.passed).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "claude-code-local", status: "fail" }));
+    expect(() => exportPackage(s, "claude-code")).toThrow(/reserved/);
+    // Canonical-valid, so other targets are unaffected.
+    expect(validatePackage({ skill: s, target: "generic" }).passed).toBe(true);
+    expect(validatePackage({ skill: s, target: "openai-codex" }).passed).toBe(true);
+    expect(exportPackage(s, "generic").files.length).toBeGreaterThan(0);
+    expect(exportPackage(s, "openai-codex").files).toEqual(s.files);
+  });
+
+  it("HTTP export returns 422 for a genuine claude-code violation while generic still downloads", async () => {
+    const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+    try {
+      const { createStore } = await import("../src/server/store.js");
+      const store = createStore(storeRoot);
+      const s = skill("synced");
+      await store.saveSkill({
+        id: "synced",
+        skill: s,
+        analysis: { title: "T", sectionCount: 1, procedureCount: 1, commandCount: 1, codeBlockCount: 1, lineCount: 50 },
+        source: { name: "doc", type: "text", text: getSample("meridian-payments-api").content },
+        validation: { passed: true, executed: true, errorCount: 0, warningCount: 0, checks: [], validatorVersion: "1.0.0" },
+        createdAt: new Date().toISOString(),
+      });
+      const app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+      const blocked = await request(app).post("/api/skills/synced/export").send({ target: "claude-code" }).expect(422);
+      expect(blocked.body.validation.checks).toContainEqual(
+        expect.objectContaining({ id: "claude-code-local", status: "fail" }),
+      );
+      await request(app).post("/api/skills/synced/export").send({ target: "generic" }).expect(200);
+    } finally {
+      await cleanup();
+    }
+  });
+});
 
 describe("OpenAI Codex", () => {
   it("preserves every file, manifest and edited content through a real ZIP", async () => {
