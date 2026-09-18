@@ -152,6 +152,70 @@ const frontMatterParses = check("frontmatter-parse", "SKILL.md front matter is w
   return pass();
 });
 
+// ---------------------------------------------------------------------------
+// Claude-code target contract — the Anthropic Agent Skills authoring format.
+//
+// Authoritative basis (checked against primary sources):
+// - Anthropic Agent Skills documentation: `name` is at most 64 chars of
+//   lowercase letters, digits, and hyphens, with no XML tags and none of the
+//   reserved words "anthropic"/"claude"; `description` is non-empty, at most
+//   1024 chars, with no XML tags.
+// - The published anthropics/skills skill-creator validator: strict kebab
+//   case (no leading/trailing or consecutive hyphens) and no angle brackets
+//   in `description` (the validator's proxy for "no XML tags").
+// - The Agent Skills open specification: `name` must not start/end with a
+//   hyphen and must not contain consecutive hyphens.
+//
+// Deliberately NOT enforced here: a closed allowlist of front-matter keys.
+// Claude Code accepts extension fields beyond the validator's set, so
+// rejecting unknown keys would break valid Claude Code skills. The exporter
+// preserves such keys when it rewrites front matter.
+// ---------------------------------------------------------------------------
+
+/** Strict kebab-case slug shared by the validator and the claude exporter. */
+export const CLAUDE_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Reserved substrings forbidden anywhere in a claude-code skill name. */
+const CLAUDE_RESERVED_RE = /anthropic|claude/i;
+
+/**
+ * Authoritative claude-code front-matter errors (empty when valid). Shared by
+ * target-aware validation and exportClaudeCode so the two can never disagree.
+ */
+export function claudeFrontmatterErrors(frontmatter: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  const name = frontmatter.name;
+  if (typeof name !== "string" || name.length === 0) {
+    errors.push("Front matter `name` is missing.");
+  } else {
+    if (name.length > 64) {
+      errors.push(`Front matter \`name\` exceeds 64 characters (${name.length}).`);
+    }
+    if (!CLAUDE_NAME_RE.test(name)) {
+      errors.push(
+        `Front matter \`name\` "${name}" must be lowercase letters, digits, and single internal hyphens (no leading/trailing or consecutive hyphens).`,
+      );
+    }
+    if (CLAUDE_RESERVED_RE.test(name)) {
+      errors.push(
+        `Front matter \`name\` "${name}" must not contain the reserved words "anthropic" or "claude".`,
+      );
+    }
+  }
+  const description = frontmatter.description;
+  if (typeof description !== "string" || description.trim().length === 0) {
+    errors.push("Front matter `description` is missing; agents use it to decide when to load the skill.");
+  } else {
+    if (description.length > 1024) {
+      errors.push(`Front matter \`description\` is ${description.length} characters; the claude-code limit is 1024.`);
+    }
+    if (/[<>]/.test(description)) {
+      errors.push("Front matter `description` must not contain angle brackets (`<`, `>`); Anthropic forbids XML tags in skill metadata.");
+    }
+  }
+  return errors;
+}
+
 const frontMatterFields = check("frontmatter-fields", "Front matter has valid name and description", ({ skill, target }) => {
   const skillMd = skill.files.find((f) => f.path === "SKILL.md");
   if (!skillMd) return pass();
@@ -166,6 +230,15 @@ const frontMatterFields = check("frontmatter-fields", "Front matter has valid na
     return pass(); // covered by frontmatter-parse
   }
 
+  // Claude-target metadata follows the authoritative Anthropic Agent Skills
+  // contract (see claudeFrontmatterErrors); every other target keeps the
+  // generic canonical-shape rules below.
+  if (target === "claude-code") {
+    const errors = claudeFrontmatterErrors(parsed);
+    if (errors.length === 0) return pass();
+    return errors.map((message) => fail(message, "SKILL.md"));
+  }
+
   const outcomes: CheckOutcome[] = [];
   const name = parsed.name;
   if (typeof name !== "string" || name.length === 0) {
@@ -176,7 +249,7 @@ const frontMatterFields = check("frontmatter-fields", "Front matter has valid na
         fail(`Front matter \`name\` "${name}" must be lowercase letters, digits, and hyphens (no leading/trailing hyphen).`, "SKILL.md"),
       );
     }
-    const maxName = target === "claude-code" ? 64 : 64;
+    const maxName = 64;
     if (name.length > maxName) {
       outcomes.push(fail(`Front matter \`name\` exceeds ${maxName} characters (${name.length}).`, "SKILL.md"));
     }
@@ -187,7 +260,7 @@ const frontMatterFields = check("frontmatter-fields", "Front matter has valid na
     outcomes.push(fail("Front matter `description` is missing; agents use it to decide when to load the skill.", "SKILL.md"));
   } else if (description.length > 1024) {
     outcomes.push(
-      (target === "claude-code" ? fail : warn)(`Front matter \`description\` is ${description.length} characters; ${target === "claude-code" ? "the claude-code limit" : "the recommended limit"} is 1024.`, "SKILL.md"),
+      warn(`Front matter \`description\` is ${description.length} characters; the recommended limit is 1024.`, "SKILL.md"),
     );
   }
   return outcomes.length === 0 ? pass() : outcomes;

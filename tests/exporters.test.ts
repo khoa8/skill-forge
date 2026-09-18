@@ -1,14 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import JSZip from "jszip";
+import request from "supertest";
 import { parse as parseYaml } from "yaml";
-import { ExportTarget } from "../src/core/types.js";
+import { ExportTarget, type CanonicalSkill } from "../src/core/types.js";
 import { normalizeSource } from "../src/core/ingest.js";
 import { analyzeSource } from "../src/core/analyze.js";
-import { buildCanonicalSkill, derivePlanFromAnalysis } from "../src/core/build.js";
+import { buildCanonicalSkill, derivePlanFromAnalysis, manifestFor } from "../src/core/build.js";
 import { exportPackage, buildZip, ExportError, EXPORT_TARGET_INFO } from "../src/core/export/exporters.js";
 import { validatePackage } from "../src/core/validate.js";
 import { getSample } from "../src/core/samples.js";
 import { safePackagePath } from "../src/core/util.js";
+import { createApp } from "../src/server/app.js";
+import { makeIsolatedStoreRoot } from "./helpers/store-isolation.js";
+
+let app: ReturnType<typeof createApp>;
+let cleanupStore: () => Promise<void>;
+beforeAll(async () => {
+  const { storeRoot, cleanup } = await makeIsolatedStoreRoot();
+  cleanupStore = cleanup;
+  app = createApp({ provider: "mock", hasApiKey: false }, { storeRoot });
+});
+afterAll(async () => {
+  await cleanupStore?.();
+});
 
 function skill() {
   const normalized = normalizeSource({ type: "text", name: "doc", content: getSample("meridian-payments-api").content });
@@ -170,5 +184,187 @@ describe("OpenAI Codex", () => {
     const canonical = skill();
     canonical.files.find((f) => f.path === "SKILL.md")!.content = content;
     expect(() => exportPackage(canonical, "openai-codex")).toThrow(expect.objectContaining({ code: "export_codex_metadata_invalid" }));
+  });
+});
+
+describe("Claude Code contract (Anthropic Agent Skills format)", () => {
+  /** Skill whose canonical name and front matter carry the given values. */
+  function claudeSkill(metaName: string, fmName: string, fmDescription: unknown): CanonicalSkill {
+    const canonical = skill();
+    canonical.meta.name = metaName;
+    canonical.id = metaName;
+    const md = canonical.files.find((f) => f.path === "SKILL.md")!;
+    const body = md.content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/)![1]!;
+    md.content = `---\nname: ${fmName}\ndescription: ${JSON.stringify(fmDescription)}\n---\n${body}`;
+    const files = canonical.files.filter((f) => f.path !== "manifest.json");
+    const manifest = manifestFor(files, canonical.meta, {
+      name: "fixture-source",
+      sha256: "0".repeat(64),
+      lineCount: 1,
+      notes: [],
+    });
+    files.push({ path: "manifest.json", content: manifest, purpose: "manifest" });
+    return { ...canonical, files };
+  }
+
+  function exportErrorFor(metaName: string, fmName: string, fmDescription: unknown): ExportError | null {
+    try {
+      exportPackage(claudeSkill(metaName, fmName, fmDescription), "claude-code");
+      return null;
+    } catch (err) {
+      return err as ExportError;
+    }
+  }
+
+  function targetFailsWith(metaName: string, fmName: string, fmDescription: unknown, snippet: string): void {
+    const report = validatePackage({ skill: claudeSkill(metaName, fmName, fmDescription), target: "claude-code" });
+    expect(report.passed).toBe(false);
+    expect(report.checks.some((c) => c.id === "frontmatter-fields" && c.status === "fail" && c.message?.includes(snippet))).toBe(true);
+  }
+
+  it.each([
+    ["claude-helper", "reserved word prefix"],
+    ["my-claude-skill", "reserved word infix"],
+    ["my-anthropic-skill", "reserved word anthropic"],
+    ["ANTHROPIC-x", "reserved word case-insensitive"],
+  ])("rejects reserved word in name: %s (%s)", (name: string) => {
+    expect(exportErrorFor(name, name, "Does things. Use when testing.")?.code).toBe("export_claude_metadata_invalid");
+    targetFailsWith(name, name, "Does things. Use when testing.", "reserved");
+  });
+
+  it.each([
+    ["bad--name", "consecutive hyphens", "single internal hyphens"],
+    ["bad-", "trailing hyphen", "single internal hyphens"],
+    ["-bad", "leading hyphen", "single internal hyphens"],
+    ["Bad-Name", "uppercase", "single internal hyphens"],
+    ["has space", "space", "single internal hyphens"],
+    ["bad<name>", "angle bracket", "single internal hyphens"],
+    ["a".repeat(65), "over 64 chars", "64 characters"],
+  ])("rejects malformed name %s (%s)", (name: string, _label: string, snippet: string) => {
+    expect(exportErrorFor(name, name, "Does things. Use when testing.")?.code).toBe("export_claude_metadata_invalid");
+    targetFailsWith(name, name, "Does things. Use when testing.", snippet);
+  });
+
+  it("rejects malformed names with the specific shape message, not only length", () => {
+    const report = validatePackage({ skill: claudeSkill("bad--name", "bad--name", "Does things. Use when testing."), target: "claude-code" });
+    expect(report.checks.some((c) => c.id === "frontmatter-fields" && c.status === "fail" && c.message?.includes("single internal hyphens"))).toBe(true);
+  });
+
+  it.each([
+    ["", "empty"],
+    ["   ", "blank"],
+    ["Use <xml> tags here", "angle brackets"],
+    ["a > b", "lone greater-than"],
+    ["a".repeat(1025), "over 1024 chars"],
+    [42, "non-string"],
+  ])("rejects invalid description %j (%s)", (description: unknown, _label: string) => {
+    expect(exportErrorFor("meridian-payments-api", "meridian-payments-api", description)?.code).toBe("export_claude_metadata_invalid");
+    targetFailsWith("meridian-payments-api", "meridian-payments-api", description, "description");
+  });
+
+  it.each([
+    ["my-skill", "Does things. Use when testing."],
+    ["a", "Tiny but valid description for triggering."],
+    ["x".repeat(64), "Name at the length limit with a valid description."],
+    ["meridian-payments-api", "x".repeat(1024)],
+  ])("accepts valid name %s", (name, description) => {
+    const built = claudeSkill(name, name, description);
+    const exported = exportPackage(built, "claude-code");
+    expect(validatePackage({ skill: { ...built, files: exported.files }, target: "claude-code" }).passed).toBe(true);
+  });
+
+  it("exporter and target-aware validation agree on every probed case", () => {
+    const cases: [string, unknown][] = [
+      ["claude-helper", "Does things. Use when testing."],
+      ["my-anthropic-skill", "Does things. Use when testing."],
+      ["bad--name", "Does things. Use when testing."],
+      ["bad-", "Does things. Use when testing."],
+      ["meridian-payments-api", "Use <xml> here"],
+      ["meridian-payments-api", ""],
+      ["meridian-payments-api", "a".repeat(1025)],
+      ["meridian-payments-api", "Does things. Use when testing."],
+      ["a-b-c-2", "x".repeat(1024)],
+    ];
+    for (const [name, description] of cases) {
+      const built = claudeSkill(name, name, description);
+      let exportFailed = false;
+      let exportedFiles = built.files;
+      try {
+        exportedFiles = exportPackage(built, "claude-code").files;
+      } catch (err) {
+        expect((err as ExportError).code).toBe("export_claude_metadata_invalid");
+        exportFailed = true;
+      }
+      const report = validatePackage({ skill: { ...built, files: exportedFiles }, target: "claude-code" });
+      expect(report.passed).toBe(!exportFailed);
+    }
+  });
+
+  it("does not leak claude-only rules into generic or codex validation", () => {
+    const built = claudeSkill("claude-helper", "claude-helper", "Does things. Use when testing.");
+    expect(validatePackage({ skill: built }).passed).toBe(true);
+    expect(validatePackage({ skill: built, target: "generic" }).passed).toBe(true);
+    // Codex has no reserved-word rule: the same name exports cleanly there.
+    expect(exportPackage(built, "openai-codex").skillName).toBe("claude-helper");
+  });
+
+  it("repair preserves optional front-matter keys and still validates", () => {
+    const canonical = skill();
+    canonical.meta.name = "renamed-skill";
+    canonical.id = "renamed-skill";
+    const md = canonical.files.find((f) => f.path === "SKILL.md")!;
+    md.content = md.content.replace(
+      /^---\n([\s\S]*?)\n---/,
+      (_, fm: string) => `---\n${fm}\nlicense: MIT\ncompatibility: test environment\nallowed-tools: Read\nmetadata:\n  owner: team\n---`,
+    );
+    // Re-sync identity + hashes around both mutations so only the intended
+    // name drift remains for the exporter to repair.
+    const files = canonical.files.filter((f) => f.path !== "manifest.json");
+    files.push({
+      path: "manifest.json",
+      content: manifestFor(files, canonical.meta, { name: "fixture-source", sha256: "0".repeat(64), lineCount: 1, notes: [] }),
+      purpose: "manifest",
+    });
+    const repaired: CanonicalSkill = { ...canonical, files };
+    const exported = exportPackage(repaired, "claude-code");
+    const out = exported.files.find((f) => f.path === "SKILL.md")!.content;
+    const frontmatter = parseYaml(out.match(/^---\n([\s\S]*?)\n---/)![1]!);
+    expect(frontmatter).toMatchObject({
+      name: "renamed-skill",
+      license: "MIT",
+      compatibility: "test environment",
+      "allowed-tools": "Read",
+    });
+    expect(frontmatter.metadata).toMatchObject({ owner: "team" });
+    expect(validatePackage({ skill: { ...repaired, files: exported.files }, target: "claude-code" }).passed).toBe(true);
+  });
+
+  it("rejects an emptied description instead of silently backfilling it", () => {
+    const canonical = skill();
+    const md = canonical.files.find((f) => f.path === "SKILL.md")!;
+    md.content = md.content.replace(/^description: .*$/m, 'description: ""');
+    expect(() => exportPackage(canonical, "claude-code")).toThrow(
+      expect.objectContaining({ code: "export_claude_metadata_invalid" }),
+    );
+  });
+
+  it("claude export is blocked over HTTP as 422 with an actionable report", async () => {
+    // End-to-end gate: generic validation still passes for the edit, but the
+    // claude-code target refuses it before any ZIP bytes are produced. Uses
+    // the same generate → edit → export shape as the Codex gating test.
+    const generated = await request(app).post("/api/generate")
+      .send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "claude-gating" }).expect(200);
+    const result = generated.text.trim().split("\n").map((line) => JSON.parse(line)).find((event) => event.type === "result");
+    const md = result.skill.files.find((file: { path: string; content: string }) => file.path === "SKILL.md");
+    const incompatible = md.content.replace(/^description: .*$/m, 'description: "Use <payment> workflows"');
+    const edited = await request(app).post("/api/skills/claude-gating/update-file")
+      .send({ path: "SKILL.md", content: incompatible }).expect(200);
+    expect(edited.body.validation.passed).toBe(true);
+    const blocked = await request(app).post("/api/skills/claude-gating/export")
+      .send({ target: "claude-code" }).expect(422);
+    expect(blocked.body.error).toContain("blocked");
+    expect(blocked.body.validation.checks.some(
+      (c: { id: string; status: string }) => c.id === "frontmatter-fields" && c.status === "fail",
+    )).toBe(true);
   });
 });

@@ -7,9 +7,10 @@
  * it verified the output against, and unsupported targets are refused.
  */
 import JSZip from "jszip";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { CanonicalSkill, ExportTarget, SkillFile } from "../types.js";
 import { joinPackagePath, safePackagePath, sha256, slugify } from "../util.js";
+import { claudeFrontmatterErrors } from "../validate.js";
 
 export interface ExporterInfo {
   target: ExportTarget;
@@ -82,8 +83,11 @@ function withFiles(base: CanonicalSkill, added: SkillFile[], notes: string[]): S
 // ---------------------------------------------------------------------------
 // claude-code exporter — Anthropic Agent Skills layout (skill folder with
 // SKILL.md carrying `name`/`description` YAML front matter, plus supporting
-// files). Format basis: the Agent Skills documented format (name ≤64 chars,
-// lowercase-hyphen slug; description ≤1024 chars).
+// files). Format basis: the Agent Skills documented format — `name` ≤64 chars,
+// strict kebab-case (lowercase letters/digits, single internal hyphens), no
+// XML tags, none of the reserved words "anthropic"/"claude"; `description`
+// non-empty, ≤1024 chars, no XML tags. The exporter fails closed on the same
+// rule set that target-aware deterministic validation enforces.
 // ---------------------------------------------------------------------------
 
 function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
@@ -109,21 +113,23 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
     throw new ExportError(`SKILL.md has invalid YAML front matter: ${err instanceof Error ? err.message : String(err)}`, "export_bad_frontmatter");
   }
 
-  const nameOk = typeof parsed.name === "string" && parsed.name === skill.meta.name;
-  const description = typeof parsed.description === "string" && parsed.description.trim().length > 0
-    ? parsed.description : skill.meta.description;
-  if (description.length > 1024) {
-    throw new ExportError("Description exceeds the claude-code 1024-character limit.", "export_description_too_long");
-  }
+  // The canonical package identity owns the skill name; a front matter `name`
+  // that drifted from it is rewritten back. Every other front-matter key
+  // (description, license, allowed-tools, metadata, compatibility, Claude
+  // Code extension fields) is preserved verbatim in place — the exporter
+  // never invents or silently drops author metadata.
+  const needsRepair = parsed.name !== skill.meta.name;
   let files = skill.files;
-  if (!nameOk) {
+  if (needsRepair) {
     notes.push("Front matter `name` did not match the package id; exporter rewrote it.");
+    const rest: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key !== "name") rest[key] = value;
+    }
+    const rebuilt = `---\n${stringifyYaml({ name: skill.meta.name, ...rest }).trimEnd()}\n---`;
     files = skill.files.map((f) => {
       if (f.path !== "SKILL.md") return f;
-      const content = f.content.replace(
-        /^---\n[\s\S]*?\n---/,
-        `---\nname: ${skill.meta.name}\ndescription: ${JSON.stringify(description)}\n---`,
-      );
+      const content = f.content.replace(/^---\n[\s\S]*?\n---/, rebuilt);
       return { ...f, content };
     });
     const baseManifest = skill.files.find((f) => f.path === "manifest.json")?.content;
@@ -132,11 +138,13 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
       files = files.filter((f) => f.path !== "manifest.json").concat(resyncedManifest);
     }
   }
-  if (skill.meta.name.length > 64) {
-    throw new ExportError(
-      `Skill name "${skill.meta.name}" exceeds the claude-code 64-character limit.`,
-      "export_name_too_long",
-    );
+  // Fail closed on the final values with the same rule set target-aware
+  // deterministic validation enforces, so export and validation agree. The
+  // front-matter description is checked as-is: an absent or emptied
+  // description is a violation, never silently backfilled.
+  const violations = claudeFrontmatterErrors({ name: skill.meta.name, description: parsed.description });
+  if (violations.length > 0) {
+    throw new ExportError(`Cannot export to claude-code: ${violations.join(" ")}`, "export_claude_metadata_invalid");
   }
   return {
     target: "claude-code",
@@ -248,7 +256,7 @@ export const EXPORT_TARGET_INFO: ExporterInfo[] = [
     target: "claude-code",
     label: "Claude Code",
     description: "Skill folder with SKILL.md (name/description front matter) plus supporting files. Drop into .claude/skills/.",
-    formatBasis: "Anthropic Agent Skills format: SKILL.md with `name` (≤64 chars, lowercase-hyphen) and `description` (≤1024 chars) YAML front matter. Structure verified by this repository's exporter tests.",
+    formatBasis: "Anthropic Agent Skills format: SKILL.md with `name` (≤64 chars, strict kebab-case, no XML tags, none of the reserved words anthropic/claude) and `description` (non-empty, ≤1024 chars, no XML tags) YAML front matter. Structure verified by this repository's exporter tests.",
   },
   {
     target: "generic",
