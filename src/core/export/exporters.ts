@@ -141,8 +141,10 @@ function exportClaudeCode(skill: CanonicalSkill): ExportedPackage {
   // Fail closed on the final values with the same rule set target-aware
   // deterministic validation enforces, so export and validation agree. The
   // front-matter description is checked as-is: an absent or emptied
-  // description is a violation, never silently backfilled.
-  const violations = claudeFrontmatterErrors({ name: skill.meta.name, description: parsed.description });
+  // description is a violation, never silently backfilled. The complete
+  // parsed front matter is checked (not just name/description) so standard
+  // optional fields such as `compatibility` obey the same contract.
+  const violations = claudeFrontmatterErrors({ ...parsed, name: skill.meta.name });
   if (violations.length > 0) {
     throw new ExportError(`Cannot export to claude-code: ${violations.join(" ")}`, "export_claude_metadata_invalid");
   }
@@ -256,7 +258,7 @@ export const EXPORT_TARGET_INFO: ExporterInfo[] = [
     target: "claude-code",
     label: "Claude Code",
     description: "Skill folder with SKILL.md (name/description front matter) plus supporting files. Drop into .claude/skills/.",
-    formatBasis: "Anthropic Agent Skills format: SKILL.md with `name` (≤64 chars, strict kebab-case, no XML tags, none of the reserved words anthropic/claude) and `description` (non-empty, ≤1024 chars, no XML tags) YAML front matter. Structure verified by this repository's exporter tests.",
+    formatBasis: "Anthropic Agent Skills format: SKILL.md with `name` (≤64 chars, strict kebab-case, no XML tags, none of the reserved words anthropic/claude), `description` (non-empty, ≤1024 chars, no XML tags), and optional `compatibility` (≤500 chars when present) YAML front matter. Structure verified by this repository's exporter tests.",
   },
   {
     target: "generic",

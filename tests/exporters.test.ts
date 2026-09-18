@@ -222,6 +222,36 @@ describe("Claude Code contract (Anthropic Agent Skills format)", () => {
     expect(report.checks.some((c) => c.id === "frontmatter-fields" && c.status === "fail" && c.message?.includes(snippet))).toBe(true);
   }
 
+  /** Insert extra raw YAML lines into SKILL.md front matter and resync the manifest. */
+  function withFrontMatterExtra(built: CanonicalSkill, extraYaml: string): CanonicalSkill {
+    const next = structuredClone(built);
+    const md = next.files.find((f) => f.path === "SKILL.md")!;
+    md.content = md.content.replace(/^---\n([\s\S]*?)\n---/, (_m: string, fm: string) => `---\n${fm}\n${extraYaml}\n---`);
+    const files = next.files.filter((f) => f.path !== "manifest.json");
+    files.push({
+      path: "manifest.json",
+      content: manifestFor(files, next.meta, { name: "fixture-source", sha256: "0".repeat(64), lineCount: 1, notes: [] }),
+      purpose: "manifest",
+    });
+    return { ...next, files };
+  }
+
+  function compatErrorFor(extraYaml: string): ExportError | null {
+    try {
+      exportPackage(withFrontMatterExtra(claudeSkill("meridian-payments-api", "meridian-payments-api", "Does things. Use when testing."), extraYaml), "claude-code");
+      return null;
+    } catch (err) {
+      return err as ExportError;
+    }
+  }
+
+  function compatTargetFailsWith(extraYaml: string, snippet: string): void {
+    const built = withFrontMatterExtra(claudeSkill("meridian-payments-api", "meridian-payments-api", "Does things. Use when testing."), extraYaml);
+    const report = validatePackage({ skill: built, target: "claude-code" });
+    expect(report.passed).toBe(false);
+    expect(report.checks.some((c) => c.id === "frontmatter-fields" && c.status === "fail" && c.message?.includes(snippet))).toBe(true);
+  }
+
   it.each([
     ["claude-helper", "reserved word prefix"],
     ["my-claude-skill", "reserved word infix"],
@@ -300,6 +330,69 @@ describe("Claude Code contract (Anthropic Agent Skills format)", () => {
     }
   });
 
+  it.each([
+    ["compatibility: Requires git and docker", "short string", true],
+    [`compatibility: ${"y".repeat(500)}`, "exact 500 chars", true],
+    [`compatibility: ${"y".repeat(501)}`, "501 chars", false],
+    ["compatibility: 42", "non-string number", false],
+    ['compatibility: ["a", "b"]', "non-string list", false],
+    ["compatibility:\n  scope: tools", "non-string mapping", false],
+    ['compatibility: ""', "empty string (absent-like)", true],
+  ])("compatibility %s (%s)", (extraYaml: string, _label: string, valid: boolean) => {
+    if (valid) {
+      const built = withFrontMatterExtra(claudeSkill("meridian-payments-api", "meridian-payments-api", "Does things. Use when testing."), extraYaml);
+      const exported = exportPackage(built, "claude-code");
+      expect(validatePackage({ skill: { ...built, files: exported.files }, target: "claude-code" }).passed).toBe(true);
+    } else {
+      expect(compatErrorFor(extraYaml)?.code).toBe("export_claude_metadata_invalid");
+      compatTargetFailsWith(extraYaml, "compatibility");
+    }
+  });
+
+  it("compatibility type errors name the offending YAML type", () => {
+    compatTargetFailsWith("compatibility: 42", "got number");
+    compatTargetFailsWith('compatibility: ["a"]', "got list");
+    compatTargetFailsWith("compatibility:\n  scope: tools", "got dict");
+    compatTargetFailsWith(`compatibility: ${"y".repeat(501)}`, "500");
+  });
+
+  it("compatibility survives the name-repair transform and still validates", () => {
+    const canonical = skill();
+    canonical.meta.name = "compat-repair";
+    canonical.id = "compat-repair";
+    const repaired = withFrontMatterExtra(canonical, "compatibility: Requires git");
+    // Manifest identity was rebuilt for the renamed meta by the helper, so
+    // only the front-matter name drift remains for the exporter to repair.
+    const exported = exportPackage(repaired, "claude-code");
+    const out = exported.files.find((f) => f.path === "SKILL.md")!.content;
+    expect(parseYaml(out.match(/^---\n([\s\S]*?)\n---/)![1]!)).toMatchObject({
+      name: "compat-repair",
+      compatibility: "Requires git",
+    });
+    expect(validatePackage({ skill: { ...repaired, files: exported.files }, target: "claude-code" }).passed).toBe(true);
+  });
+
+  it("name-repair does not mask an invalid compatibility value", () => {
+    const canonical = skill();
+    canonical.meta.name = "compat-repair";
+    canonical.id = "compat-repair";
+    const repaired = withFrontMatterExtra(canonical, `compatibility: ${"y".repeat(501)}`);
+    expect(() => exportPackage(repaired, "claude-code")).toThrow(
+      expect.objectContaining({ code: "export_claude_metadata_invalid" }),
+    );
+  });
+
+  it("compatibility rules do not leak into generic validation or export", () => {
+    const built = withFrontMatterExtra(
+      claudeSkill("meridian-payments-api", "meridian-payments-api", "Does things. Use when testing."),
+      `compatibility: ${"y".repeat(501)}`,
+    );
+    // Generic has no compatibility rule: over-limit values still validate and export.
+    expect(validatePackage({ skill: built }).passed).toBe(true);
+    expect(validatePackage({ skill: built, target: "generic" }).passed).toBe(true);
+    expect(exportPackage(built, "generic").files.some((f) => f.path === "SKILL.md")).toBe(true);
+  });
+
   it("does not leak claude-only rules into generic or codex validation", () => {
     const built = claudeSkill("claude-helper", "claude-helper", "Does things. Use when testing.");
     expect(validatePackage({ skill: built }).passed).toBe(true);
@@ -365,6 +458,25 @@ describe("Claude Code contract (Anthropic Agent Skills format)", () => {
     expect(blocked.body.error).toContain("blocked");
     expect(blocked.body.validation.checks.some(
       (c: { id: string; status: string }) => c.id === "frontmatter-fields" && c.status === "fail",
+    )).toBe(true);
+  });
+
+  it("claude export blocks over-limit compatibility over HTTP as 422", async () => {
+    const generated = await request(app).post("/api/generate")
+      .send({ sourceType: "sample", sampleId: "meridian-payments-api", requestedName: "claude-compat" }).expect(200);
+    const result = generated.text.trim().split("\n").map((line) => JSON.parse(line)).find((event) => event.type === "result");
+    const md = result.skill.files.find((file: { path: string; content: string }) => file.path === "SKILL.md");
+    const incompatible = md.content.replace(/^---\n([\s\S]*?)\n---/, (_m: string, fm: string) => `---\n${fm}\ncompatibility: ${"y".repeat(501)}\n---`);
+    const edited = await request(app).post("/api/skills/claude-compat/update-file")
+      .send({ path: "SKILL.md", content: incompatible }).expect(200);
+    // Generic validation has no compatibility rule, so the edit persists.
+    expect(edited.body.validation.passed).toBe(true);
+    const blocked = await request(app).post("/api/skills/claude-compat/export")
+      .send({ target: "claude-code" }).expect(422);
+    expect(blocked.body.error).toContain("blocked");
+    expect(blocked.body.validation.checks.some(
+      (c: { id: string; status: string; message?: string }) =>
+        c.id === "frontmatter-fields" && c.status === "fail" && (c.message ?? "").includes("compatibility"),
     )).toBe(true);
   });
 });

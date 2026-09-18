@@ -164,7 +164,10 @@ const frontMatterParses = check("frontmatter-parse", "SKILL.md front matter is w
 //   case (no leading/trailing or consecutive hyphens) and no angle brackets
 //   in `description` (the validator's proxy for "no XML tags").
 // - The Agent Skills open specification: `name` must not start/end with a
-//   hyphen and must not contain consecutive hyphens.
+//   hyphen and must not contain consecutive hyphens; the optional
+//   `compatibility` field must be 1-500 characters if provided.
+// - The Agent Skills open specification examples and Microsoft's restatement
+//   of the same format table confirm `compatibility` (max 500 chars).
 //
 // Deliberately NOT enforced here: a closed allowlist of front-matter keys.
 // Claude Code accepts extension fields beyond the validator's set, so
@@ -211,6 +214,23 @@ export function claudeFrontmatterErrors(frontmatter: Record<string, unknown>): s
     }
     if (/[<>]/.test(description)) {
       errors.push("Front matter `description` must not contain angle brackets (`<`, `>`); Anthropic forbids XML tags in skill metadata.");
+    }
+  }
+  // Optional standard field, mirrored exactly from the published
+  // skill-creator validator: falsy values (absent, empty string, ...) are
+  // treated as absent; a present value must be a string of at most 500
+  // characters. Length is counted in code points like Python's len().
+  const compatibility = frontmatter.compatibility;
+  if (compatibility) {
+    const actualType = Array.isArray(compatibility)
+      ? "list"
+      : compatibility !== null && typeof compatibility === "object"
+        ? "dict"
+        : typeof compatibility;
+    if (typeof compatibility !== "string") {
+      errors.push(`Front matter \`compatibility\` must be a string, got ${actualType}.`);
+    } else if ([...compatibility].length > 500) {
+      errors.push(`Front matter \`compatibility\` is ${[...compatibility].length} characters; the claude-code limit is 500.`);
     }
   }
   return errors;
