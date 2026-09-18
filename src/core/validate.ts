@@ -14,12 +14,12 @@ import { posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type {
   CanonicalSkill,
-  ExportTarget,
   Severity,
   SourceType,
   ValidationCheck,
   ValidationReport,
 } from "./types.js";
+import { ExportTarget } from "./types.js";
 import { safePackagePath, sha256 } from "./util.js";
 
 export const VALIDATOR_VERSION = "1.0.0";
@@ -670,7 +670,7 @@ const groundingCheck: Check = {
 
 const exportTargetKnown = check("export-target", "Export target is supported", ({ target }) => {
   if (target === undefined) return pass();
-  const supported: ExportTarget[] = ["claude-code", "generic"];
+  const supported = ExportTarget.options;
   if (!supported.includes(target)) {
     return fail(`Unsupported export target "${String(target)}". Supported: ${supported.join(", ")}.`);
   }

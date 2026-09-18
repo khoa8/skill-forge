@@ -66,7 +66,7 @@ function harness() {
   const url = Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
   const context: any = { document, fetch, URL: url, console, setTimeout: vi.fn(), TextDecoder, Blob };
   const source = readFileSync(new URL("../web/app.js", import.meta.url), "utf8").replace(/\ninit\(\);\s*$/, "");
-  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton, runGenerate, consumeNdjson };", context);
+  runInNewContext(source + "\nglobalThis.ui = { state, renderValidation, revalidate, renderSourceNotes, startEdit, cancelEdit, saveEdit, openProvenance, runExport, bindEvents, showFile, handlePipelineEvent, updateGenerateButton, runGenerate, consumeNdjson, renderEvaluationState, runEvaluation };", context);
   const ui = context.ui;
   ui.bindEvents();
   const original = { executed: true, passed: true, checks: [], warningCount: 0, errorCount: 0 };
@@ -201,6 +201,25 @@ describe("UI request ownership and errors", () => {
     expect(h.nodes.get("#revalidate-btn").disabled).toBe(false);
   });
 
+  it("a saved edit invalidates an in-flight evaluation for the previous package (F-03)", async () => {
+    const h = harness();
+    const evalBody = deferred<any>();
+    h.fetch.mockResolvedValueOnce({ ok: true, json: () => evalBody.promise });
+    const evaluation = h.ui.runEvaluation();
+    await decoded();
+    h.ui.startEdit({ path: "SKILL.md", content: "changed" });
+    const edited = { files: [{ path: "SKILL.md", content: "changed", userEdited: true }] };
+    const report = { ...h.original, passed: false, errorCount: 1 };
+    h.fetch.mockResolvedValueOnce(response({ skill: edited, validation: report }));
+    await h.ui.saveEdit();
+    const staleReport = { executed: true, counts: { passed: 1, concern: 0, notExecutable: 0 }, checks: [] };
+    evalBody.resolve({ evaluation: staleReport });
+    await evaluation;
+    expect(h.ui.state.skill).toBe(edited);
+    expect(h.ui.state.evaluation).not.toBe(staleReport);
+    expect(h.ui.state.evaluationSkillId).not.toBe("skill-a");
+  });
+
   it("a stale export error cannot replace the new skill's validation", async () => {
     const h = harness();
     const body = deferred<any>();
@@ -322,6 +341,68 @@ describe("initialized preview controls and truthful steps", () => {
   });
 });
 
+
+describe("advisory evaluation summary styling (A-03, F-02)", () => {
+  function rendered(counts: { passed: number; concern: number; notExecutable: number }) {
+    const h = harness();
+    const checks = [
+      ...(counts.passed > 0
+        ? [{ id: "eval-1", title: "Topic", status: "pass", message: "Retained and discoverable.", filePath: "references/setup.md" }]
+        : []),
+      ...(counts.concern > 0
+        ? [{ id: "eval-2", title: "Topic", status: "concern", message: "No SKILL.md link.", filePath: "references/other.md" }]
+        : []),
+      ...(counts.notExecutable > 0
+        ? [{ id: "eval-3", title: "Manual", status: "not-executable", message: "Manual grounding question." }]
+        : []),
+    ];
+    h.ui.state.evaluation = { executed: true, counts, checks };
+    h.ui.state.evaluationSkillId = "skill-a";
+    h.ui.renderEvaluationState();
+    return h;
+  }
+  it("does not style an executed report with concerns as an aggregate pass", () => {
+    const h = rendered({ passed: 0, concern: 2, notExecutable: 4 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("concern");
+    expect(head.className).not.toContain("pass");
+    expect(h.text(head)).toContain("2 concern(s)");
+    expect(h.text(head)).toContain("4 not executable / manual");
+  });
+  it("keeps the pass treatment only when every check is executable and passed", () => {
+    const h = rendered({ passed: 3, concern: 0, notExecutable: 0 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("pass");
+    expect(h.text(head)).toContain("3 passed");
+  });
+  it("gives a mixed pass/manual report neutral treatment, not aggregate pass or failure", () => {
+    const h = rendered({ passed: 3, concern: 0, notExecutable: 1 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("neutral");
+    expect(head.className).not.toContain("pass");
+    expect(head.className).not.toContain("concern");
+    expect(head.className).not.toContain("fail");
+    expect(h.text(head)).toContain("3 passed");
+    expect(h.text(head)).toContain("1 not executable / manual");
+  });
+  it("gives an all-manual report neutral treatment with honest counts", () => {
+    const h = rendered({ passed: 0, concern: 0, notExecutable: 4 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("neutral");
+    expect(head.className).not.toContain("pass");
+    expect(head.className).not.toContain("concern");
+    expect(head.className).not.toContain("fail");
+    expect(h.text(head)).toContain("4 not executable / manual");
+    const statuses = h.nodes.get("#evaluation-checks").children.map((row: any) => row.children[0].textContent);
+    expect(statuses).toEqual(["○ not-executable"]);
+  });
+  it("still renders checks, advisory copy, and the re-run control", () => {
+    const h = rendered({ passed: 1, concern: 1, notExecutable: 1 });
+    expect(h.nodes.get("#evaluation-checks").children.length).toBe(3);
+    expect(h.text(h.nodes.get("#evaluation-head"))).toContain("does not gate export");
+    expect(h.nodes.get("#evaluate-btn")).toBeDefined();
+  });
+});
 
 describe("generation stream terminal protocol", () => {
   const start = { type: "stage", stage: "generate", status: "start" };
