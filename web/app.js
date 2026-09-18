@@ -623,7 +623,9 @@ function renderEvaluationState() {
     strong.textContent = "Evaluation could not run — no result is claimed.";
     sub.textContent = evaluation.checks[0]?.message ?? "Evaluation was skipped, not passed.";
   } else {
-    head.className = "evaluation-banner pass";
+    // Advisory, never an aggregate pass: a report containing concerns keeps a
+    // concern-oriented treatment instead of the success/green styling.
+    head.className = evaluation.counts.concern > 0 ? "evaluation-banner concern" : "evaluation-banner pass";
     strong.textContent = `Evaluation — ${evaluationStatusLine(evaluation)}.`;
     sub.textContent = "Advisory source-coverage checks. This does not prove the skill works in a real agent runtime, and it does not gate export (validation does).";
   }

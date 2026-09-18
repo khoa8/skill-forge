@@ -342,6 +342,46 @@ describe("initialized preview controls and truthful steps", () => {
 });
 
 
+describe("advisory evaluation summary styling (A-03)", () => {
+  function rendered(counts: { passed: number; concern: number; notExecutable: number }) {
+    const h = harness();
+    const checks = [
+      { id: "eval-1", title: "Topic", status: "pass", message: "Retained and discoverable.", filePath: "references/setup.md" },
+      ...(counts.concern > 0
+        ? [{ id: "eval-2", title: "Topic", status: "concern", message: "No SKILL.md link.", filePath: "references/other.md" }]
+        : []),
+      ...(counts.notExecutable > 0
+        ? [{ id: "eval-3", title: "Manual", status: "not-executable", message: "Manual grounding question." }]
+        : []),
+    ];
+    h.ui.state.evaluation = { executed: true, counts, checks };
+    h.ui.state.evaluationSkillId = "skill-a";
+    h.ui.renderEvaluationState();
+    return h;
+  }
+  it("does not style an executed report with concerns as an aggregate pass", () => {
+    const h = rendered({ passed: 0, concern: 2, notExecutable: 4 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("concern");
+    expect(head.className).not.toContain("pass");
+    expect(h.text(head)).toContain("2 concern(s)");
+    expect(h.text(head)).toContain("4 not executable / manual");
+  });
+  it("keeps the pass treatment only for executed reports without concerns", () => {
+    const h = rendered({ passed: 3, concern: 0, notExecutable: 1 });
+    const head = h.nodes.get("#evaluation-head");
+    expect(head.className).toContain("pass");
+    expect(h.text(head)).toContain("3 passed");
+    expect(h.text(head)).toContain("1 not executable / manual");
+  });
+  it("still renders checks, advisory copy, and the re-run control", () => {
+    const h = rendered({ passed: 1, concern: 1, notExecutable: 1 });
+    expect(h.nodes.get("#evaluation-checks").children.length).toBe(3);
+    expect(h.text(h.nodes.get("#evaluation-head"))).toContain("does not gate export");
+    expect(h.nodes.get("#evaluate-btn")).toBeDefined();
+  });
+});
+
 describe("generation stream terminal protocol", () => {
   const start = { type: "stage", stage: "generate", status: "start" };
   const result = { type: "result", skill: { id: "new-skill", files: [], meta: { displayName: "Stream result", generator: "mock", gaps: [] } }, validation: { executed: true, passed: true, checks: [], errorCount: 0, warningCount: 0 } };

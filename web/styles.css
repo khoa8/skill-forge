@@ -164,6 +164,7 @@ input:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent
 /* Evaluation panel — visually related to validation but semantically advisory. */
 .evaluation-banner { border-radius: 10px; padding: 12px 14px; margin-top: 8px; font-size: 14px; border: 1px dashed var(--border); }
 .evaluation-banner.pass { border-color: color-mix(in srgb, var(--ok) 50%, transparent); background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.evaluation-banner.concern { border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .evaluation-banner.skipped { border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .evaluation-banner strong { font-weight: 600; }
 .evaluation-banner .sub { color: var(--text-muted); font-size: 12.5px; margin-top: 2px; }
