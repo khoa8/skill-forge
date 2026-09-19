@@ -218,13 +218,14 @@ describe("provider credential routing (F-02)", () => {
       const planPayload = {
         name: "test-routing-skill",
         displayName: "Test Routing Skill",
-        description: "Valid skill plan for provider routing test.",
-        whenToUse: ["When verifying credential routing."],
-        inputs: ["Test input."],
-        steps: ["Step 1."],
-        constraints: ["None."],
-        verification: ["Run test."],
-        pitfalls: ["None."],
+        selections: {
+          whenToUse: [],
+          inputs: [],
+          steps: [],
+          constraints: [],
+          verification: [],
+          pitfalls: [],
+        },
       };
       return new Response(
         JSON.stringify({

@@ -204,14 +204,14 @@ describe("MockProvider codebase routing", () => {
       content: `# package.json\n\n${JSON.stringify({ name: "fixture-service", scripts: { test: "vitest run" } }, null, 2)}\n`,
       repository: fullAnalysis(),
     });
-    const plan = await provider.generate({
+    const proposal = await provider.generate({
       source: input,
       analysis: analyzeSource(input),
       repository: input.repository,
     });
-    expect(plan.name).toBe("acme-fixture-service");
-    expect(plan.displayName).toContain("coding agent guide");
-    expect(plan.verification.length).toBeGreaterThan(0);
+    expect(proposal.name).toBe("acme-fixture-service");
+    expect(proposal.displayName).toContain("coding agent guide");
+    expect(proposal.selections.verification.length).toBeGreaterThan(0);
   });
 });
 
@@ -222,7 +222,7 @@ describe("OpenAI-compatible provider receives repository context", () => {
       capturedBody = String(init?.body ?? "");
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ whenToUse: ["x"], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] }) } }],
+          choices: [{ message: { content: JSON.stringify({ selections: { whenToUse: [], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] } }) } }],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -258,7 +258,7 @@ describe("OpenAI-compatible provider receives repository context", () => {
       capturedBody = String(init?.body ?? "");
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ whenToUse: ["x"], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] }) } }],
+          choices: [{ message: { content: JSON.stringify({ selections: { whenToUse: [], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] } }) } }],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );

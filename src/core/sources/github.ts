@@ -201,11 +201,12 @@ export function parseGithubRepoUrl(raw: string): GithubRepoRef {
   return { owner, repo, ref, path };
 }
 
-/** Refuse tree paths that could escape the repository namespace. Shared by
- * the documentation and codebase ingestion modes. */
+/** Refuse tree paths that could escape the repository namespace or contain
+ * control characters / line breaks. Shared by the documentation and codebase
+ * ingestion modes. */
 export function isSafeRepoPath(path: string): boolean {
   if (path.length === 0) return true;
-  if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return false;
+  if (/[\x00-\x1f\x7f-\x9f\r\n\\]/.test(path) || path.startsWith("/")) return false;
   return path.split("/").every((seg) => seg.length > 0 && seg !== "." && seg !== "..");
 }
 

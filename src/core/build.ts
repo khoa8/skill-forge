@@ -25,9 +25,9 @@ import type {
   SourceAnalysis,
 } from "./types.js";
 import type { SkillPlan } from "./plan.js";
-import { slugify, sha256 } from "./util.js";
-import { allocateReferences, allocateWorkflows, deriveEvalItems } from "./evals.js";
-export { neutralizeRelativeLinks } from "./evals.js";
+import { slugify, sha256, formatCodeSpan } from "./util.js";
+import { allocateReferences, allocateWorkflows, deriveEvalItems, neutralizeRelativeLinks } from "./evals.js";
+export { neutralizeRelativeLinks };
 
 export const GAP_NOTE =
   "> Not specified in the source material. SkillForge marked this gap instead of inventing content — verify against the primary documentation before relying on it.";
@@ -258,10 +258,22 @@ export function dedupe(items: string[]): string[] {
 }
 
 /**
- * Build the canonical package. `plan` should already be validated against
- * PlanSchema; deterministic gap-filling from the analysis augments empty plan
- * sections, and remaining gaps are rendered explicitly.
+ * Build the canonical package. `plan` must be a RESOLVED grounded plan:
+ * the normal path is provider proposal → shared grounded resolution
+ * (`resolveProviderProposal`) → resolved SkillPlan → this builder.
+ * Descriptions are always derived deterministically here and never trusted
+ * from provider output; deterministic gap-filling from the analysis augments
+ * empty plan sections, and remaining gaps are rendered explicitly.
  */
+function sanitizeDisplayName(raw: string | undefined, fallback: string): string {
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallback.slice(0, 120);
+  // Display names are presentation titles only; collapse line breaks to prevent
+  // Markdown heading escaping into body blocks.
+  const firstLine = trimmed.split(/[\r\n\u2028\u2029]/)[0]?.trim() || fallback;
+  return firstLine.slice(0, 120);
+}
+
 export function buildCanonicalSkill(
   source: NormalizedSource,
   analysis: SourceAnalysis,
@@ -279,25 +291,26 @@ export function buildCanonicalSkill(
     const ownerName = repo ? `${repo.repository.owner}-${repo.repository.name}` : source.originalName;
     const repoIdentity = repo ? `${repo.repository.owner}/${repo.repository.name}` : source.originalName;
     name = slugify(rawPlan.name?.trim() || ownerName, 48);
-    displayName = (rawPlan.displayName?.trim() || `${repoIdentity} — coding agent guide`).slice(0, 120);
+    displayName = sanitizeDisplayName(rawPlan.displayName, `${repoIdentity} — coding agent guide`);
 
-    if (rawPlan.description?.trim()) {
-      description = rawPlan.description.trim().slice(0, 1024);
-    } else {
-      const stackLabel = repo
-        ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
-          repo.ecosystems.slice(0, 3).join("/") ||
-          "unrecognized stack"
-        : "project";
-      const scopeLabel = repo?.repository.scope ? `the \`${repo.repository.scope}\` subtree of ` : "";
-      const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
-      description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
-    }
+    // Descriptions are deterministic grounded authority: never trust
+    // provider-authored prose (F-01). Codebase descriptions derive from
+    // repository identity + bounded inspection counts only.
+    const stackLabel = repo
+      ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
+        repo.ecosystems.slice(0, 3).join("/") ||
+        "unrecognized stack"
+      : "project";
+    const scopeLabel = repo?.repository.scope ? `the ${formatCodeSpan(repo.repository.scope)} subtree of ` : "";
+    const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
+    description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
   } else {
     name = slugify(rawPlan.name?.trim() || analysis.title, 48);
-    displayName = (rawPlan.displayName?.trim() || analysis.title).slice(0, 120);
+    displayName = sanitizeDisplayName(rawPlan.displayName, analysis.title);
+    // Descriptions are deterministic grounded authority: never trust
+    // provider-authored prose (F-01). Ordinary docs derive from the source
+    // intro or a generic deterministic fallback.
     description = (
-      rawPlan.description?.trim() ||
       firstSentences(analysis.intro, 2, 500) ||
       `Working knowledge for ${analysis.title}, extracted by SkillForge.`
     ).slice(0, 1024);
@@ -371,6 +384,71 @@ export function buildCanonicalSkill(
         { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
       );
       workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+    }
+  }
+
+  // Materialize any grounded reference or workflow files explicitly referenced
+  // by selected plan steps that were not already allocated by the general pass.
+  // This guarantees prefix-stability (C1 remediation): if a provider selects
+  // an atom derived from a prefix analysis, the corresponding grounded artifact
+  // is guaranteed to be materialized in the final package with full provenance.
+  const stepRefRe = /\b(references|workflows)\/([a-z0-9_.-]+)\.md\b/g;
+  for (const step of plan.steps) {
+    for (const m of step.matchAll(stepRefRe)) {
+      const artifactType = m[1]!;
+      const artifactId = m[2]!;
+      const targetPath = `${artifactType}/${artifactId}.md`;
+      if (usedPaths.has(targetPath)) continue;
+
+      if (artifactType === "references") {
+        const section = analysis.sections.find((s) => s.id === artifactId || slugify(s.heading) === artifactId);
+        if (section) {
+          const body = section.text.split("\n").slice(1).join("\n").trim();
+          if (body.length >= 20) {
+            usedPaths.add(targetPath);
+            const canonicalBody = neutralizeRelativeLinks(body);
+            const content = [
+              `# ${section.heading}`,
+              "",
+              `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+              "",
+              canonicalBody,
+              "",
+              `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
+              "",
+            ].join("\n");
+            addFile(
+              targetPath,
+              content,
+              `Verbatim source excerpt for the "${section.heading}" section, so the agent can consult the original guidance.`,
+              { extraction: `section "${section.heading}"`, sourceLines: [section.startLine, section.endLine], sourceHeading: section.heading },
+            );
+            referenceLinks.push({ path: targetPath, heading: section.heading, range: `${section.startLine}–${section.endLine}` });
+          }
+        }
+      } else if (artifactType === "workflows" && !isCodebase) {
+        const proc = analysis.procedures.find((p) => slugify(p.title) === artifactId);
+        if (proc) {
+          usedPaths.add(targetPath);
+          const endLine = proc.steps[proc.steps.length - 1]!.line;
+          const canonicalSteps = proc.steps.map((step) => neutralizeRelativeLinks(step.text));
+          const content = [
+            `# ${proc.title}`,
+            "",
+            `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+            "",
+            ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
+            "",
+          ].join("\n");
+          addFile(
+            targetPath,
+            content,
+            `Documented procedure for "${proc.title}", with verbatim steps from the source.`,
+            { extraction: `procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
+          );
+          workflowLinks.push({ path: targetPath, title: proc.title, stepCount: proc.steps.length });
+        }
+      }
     }
   }
 
