@@ -24,7 +24,7 @@ describe("MockProvider (bundled demo path)", () => {
     const b = await provider.generate(makeInput());
     expect(a).toEqual(b);
     expect(a.name).toBe("scaffoldcraft-cli");
-    expect(a.steps.length).toBeGreaterThan(0);
+    expect(a.selections.steps.length).toBeGreaterThan(0);
   });
 });
 
@@ -49,7 +49,28 @@ describe("provider resolution", () => {
 describe("OpenAICompatibleProvider (validated model output)", () => {
   const base = { id: "glm", apiKey: "test-key", baseUrl: "https://example.invalid/v1", model: "test-model" };
 
-  it("parses a valid plan from a chat-completions response", async () => {
+  it("parses a valid selection from a chat-completions response", async () => {
+    const provider = new OpenAICompatibleProvider({
+      ...base,
+      fetchImpl: async () =>
+        okResponse({
+          name: "my-tool",
+          selections: {
+            whenToUse: [],
+            inputs: [],
+            steps: [],
+            constraints: [],
+            verification: [],
+            pitfalls: [],
+          },
+        }),
+    });
+    const proposal = await provider.generate(makeInput());
+    expect(proposal.name).toBe("my-tool");
+    expect(proposal.selections.steps).toEqual([]);
+  });
+
+  it("rejects old-style free-text plans with provider_schema_mismatch", async () => {
     const provider = new OpenAICompatibleProvider({
       ...base,
       fetchImpl: async () =>
@@ -63,15 +84,13 @@ describe("OpenAICompatibleProvider (validated model output)", () => {
           pitfalls: [],
         }),
     });
-    const plan = await provider.generate(makeInput());
-    expect(plan.name).toBe("my-tool");
-    expect(plan.steps).toEqual(["Install My Tool"]);
+    await expect(provider.generate(makeInput())).rejects.toMatchObject({ code: "provider_schema_mismatch" });
   });
 
   it("fails with provider_schema_mismatch on structurally invalid output", async () => {
     const provider = new OpenAICompatibleProvider({
       ...base,
-      fetchImpl: async () => okResponse({ whenToUse: "should have been an array", steps: 42 }),
+      fetchImpl: async () => okResponse({ selections: { whenToUse: "should have been an array" } }),
     });
     await expect(provider.generate(makeInput())).rejects.toMatchObject({ code: "provider_schema_mismatch" });
   });

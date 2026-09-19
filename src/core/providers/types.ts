@@ -4,7 +4,7 @@
  * and the shared builder produces the canonical package.
  */
 import type { SourceAnalysis, NormalizedSource, RepositoryAnalysis } from "../types.js";
-import type { SkillPlan } from "../plan.js";
+import type { ProviderProposal } from "../plan-catalog.js";
 
 export interface GenerateInput {
   source: NormalizedSource;
@@ -24,7 +24,13 @@ export interface GenerationProvider {
   readonly id: string;
   /** True when the provider works without any external API or key. */
   readonly offline: boolean;
-  generate(input: GenerateInput): Promise<SkillPlan>;
+  /**
+   * Return a SELECTION over the deterministic grounded catalog (atom IDs),
+   * never free-text grounded prose. The shared resolver
+   * (`resolveProviderProposal`) validates and resolves the proposal before
+   * the canonical builder runs.
+   */
+  generate(input: GenerateInput): Promise<ProviderProposal>;
 }
 
 export class ProviderError extends Error {

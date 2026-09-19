@@ -7,7 +7,8 @@
  * grounded.
  */
 import type { GenerationProvider, GenerateInput } from "./types.js";
-import type { SkillPlan } from "../plan.js";
+import type { ProviderProposal } from "../plan-catalog.js";
+import { catalogFromPlan } from "../plan-catalog.js";
 import { derivePlanFromAnalysis } from "../build.js";
 import { deriveCodebasePlan } from "../codebase/plan.js";
 import { slugify } from "../util.js";
@@ -16,30 +17,35 @@ export class MockProvider implements GenerationProvider {
   readonly id = "mock";
   readonly offline = true;
 
-  async generate(input: GenerateInput): Promise<SkillPlan> {
-    const { analysis, source, requestedName, repository } = input;
-    // Codebase mode: the repository analysis is the planning authority —
-    // deterministic, evidence-grounded, oriented at coding agents.
+  async generate(input: GenerateInput): Promise<ProviderProposal> {
+    const { analysis, requestedName, repository } = input;
+    // Same contract as remote providers: return selections over the
+    // deterministic grounded catalog — no privileged bypass. The mock
+    // deterministically selects every catalog atom in order, so resolution
+    // reproduces the trusted deterministic plan exactly.
+    const deterministicPlan = repository
+      ? deriveCodebasePlan(repository, requestedName)
+      : derivePlanFromAnalysis(analysis);
+    const catalog = catalogFromPlan(deterministicPlan);
+    const selections = {
+      whenToUse: catalog.bySection.whenToUse.map((a) => a.id),
+      inputs: catalog.bySection.inputs.map((a) => a.id),
+      steps: catalog.bySection.steps.map((a) => a.id),
+      constraints: catalog.bySection.constraints.map((a) => a.id),
+      verification: catalog.bySection.verification.map((a) => a.id),
+      pitfalls: catalog.bySection.pitfalls.map((a) => a.id),
+    };
     if (repository) {
-      return deriveCodebasePlan(repository, requestedName);
+      return {
+        name: slugify(requestedName?.trim() || `${repository.repository.owner}-${repository.repository.name}`, 48),
+        displayName: `${repository.repository.owner}/${repository.repository.name} — coding agent guide`.slice(0, 120),
+        selections,
+      };
     }
-    const plan = derivePlanFromAnalysis(analysis);
-    const description =
-      plan.whenToUse.length > 0 && analysis.intro.length > 0
-        ? firstSentence(analysis.intro, 500)
-        : `Working knowledge for ${analysis.title}, extracted deterministically by SkillForge from "${source.originalName}".`;
     return {
-      ...plan,
       name: slugify(requestedName?.trim() || analysis.title, 48),
       displayName: analysis.title.slice(0, 120),
-      description: description.slice(0, 1024),
+      selections,
     };
   }
-}
-
-function firstSentence(text: string, maxChars: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  const m = flat.split(/(?<=[.!?])\s+/);
-  const s = m[0] ?? flat;
-  return s.length > maxChars ? s.slice(0, maxChars - 1).trimEnd() + "…" : s;
 }

@@ -9,17 +9,19 @@ import { getSample } from "../src/core/samples.js";
 const SAMPLE = getSample("meridian-payments-api").content;
 
 function planJson() {
-  // A minimal plan the provider under test returns; must satisfy PlanSchema.
+  // A minimal selection the provider under test returns; must satisfy the
+  // grounded ProviderProposalSchema (empty selections = honest gaps).
   return {
     name: "verify-demo",
     displayName: "Verify Demo",
-    description: "Provider verification package.",
-    whenToUse: ["When verifying the provider harness end to end."],
-    inputs: ["A bounded documentation sample."],
-    steps: ["Run the harness with an injected fetch response."],
-    constraints: ["Never print API keys."],
-    verification: ["The harness reports VERIFIED with deterministic checks passing."],
-    pitfalls: ["Do not point the harness at production systems."],
+    selections: {
+      whenToUse: [],
+      inputs: [],
+      steps: [],
+      constraints: [],
+      verification: [],
+      pitfalls: [],
+    },
   };
 }
 
@@ -85,11 +87,11 @@ describe("verifyProvider harness", () => {
     expect(generate?.ok).toBe(false);
   });
 
-  it("fails when the provider returns a schema-invalid plan", async () => {
+  it("fails when the provider returns a schema-invalid selection", async () => {
     const invalid = (async () =>
       new Response(
         JSON.stringify({
-          choices: [{ message: { role: "assistant", content: JSON.stringify({ name: "x", whenToUse: "not-an-array" }) } }],
+          choices: [{ message: { role: "assistant", content: JSON.stringify({ name: "x", selections: { whenToUse: "not-an-array" } }) } }],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       )) as unknown as typeof fetch;

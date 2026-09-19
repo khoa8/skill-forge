@@ -258,9 +258,12 @@ export function dedupe(items: string[]): string[] {
 }
 
 /**
- * Build the canonical package. `plan` should already be validated against
- * PlanSchema; deterministic gap-filling from the analysis augments empty plan
- * sections, and remaining gaps are rendered explicitly.
+ * Build the canonical package. `plan` must be a RESOLVED grounded plan:
+ * the normal path is provider proposal → shared grounded resolution
+ * (`resolveProviderProposal`) → resolved SkillPlan → this builder.
+ * Descriptions are always derived deterministically here and never trusted
+ * from provider output; deterministic gap-filling from the analysis augments
+ * empty plan sections, and remaining gaps are rendered explicitly.
  */
 export function buildCanonicalSkill(
   source: NormalizedSource,
@@ -281,23 +284,24 @@ export function buildCanonicalSkill(
     name = slugify(rawPlan.name?.trim() || ownerName, 48);
     displayName = (rawPlan.displayName?.trim() || `${repoIdentity} — coding agent guide`).slice(0, 120);
 
-    if (rawPlan.description?.trim()) {
-      description = rawPlan.description.trim().slice(0, 1024);
-    } else {
-      const stackLabel = repo
-        ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
-          repo.ecosystems.slice(0, 3).join("/") ||
-          "unrecognized stack"
-        : "project";
-      const scopeLabel = repo?.repository.scope ? `the \`${repo.repository.scope}\` subtree of ` : "";
-      const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
-      description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
-    }
+    // Descriptions are deterministic grounded authority: never trust
+    // provider-authored prose (F-01). Codebase descriptions derive from
+    // repository identity + bounded inspection counts only.
+    const stackLabel = repo
+      ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
+        repo.ecosystems.slice(0, 3).join("/") ||
+        "unrecognized stack"
+      : "project";
+    const scopeLabel = repo?.repository.scope ? `the \`${repo.repository.scope}\` subtree of ` : "";
+    const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
+    description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
   } else {
     name = slugify(rawPlan.name?.trim() || analysis.title, 48);
     displayName = (rawPlan.displayName?.trim() || analysis.title).slice(0, 120);
+    // Descriptions are deterministic grounded authority: never trust
+    // provider-authored prose (F-01). Ordinary docs derive from the source
+    // intro or a generic deterministic fallback.
     description = (
-      rawPlan.description?.trim() ||
       firstSentences(analysis.intro, 2, 500) ||
       `Working knowledge for ${analysis.title}, extracted by SkillForge.`
     ).slice(0, 1024);

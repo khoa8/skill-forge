@@ -16,7 +16,9 @@ import type {
 } from "./types.js";
 import { normalizeSource, IngestError } from "./ingest.js";
 import { analyzeSource } from "./analyze.js";
-import { buildCanonicalSkill } from "./build.js";
+import { buildCanonicalSkill, derivePlanFromAnalysis } from "./build.js";
+import { deriveCodebasePlan } from "./codebase/plan.js";
+import { catalogFromPlan, resolveProviderProposal } from "./plan-catalog.js";
 import { validatePackage } from "./validate.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
 import type { PipelineStage } from "./plan.js";
@@ -166,13 +168,21 @@ export async function* runPipeline(
         model: options.model,
       },
     );
-    const plan = await provider.generate({
+    // Grounded selection contract (F-01): deterministic trusted code authors
+    // the catalog; the provider only selects/orders atom IDs; shared runtime
+    // code resolves every ID before the canonical builder runs.
+    const deterministicPlan = normalized.repository
+      ? deriveCodebasePlan(normalized.repository, options.requestedName)
+      : derivePlanFromAnalysis(analysis);
+    const catalog = catalogFromPlan(deterministicPlan);
+    const proposal = await provider.generate({
       source: normalized,
       analysis,
       repository: normalized.repository,
       requestedName: options.requestedName,
       signal: options.signal,
     });
+    const plan = resolveProviderProposal(proposal, catalog);
     skill = buildCanonicalSkill(normalized, analysis, plan, provider.id);
     skill.meta.generatedAt = new Date().toISOString();
     timings.push({ stage: "generate", ms: Date.now() - t0, ok: true });

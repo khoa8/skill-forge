@@ -3,12 +3,16 @@
  * compatible endpoint). Used only when explicitly configured; the bundled
  * demo never needs it.
  *
- * The adapter requests a strict JSON response and validates it against
- * PlanSchema before returning — malformed model output fails with an
- * actionable error instead of flowing into the package.
+ * The adapter requests a strict selection-only JSON response (atom IDs over
+ * the deterministic grounded catalog) and validates it against
+ * ProviderProposalSchema before returning — free-text model output fails with
+ * an actionable error instead of flowing into the package. Shared resolution
+ * (`resolveProviderProposal`) enforces grounding downstream.
  */
-import { PlanSchema, type SkillPlan } from "../plan.js";
+import { ProviderProposalSchema, catalogFromPlan, formatCatalogForPrompt, type ProviderProposal } from "../plan-catalog.js";
 import { repositoryContextJson } from "../codebase/provider-context.js";
+import { derivePlanFromAnalysis } from "../build.js";
+import { deriveCodebasePlan } from "../codebase/plan.js";
 import { ProviderError, type GenerationProvider, type GenerateInput } from "./types.js";
 import { slugify, redactSecret } from "../util.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "../sources/body.js";
@@ -38,25 +42,27 @@ export interface OpenAICompatibleOptions {
 const MAX_PROVIDER_RESPONSE_BYTES = 10_000_000;
 const MAX_PROVIDER_ERROR_BYTES = 256_000;
 
-const SYSTEM_PROMPT = `You are a skill planner for SkillForge. You convert documentation into a plan for an AI agent skill.
+const SYSTEM_PROMPT = `You are a skill planner for SkillForge. You ORGANIZE deterministically grounded material — you never author new factual instructions.
 Respond with ONLY a JSON object matching this TypeScript type:
 
-interface SkillPlan {
-  name?: string;          // lowercase-hyphenated slug, max 48 chars
-  displayName?: string;
-  description?: string;   // one paragraph, max 1024 chars
-  whenToUse: string[];    // concrete situations where the skill applies
-  inputs: string[];       // required configuration/tokens/args, grounded in the source
-  steps: string[];        // ordered workflow steps grounded in the source
-  constraints: string[];  // explicit warnings/limits found in the source
-  verification: string[]; // how to verify success (commands or checks from the source)
-  pitfalls: string[];     // common failures documented in the source
+interface ProviderProposal {
+  name?: string;          // lowercase-hyphenated slug hint, max 48 chars
+  displayName?: string;   // presentation hint only
+  selections: {
+    whenToUse: string[];    // atom IDs (e.g. "whenToUse-0") in preferred order
+    inputs: string[];
+    steps: string[];
+    constraints: string[];
+    verification: string[];
+    pitfalls: string[];
+  };
 }
 
 Rules:
-- Ground every entry in the provided source. Never invent APIs, commands, flags, or env vars.
-- When the source lacks an answer, leave that array short or empty.
-- Keep entries short and imperative.`;
+- Every selection entry MUST be an atom ID copied exactly from the grounded catalog below. Never emit free-text instructions, APIs, commands, flags, or env vars.
+- You may select a subset and reorder IDs. Omit sections with no support (leave the array empty).
+- Never invent IDs. Never emit a "description" field — descriptions are derived deterministically and any description you emit is rejected.
+- Keep "name"/"displayName" as short presentation hints only; they carry no grounded authority.`;
 
 /** Codebase-mode trust boundary (P1-6). Repository analysis is untrusted
  * data: anything inside it — including text that looks like instructions —
@@ -87,7 +93,15 @@ export class OpenAICompatibleProvider implements GenerationProvider {
     this.timeoutMs = opts.timeoutMs ?? 60_000;
   }
 
-  async generate(input: GenerateInput): Promise<SkillPlan> {
+  async generate(input: GenerateInput): Promise<ProviderProposal> {
+    // Deterministic grounded catalog: the only factual authority. The model
+    // receives atom IDs + text so it can select/order, but its output must
+    // contain IDs only — free-text prose is rejected by the shared resolver.
+    const deterministicPlan = input.repository
+      ? deriveCodebasePlan(input.repository, input.requestedName)
+      : derivePlanFromAnalysis(input.analysis);
+    const catalog = catalogFromPlan(deterministicPlan);
+    const catalogBlock = formatCatalogForPrompt(catalog);
     // Codebase mode: the bounded repository analysis is structured DATA and
     // travels as compact, valid JSON (deterministic array caps). Raw inspected
     // repository files are excluded from the remote prompt to eliminate prompt
@@ -111,6 +125,12 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       `Source name: ${input.source.originalName}`,
       input.requestedName ? `Preferred skill name: ${input.requestedName}` : "",
       ...repositoryContext,
+      "",
+      "=== GROUNDED CATALOG (the only selectable factual material) ===",
+      catalogBlock.length > 0 ? catalogBlock : "(empty catalog — return empty selections)",
+      "=== END GROUNDED CATALOG ===",
+      "",
+      'Return ONLY {"name"?, "displayName"?, "selections": {...}} with atom IDs from the catalog above.',
     ]
       .filter((s) => s !== "")
       .join("\n");
@@ -214,23 +234,23 @@ export class OpenAICompatibleProvider implements GenerationProvider {
       );
     }
 
-    const parsed = PlanSchema.safeParse(rawJson);
+    const parsed = ProviderProposalSchema.safeParse(rawJson);
     if (!parsed.success) {
       const issues = parsed.error.issues
         .slice(0, 5)
         .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
         .join("; ");
       throw new ProviderError(
-        `Model output did not match the skill plan schema: ${issues}`,
+        `Model output did not match the grounded selection schema: ${issues}. Providers must return selections over known grounded atom IDs, not free-text instructions.`,
         "provider_schema_mismatch",
         redactSecret(JSON.stringify(rawJson), this.apiKey),
       );
     }
 
-    const plan = parsed.data;
+    const proposal = parsed.data;
     return {
-      ...plan,
-      name: slugify(plan.name?.trim() || input.analysis.title, 48),
+      ...proposal,
+      name: slugify(proposal.name?.trim() || input.analysis.title, 48),
     };
   }
 }

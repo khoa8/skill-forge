@@ -5,8 +5,8 @@
  * "provider behavior verified against a live OpenAI-compatible endpoint".
  * Runs one small, bounded generation end to end:
  *
- *   normalize → analyze → provider.generate → plan schema check →
- *   canonical build → deterministic validation
+ *   normalize → analyze → provider.generate (selections) →
+ *   shared grounded resolution → canonical build → deterministic validation
  *
  * and reports success/failure with actionable diagnostics. Never logs or
  * returns credentials. The CLI wrapper lives in scripts/verify-provider.ts.
@@ -14,8 +14,8 @@
 import { normalizeSource, IngestError } from "./ingest.js";
 import { analyzeSource } from "./analyze.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
-import { buildCanonicalSkill } from "./build.js";
-import { PlanSchema } from "./plan.js";
+import { buildCanonicalSkill, derivePlanFromAnalysis } from "./build.js";
+import { catalogFromPlan, resolveProviderProposal } from "./plan-catalog.js";
 import { validatePackage } from "./validate.js";
 import { getSample } from "./samples.js";
 
@@ -96,18 +96,23 @@ export async function verifyProvider(opts: VerifyOptions): Promise<VerifyResult>
   }
 
   // 3. Provider generation (the only step that can reach the network).
+  // Grounded selection contract (F-01): provider proposal → shared grounded
+  // resolution → canonical build. Old free-text proposals fail here and are
+  // never reported as verified.
   let plan;
   try {
     const providerInstance = resolveProvider(
       { provider, apiKey: opts.apiKey, baseUrl: opts.baseUrl, model: opts.model },
       opts.fetchImpl,
     );
-    plan = await providerInstance.generate({
+    const proposal = await providerInstance.generate({
       source: normalized,
       analysis,
       requestedName: opts.requestedName,
     });
-    record("generate", true, `provider "${providerInstance.id}" returned a plan (${plan.steps.length} steps, ${plan.whenToUse.length} when-to-use entries)`);
+    const catalog = catalogFromPlan(derivePlanFromAnalysis(analysis));
+    plan = resolveProviderProposal(proposal, catalog);
+    record("generate", true, `provider "${providerInstance.id}" returned a grounded selection (${plan.steps.length} steps, ${plan.whenToUse.length} when-to-use entries)`);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     record("generate", false, detail);
@@ -122,17 +127,13 @@ export async function verifyProvider(opts: VerifyOptions): Promise<VerifyResult>
     return { ...result, error: `Generation failed: ${detail}.${hint}` };
   }
 
-  // 4. Plan schema re-check (defense in depth; the adapter validates too).
-  const parsed = PlanSchema.safeParse(plan);
-  if (!parsed.success) {
-    const detail = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-    record("plan-schema", false, detail);
-    return { ...result, error: `Provider plan failed schema validation: ${detail}` };
-  }
-  record("plan-schema", true, "plan matches the SkillForge plan schema");
+  // 4. Grounded-resolution re-check (defense in depth; the adapter validates
+  // the proposal shape and the shared resolver enforces catalog membership).
+  // `plan` above is already the resolved grounded plan.
+  record("plan-schema", true, "provider selection resolved against the deterministic grounded catalog");
 
   // 5. Canonical build.
-  const skill = buildCanonicalSkill(normalized, analysis, parsed.data, provider);
+  const skill = buildCanonicalSkill(normalized, analysis, plan, provider);
   skill.meta.generatedAt = new Date().toISOString();
   record("build", true, `${skill.files.length} files, id "${skill.id}"`);
 
