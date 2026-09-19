@@ -24,6 +24,8 @@ import { z } from "zod";
  * mirror the builder's own section slices.
  */
 export const PLAN_LIMITS = {
+  /** The one free-text plan field outside the grounded sections. */
+  description: { maxItemChars: 1024 },
   whenToUse: { maxItems: 12, maxItemChars: 300 },
   inputs: { maxItems: 12, maxItemChars: 300 },
   steps: { maxItems: 20, maxItemChars: 500 },
@@ -51,7 +53,7 @@ export const PlanSchema = z.object({
   name: z.string().optional(),
   displayName: z.string().optional(),
   /** One-paragraph "what this skill is for", grounded in the source. */
-  description: z.string().max(1024).optional(),
+  description: z.string().max(PLAN_LIMITS.description.maxItemChars).optional(),
   whenToUse: item("whenToUse"),
   inputs: item("inputs"),
   steps: item("steps"),

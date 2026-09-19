@@ -27,7 +27,7 @@ import type {
 import type { SkillPlan } from "./plan.js";
 import { PLAN_LIMITS, clipPlanText, fitPlanItem, fitPlanSection } from "./plan.js";
 import type { ResolvedGroundedPlan, GroundedPlanAtom } from "./plan-catalog.js";
-import { slugify, sha256, formatCodeSpan, formatMetadataLabel } from "./util.js";
+import { slugify, sha256, formatCodeSpan, formatMetadataLabel, composeBoundedItem } from "./util.js";
 import { allocateReferences, allocateWorkflows, deriveEvalItems, neutralizeRelativeLinks } from "./evals.js";
 export { neutralizeRelativeLinks };
 
@@ -376,15 +376,39 @@ export function buildCanonicalSkill(
 
     // Descriptions are deterministic grounded authority: never trust
     // provider-authored prose (F-01). Codebase descriptions derive from
-    // repository identity + bounded inspection counts only.
+    // repository identity + bounded inspection counts only, composed from
+    // ingredient-bounded labels so a long scope/stack/identity cannot push the
+    // evidence attribution past the description bound or slice a rendered code
+    // span.
     const stackLabel = repo
       ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
         repo.ecosystems.slice(0, 3).join("/") ||
         "unrecognized stack"
       : "project";
-    const scopeLabel = repo?.repository.scope ? `the ${formatCodeSpan(repo.repository.scope)} subtree of ` : "";
     const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
-    description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
+    description = repo?.repository.scope
+      ? composeBoundedItem(
+          [
+            "Coding-agent guidance for the ",
+            " subtree of ",
+            ": ",
+            ` project, derived from a ${countLabel}.`,
+          ],
+          [
+            { kind: "span", raw: repo.repository.scope },
+            { kind: "plain", raw: repoIdentity },
+            { kind: "plain", raw: stackLabel },
+          ],
+          PLAN_LIMITS.description.maxItemChars,
+        )
+      : composeBoundedItem(
+          ["Coding-agent guidance for ", ": ", ` project, derived from a ${countLabel}.`],
+          [
+            { kind: "plain", raw: repoIdentity },
+            { kind: "plain", raw: stackLabel },
+          ],
+          PLAN_LIMITS.description.maxItemChars,
+        );
   } else {
     name = slugify(rawPlan.name?.trim() || analysis.title, 48);
     displayName = sanitizeDisplayName(rawPlan.displayName, analysis.title);
@@ -394,7 +418,7 @@ export function buildCanonicalSkill(
     description = (
       firstSentences(analysis.intro, 2, 500) ||
       `Working knowledge for ${analysis.title}, extracted by SkillForge.`
-    ).slice(0, 1024);
+    ).slice(0, PLAN_LIMITS.description.maxItemChars);
   }
 
   const files: SkillFile[] = [];
