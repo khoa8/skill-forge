@@ -66,3 +66,27 @@ export function redactSecret(text: string | undefined | null, secret: string | u
   if (!secret || secret.length === 0) return text;
   return text.split(secret).join(REDACTED);
 }
+
+/**
+ * Format a string safely as a CommonMark inline code span.
+ *
+ * Prevents untrusted metadata (such as repository file paths, scopes, or package names)
+ * from breaking out of code spans into Markdown headings, lists, or instructions.
+ * Strips/normalizes line breaks and control characters, and applies CommonMark
+ * delimiter sizing (surrounds with N+1 backticks when the text contains backticks).
+ */
+export function formatCodeSpan(rawText: string): string {
+  const clean = rawText.replace(/[\r\n\u2028\u2029\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+  if (clean.length === 0) return "``";
+
+  const matches = clean.match(/`+/g);
+  let maxBackticks = 0;
+  if (matches) {
+    for (const m of matches) {
+      if (m.length > maxBackticks) maxBackticks = m.length;
+    }
+  }
+  const delimiter = "`".repeat(maxBackticks + 1);
+  const padded = clean.startsWith("`") || clean.endsWith("`") ? ` ${clean} ` : clean;
+  return `${delimiter}${padded}${delimiter}`;
+}
