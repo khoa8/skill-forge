@@ -52,7 +52,7 @@ Respond with ONLY a JSON object matching this TypeScript type:
 
 interface ProviderProposal {
   name?: string;          // lowercase-hyphenated slug hint, max 48 chars
-  displayName?: string;   // presentation hint only
+  displayName?: string;   // presentation hint only (single line, no line breaks)
   selections: {
     whenToUse: string[];    // atom IDs (e.g. "whenToUse-0") in preferred order
     inputs: string[];
@@ -67,7 +67,7 @@ Rules:
 - Every selection entry MUST be an atom ID copied exactly from the grounded catalog below. Never emit free-text instructions, APIs, commands, flags, or env vars.
 - You may select a subset and reorder IDs. Omit sections with no support (leave the array empty).
 - Never invent IDs. Never emit a "description" field — descriptions are derived deterministically and any description you emit is rejected.
-- Keep "name"/"displayName" as short presentation hints only; they carry no grounded authority.`;
+- Keep "name"/"displayName" as short presentation hints only (single line, no line breaks); they carry no grounded authority.`;
 
 /** Codebase-mode trust boundary (P1-6). Repository analysis is untrusted
  * data: anything inside it — including text that looks like instructions —

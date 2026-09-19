@@ -57,6 +57,7 @@ export interface GroundedCatalog {
  * Provider output contract: selection + ordering over known atom IDs.
  *
  * `name`/`displayName` remain presentation hints (normalized downstream).
+ * `displayName` must be single-line presentation text (no line breaks permitted).
  * There is deliberately NO `description` field and NO top-level section
  * prose: any old-style free-text payload fails strict parsing with
  * `provider_schema_mismatch` instead of entering the package.
@@ -64,7 +65,11 @@ export interface GroundedCatalog {
 export const ProviderProposalSchema = z
   .object({
     name: z.string().max(200).optional(),
-    displayName: z.string().max(200).optional(),
+    displayName: z
+      .string()
+      .max(200)
+      .regex(/^[^\r\n\u2028\u2029]*$/)
+      .optional(),
     selections: z
       .object({
         whenToUse: z.array(z.string().max(64)).max(12).default([]),

@@ -265,6 +265,15 @@ export function dedupe(items: string[]): string[] {
  * from provider output; deterministic gap-filling from the analysis augments
  * empty plan sections, and remaining gaps are rendered explicitly.
  */
+function sanitizeDisplayName(raw: string | undefined, fallback: string): string {
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallback.slice(0, 120);
+  // Display names are presentation titles only; collapse line breaks to prevent
+  // Markdown heading escaping into body blocks.
+  const firstLine = trimmed.split(/[\r\n\u2028\u2029]/)[0]?.trim() || fallback;
+  return firstLine.slice(0, 120);
+}
+
 export function buildCanonicalSkill(
   source: NormalizedSource,
   analysis: SourceAnalysis,
@@ -282,7 +291,7 @@ export function buildCanonicalSkill(
     const ownerName = repo ? `${repo.repository.owner}-${repo.repository.name}` : source.originalName;
     const repoIdentity = repo ? `${repo.repository.owner}/${repo.repository.name}` : source.originalName;
     name = slugify(rawPlan.name?.trim() || ownerName, 48);
-    displayName = (rawPlan.displayName?.trim() || `${repoIdentity} — coding agent guide`).slice(0, 120);
+    displayName = sanitizeDisplayName(rawPlan.displayName, `${repoIdentity} — coding agent guide`);
 
     // Descriptions are deterministic grounded authority: never trust
     // provider-authored prose (F-01). Codebase descriptions derive from
@@ -297,7 +306,7 @@ export function buildCanonicalSkill(
     description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
   } else {
     name = slugify(rawPlan.name?.trim() || analysis.title, 48);
-    displayName = (rawPlan.displayName?.trim() || analysis.title).slice(0, 120);
+    displayName = sanitizeDisplayName(rawPlan.displayName, analysis.title);
     // Descriptions are deterministic grounded authority: never trust
     // provider-authored prose (F-01). Ordinary docs derive from the source
     // intro or a generic deterministic fallback.
