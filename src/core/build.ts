@@ -459,8 +459,10 @@ export function buildCanonicalSkill(
         }
 
         if (allocated) {
+          // Factual metadata (heading) is rendered from the authoritative
+          // resolved full-source section, not from prefix-snapshot anchor hints.
           renderedSteps.push(
-            `Consult the "${anchor.heading}" guidance in [${allocated.path}](${allocated.path}) and apply it to the task.`,
+            `Consult the "${allocated.section.heading}" guidance in [${allocated.path}](${allocated.path}) and apply it to the task.`,
           );
         } else {
           renderedSteps.push(atom.text);
@@ -500,8 +502,11 @@ export function buildCanonicalSkill(
         }
 
         if (allocated) {
+          // Factual metadata (title, step count) is rendered from the
+          // authoritative resolved full-source procedure, not from
+          // prefix-snapshot anchor hints (C1-LB1).
           renderedSteps.push(
-            `Follow the documented procedure "${anchor.title}" (${anchor.stepCount} steps) — see [${allocated.path}](${allocated.path}).`,
+            `Follow the documented procedure "${allocated.proc.title}" (${allocated.proc.steps.length} steps) — see [${allocated.path}](${allocated.path}).`,
           );
         } else {
           renderedSteps.push(atom.text);

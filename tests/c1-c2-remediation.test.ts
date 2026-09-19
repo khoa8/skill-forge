@@ -231,6 +231,101 @@ describe("C1 — Catalog Materialization Coherence", () => {
     expect(report.errorCount).toBe(0);
   });
 
+  it("C1-LB1: late binding renders full-source procedure metadata when the provider boundary cuts the procedure", () => {
+    const preamble = [
+      "# Deployment Guide",
+      "",
+      "Documented deployment procedure.",
+      "",
+      "## Deploy",
+      "",
+      "1. Prepare the environment.",
+      "2. Configure the service.",
+    ].join("\n");
+
+    const thirdPrefix = "\n3. Verify ";
+    // Bounded provider source (60,000 chars) cuts inside item 3
+    const paddingLength = MAX_PROVIDER_SOURCE_CHARS - preamble.length - thirdPrefix.length;
+    const padding = "x".repeat(paddingLength);
+
+    const fullSourceText = preamble + thirdPrefix + padding + "\n4. Finish the deployment.\n";
+
+    expect(fullSourceText.length).toBeGreaterThan(MAX_PROVIDER_SOURCE_CHARS);
+
+    const fullSource = normalizeSource({
+      type: "text",
+      name: "deployment-guide",
+      content: fullSourceText,
+    });
+
+    const fullAnalysis = analyzeSource(fullSource);
+    const prep = prepareProviderCatalog(fullSource, fullAnalysis, { offline: false });
+
+    expect(prep.providerSource.text.length).toBe(MAX_PROVIDER_SOURCE_CHARS);
+
+    const prefixProc = prep.providerAnalysis.procedures.find((p) => p.title === "Deploy");
+    const fullProc = fullAnalysis.procedures.find((p) => p.title === "Deploy");
+
+    expect(prefixProc).toBeDefined();
+    expect(fullProc).toBeDefined();
+    expect(prefixProc!.steps.length).toBe(3);
+    expect(fullProc!.steps.length).toBe(4);
+    expect(prefixProc!.line).toBe(fullProc!.line);
+
+    // Provider catalog exposes the 3-step procedure atom observed in the prefix
+    const wfAtom = prep.catalog.atoms.find(
+      (a) => a.section === "steps" && a.sourceAnchor?.kind === "procedure" && a.sourceAnchor.title === "Deploy",
+    );
+    expect(wfAtom).toBeDefined();
+    expect(wfAtom!.text).toBe('Follow the documented procedure "Deploy" (3 steps).');
+    expect(wfAtom!.sourceAnchor).toEqual({
+      kind: "procedure",
+      title: "Deploy",
+      line: prefixProc!.line,
+      stepCount: 3,
+    });
+
+    const proposal = {
+      selections: {
+        whenToUse: [prep.catalog.atoms.find((a) => a.section === "whenToUse")!.id],
+        inputs: [],
+        steps: [wfAtom!.id],
+        constraints: [],
+        verification: [],
+        pitfalls: [],
+      },
+    };
+
+    const resolvedPlan = resolveProviderProposal(proposal, prep.catalog);
+    expect(resolvedPlan.stepAtoms?.[0]?.sourceAnchor).toEqual(wfAtom!.sourceAnchor);
+
+    // Canonical builder resolves structured anchor against the full authoritative analysis
+    const skill = buildCanonicalSkill(fullSource, fullAnalysis, resolvedPlan, "mock");
+
+    const wfFile = skill.files.find((f) => f.path.startsWith("workflows/"));
+    expect(wfFile).toBeDefined();
+    expect(wfFile!.content).toContain("4. Finish the deployment.");
+    expect(wfFile!.purpose).toContain("Executable 4-step procedure");
+
+    // Canonical plan step must render factual metadata from the resolved full procedure (4 steps), not prefix snapshot (3 steps)
+    expect(skill.plan.steps[0]).toBe(
+      'Follow the documented procedure "Deploy" (4 steps) — see [workflows/deploy.md](workflows/deploy.md).',
+    );
+    expect(skill.plan.steps[0]).toContain("(4 steps)");
+    expect(skill.plan.steps[0]).not.toContain("(3 steps)");
+
+    // SKILL.md body must also contain the authoritative 4-step instruction
+    const skillMd = skill.files.find((f) => f.path === "SKILL.md")!.content;
+    expect(skillMd).toContain(
+      'Follow the documented procedure "Deploy" (4 steps) — see [workflows/deploy.md](workflows/deploy.md).',
+    );
+    expect(skillMd).not.toContain("(3 steps)");
+
+    const report = validatePackage({ skill, sourceText: fullSource.text });
+    expect(report.passed).toBe(true);
+    expect(report.errorCount).toBe(0);
+  });
+
   it("C1-T4: backward compatibility for direct SkillPlan callers without stepAtoms", () => {
     const source = normalizeSource({
       type: "text",

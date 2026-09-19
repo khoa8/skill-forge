@@ -41,6 +41,17 @@ export const GROUNDED_SECTIONS = [
 ] as const;
 export type GroundedSection = (typeof GROUNDED_SECTIONS)[number];
 
+/**
+ * Structured source identity anchor preserved across proposal resolution
+ * for late-binding artifact allocation.
+ *
+ * NOTE: `heading`, `title`, and `stepCount` are snapshot metadata captured
+ * from the provider-visible analysis (selection evidence and lookup hints).
+ * After resolution against the full authoritative analysis, the canonical
+ * builder renders factual metadata (heading, title, step count) from the
+ * resolved full-source object (`allocated.section` / `allocated.proc`), not
+ * from these prefix snapshot fields.
+ */
 export type PlanAtomSourceAnchor =
   | {
       kind: "section";
