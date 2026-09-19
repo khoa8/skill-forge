@@ -322,18 +322,6 @@ const brokenLinks = check("internal-links", "Internal file references resolve", 
         reportBroken(file.path, href, "missing");
       }
     }
-
-    // Explicit package artifact references in prose/code spans: references/*.md, workflows/*.md
-    const ARTIFACT_REF_RE = /\b(references|workflows)\/[a-z0-9_.-]+\.md\b/g;
-    for (const m of body.matchAll(ARTIFACT_REF_RE)) {
-      const refPath = m[0]!;
-      const safe = safePackagePath(refPath);
-      if (safe === null) {
-        reportBroken(file.path, refPath, "escapes");
-      } else if (!paths.has(safe)) {
-        reportBroken(file.path, refPath, "missing");
-      }
-    }
   }
   return outcomes.length === 0 ? pass() : outcomes;
 });

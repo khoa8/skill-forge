@@ -41,10 +41,31 @@ export const GROUNDED_SECTIONS = [
 ] as const;
 export type GroundedSection = (typeof GROUNDED_SECTIONS)[number];
 
+export type PlanAtomSourceAnchor =
+  | {
+      kind: "section";
+      heading: string;
+      startLine: number;
+      endLine?: number;
+      sectionId: string;
+    }
+  | {
+      kind: "procedure";
+      title: string;
+      line: number;
+      stepCount: number;
+    };
+
 export interface GroundedPlanAtom {
   id: string;
   section: GroundedSection;
   text: string;
+  sourceAnchor?: PlanAtomSourceAnchor;
+}
+
+export interface ResolvedGroundedPlan extends SkillPlan {
+  /** Structured step atoms preserving source anchors for late-binding file allocation. */
+  stepAtoms?: GroundedPlanAtom[];
 }
 
 export interface GroundedCatalog {
@@ -143,7 +164,7 @@ export function formatProviderProposalSchemaIssues(error: z.ZodError): string {
 }
 
 /** Build the deterministic catalog from an already-derived trusted plan. */
-export function catalogFromPlan(plan: SkillPlan): GroundedCatalog {
+export function catalogFromPlan(plan: SkillPlan | ResolvedGroundedPlan): GroundedCatalog {
   const atoms: GroundedPlanAtom[] = [];
   const byId = new Map<string, GroundedPlanAtom>();
   const bySection = {
@@ -158,7 +179,10 @@ export function catalogFromPlan(plan: SkillPlan): GroundedCatalog {
     const items = plan[section] ?? [];
     items.forEach((text, index) => {
       const id = `${section}-${index}`;
-      const atom: GroundedPlanAtom = { id, section, text };
+      const existingAtom = section === "steps" && (plan as ResolvedGroundedPlan).stepAtoms?.[index];
+      const atom: GroundedPlanAtom = existingAtom
+        ? { ...existingAtom, id, section }
+        : { id, section, text };
       atoms.push(atom);
       byId.set(id, atom);
       bySection[section].push(atom);
@@ -277,7 +301,7 @@ const ATOM_ID_RE = /^(whenToUse|inputs|steps|constraints|verification|pitfalls)-
 export function resolveProviderProposal(
   proposalUnknown: unknown,
   catalog: GroundedCatalog,
-): SkillPlan {
+): ResolvedGroundedPlan {
   const parsed = ProviderProposalSchema.safeParse(proposalUnknown);
   if (!parsed.success) {
     const issues = formatProviderProposalSchemaIssues(parsed.error);
@@ -295,6 +319,7 @@ export function resolveProviderProposal(
     verification: [],
     pitfalls: [],
   };
+  const stepAtoms: GroundedPlanAtom[] = [];
   for (const section of GROUNDED_SECTIONS) {
     const seen = new Set<string>();
     const sectionSelections = proposal.selections[section];
@@ -325,6 +350,9 @@ export function resolveProviderProposal(
       if (seen.has(id)) continue;
       seen.add(id);
       resolved[section].push(atom.text);
+      if (section === "steps") {
+        stepAtoms.push(atom);
+      }
     }
   }
   return {
@@ -333,6 +361,7 @@ export function resolveProviderProposal(
     whenToUse: resolved.whenToUse,
     inputs: resolved.inputs,
     steps: resolved.steps,
+    stepAtoms,
     constraints: resolved.constraints,
     verification: resolved.verification,
     pitfalls: resolved.pitfalls,

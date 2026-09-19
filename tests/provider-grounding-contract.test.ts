@@ -171,7 +171,7 @@ describe("T3 — valid remote selection succeeds", () => {
     expect(resolved.steps).toEqual([...catalog.bySection.steps].reverse().map((a) => a.text));
     const skill = buildCanonicalSkill(normalized, analysis, resolved, "glm");
     const skillMd = skill.files.find((f) => f.path === "SKILL.md")!.content;
-    for (const text of resolved.steps) expect(skillMd).toContain(text);
+    for (const text of skill.plan.steps) expect(skillMd).toContain(text);
     expect(skillMd).not.toContain("acme destroy --all");
     const validation = validatePackage({ skill, sourceText: normalized.text });
     expect(validation.passed).toBe(true);

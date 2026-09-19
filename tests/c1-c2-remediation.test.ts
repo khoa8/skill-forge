@@ -20,7 +20,7 @@ import {
   resolveProviderProposal,
   MAX_PROVIDER_SOURCE_CHARS,
 } from "../src/core/plan-catalog.js";
-import { buildCanonicalSkill } from "../src/core/build.js";
+import { buildCanonicalSkill, derivePlanFromAnalysis } from "../src/core/build.js";
 import { validatePackage } from "../src/core/validate.js";
 import { formatCodeSpan } from "../src/core/util.js";
 import { isSafeRepoPath } from "../src/core/sources/github.js";
@@ -55,8 +55,11 @@ describe("C1 — Catalog Materialization Coherence", () => {
 
     // The prefix-derived catalog includes a step atom for the Head Guide reference
     const stepAtoms = prep.catalog.atoms.filter((a) => a.section === "steps");
-    const refStepAtom = stepAtoms.find((a) => a.text.includes("references/head-guide.md"));
+    const refStepAtom = stepAtoms.find(
+      (a) => a.sourceAnchor?.kind === "section" && a.sourceAnchor.heading === "Head Guide",
+    );
     expect(refStepAtom).toBeDefined();
+    expect(refStepAtom!.text).toContain("Head Guide");
 
     // Provider selects the reference step atom
     const proposal = {
@@ -71,16 +74,22 @@ describe("C1 — Catalog Materialization Coherence", () => {
     };
 
     const resolvedPlan = resolveProviderProposal(proposal, prep.catalog);
-    expect(resolvedPlan.steps[0]).toContain("references/head-guide.md");
+    expect(resolvedPlan.steps[0]).toContain("Head Guide");
+    expect(resolvedPlan.stepAtoms?.[0]?.sourceAnchor).toEqual(
+      expect.objectContaining({ kind: "section", heading: "Head Guide" }),
+    );
 
     // Canonical builder runs with the full source and full analysis
     const skill = buildCanonicalSkill(source, fullAnalysis, resolvedPlan, "glm");
 
-    // Invariant: references/head-guide.md MUST be materialized in skill.files
+    // Invariant: references/head-guide.md MUST be materialized in skill.files via late binding
     const headGuideFile = skill.files.find((f) => f.path === "references/head-guide.md");
     expect(headGuideFile).toBeDefined();
     expect(headGuideFile!.content).toContain("# Head Guide");
     expect(headGuideFile!.content).toContain("substantive documentation for the head guide topic");
+
+    // Invariant: the rendered step links cleanly to references/head-guide.md
+    expect(skill.plan.steps[0]).toContain("[references/head-guide.md](references/head-guide.md)");
 
     // Invariant: tail-allocated reference (references/details.md) is ALSO materialized
     const detailsFile = skill.files.find((f) => f.path === "references/details.md");
@@ -111,7 +120,7 @@ describe("C1 — Catalog Materialization Coherence", () => {
       description: "Test description",
       whenToUse: ["When testing."],
       inputs: [],
-      steps: ["Consult the missing guide in references/nonexistent-artifact.md and apply it."],
+      steps: ["Consult the missing guide in [references/nonexistent-artifact.md](references/nonexistent-artifact.md) and apply it."],
       constraints: [],
       verification: [],
       pitfalls: [],
@@ -125,6 +134,134 @@ describe("C1 — Catalog Materialization Coherence", () => {
     const linkCheck = report.checks.find((c) => c.id === "internal-links" && c.status === "fail");
     expect(linkCheck).toBeDefined();
     expect(linkCheck!.message).toContain("references/nonexistent-artifact.md");
+  });
+
+  it("C1-R1: inert path text in reference excerpt body does not fail validation", () => {
+    const source = normalizeSource({
+      type: "text",
+      name: "config-guide",
+      content: [
+        "# Configuration Guide",
+        "",
+        "Instructions for configuring the system.",
+        "",
+        "## Configuration Details",
+        "",
+        "For external settings, see references/external.md in the original documentation.",
+        "Also check config/settings.json or references/old-guide.md for legacy setups.",
+        "Ensure all environment variables are set before starting the worker service.",
+        "",
+      ].join("\n"),
+    });
+    const analysis = analyzeSource(source);
+    const plan = derivePlanFromAnalysis(analysis);
+    const skill = buildCanonicalSkill(source, analysis, plan, "mock");
+
+    // The reference file must contain the inert text mentioning references/external.md
+    const refFile = skill.files.find((f) => f.path.startsWith("references/"));
+    expect(refFile).toBeDefined();
+    expect(refFile!.content).toContain("references/external.md");
+
+    // Validation must pass with 0 errors (inert text is not treated as a package link)
+    const report = validatePackage({ skill, sourceText: source.text });
+    expect(report.passed).toBe(true);
+    expect(report.errorCount).toBe(0);
+    const brokenLinks = report.checks.filter((c) => c.id === "internal-links" && c.status === "fail");
+    expect(brokenLinks).toHaveLength(0);
+  });
+
+  it("C1-R2: duplicate headings with collision suffixes resolve and materialize correctly", () => {
+    const source = normalizeSource({
+      type: "text",
+      name: "duplicate-headings-doc",
+      content: [
+        "# Duplicate Headings Guide",
+        "",
+        "Testing collision suffix handling with duplicate section headings.",
+        "",
+        "Foo",
+        "---",
+        "First foo section body with substantive content that exceeds the minimum character count.",
+        "",
+        "Foo",
+        "---",
+        "Second foo section body with substantive content that exceeds the minimum character count.",
+        "",
+      ].join("\n"),
+    });
+    const analysis = analyzeSource(source);
+    expect(analysis.sections.filter((s) => s.heading === "Foo")).toHaveLength(2);
+
+    const prep = prepareProviderCatalog(source, analysis, { offline: false });
+    const fooAtoms = prep.catalog.atoms.filter(
+      (a) => a.section === "steps" && a.sourceAnchor?.kind === "section" && a.sourceAnchor.heading === "Foo",
+    );
+    expect(fooAtoms).toHaveLength(2);
+    // The second atom corresponds to the second "Foo" section
+    const secondFooAtom = fooAtoms[1]!;
+
+    // Provider selects the second "Foo" atom (which receives collision suffix -2 upon allocation)
+    const proposal = {
+      selections: {
+        whenToUse: [prep.catalog.atoms.find((a) => a.section === "whenToUse")!.id],
+        inputs: [],
+        steps: [secondFooAtom.id],
+        constraints: [],
+        verification: [],
+        pitfalls: [],
+      },
+    };
+
+    const resolvedPlan = resolveProviderProposal(proposal, prep.catalog);
+    expect(resolvedPlan.stepAtoms?.[0]?.sourceAnchor).toEqual(secondFooAtom.sourceAnchor);
+
+    const skill = buildCanonicalSkill(source, analysis, resolvedPlan, "glm");
+
+    // references/foo-2.md must be materialized in skill.files
+    const foo2File = skill.files.find((f) => f.path === "references/foo-2.md");
+    expect(foo2File).toBeDefined();
+    expect(foo2File!.content).toContain("Second foo section body");
+
+    // The rendered step must link to [references/foo-2.md](references/foo-2.md)
+    expect(skill.plan.steps[0]).toContain("[references/foo-2.md](references/foo-2.md)");
+
+    // Validation must pass with 0 errors
+    const report = validatePackage({ skill, sourceText: source.text });
+    expect(report.passed).toBe(true);
+    expect(report.errorCount).toBe(0);
+  });
+
+  it("C1-T4: backward compatibility for direct SkillPlan callers without stepAtoms", () => {
+    const source = normalizeSource({
+      type: "text",
+      name: "manual-doc",
+      content: "# Manual Doc\n\nSubstantive content for manual test.\n\n## Settings\n\nSettings body content that exceeds minimum length threshold.\n",
+    });
+    const analysis = analyzeSource(source);
+    // Caller provides plain SkillPlan without stepAtoms
+    const manualPlan = {
+      name: "manual-skill",
+      displayName: "Manual Skill",
+      description: "Manual description",
+      whenToUse: ["When manually testing."],
+      inputs: [],
+      steps: [
+        "First do manual step A.",
+        "Consult the settings in [references/settings.md](references/settings.md) and apply them.",
+      ],
+      constraints: [],
+      verification: [],
+      pitfalls: [],
+    };
+
+    const skill = buildCanonicalSkill(source, analysis, manualPlan, "mock");
+    expect(skill.plan.steps[0]).toBe("First do manual step A.");
+    expect(skill.plan.steps[1]).toContain("[references/settings.md](references/settings.md)");
+    expect(skill.files.some((f) => f.path === "references/settings.md")).toBe(true);
+
+    const report = validatePackage({ skill, sourceText: source.text });
+    expect(report.passed).toBe(true);
+    expect(report.errorCount).toBe(0);
   });
 
   it("C1-T2: ordinary source catalog does not leak tail content beyond 60k boundary", () => {

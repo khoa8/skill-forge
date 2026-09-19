@@ -8,9 +8,7 @@
  */
 import type { GenerationProvider, GenerateInput } from "./types.js";
 import type { ProviderProposal } from "../plan-catalog.js";
-import { catalogFromPlan } from "../plan-catalog.js";
-import { derivePlanFromAnalysis } from "../build.js";
-import { deriveCodebasePlan } from "../codebase/plan.js";
+import { prepareProviderCatalog } from "../plan-catalog.js";
 import { slugify } from "../util.js";
 
 export class MockProvider implements GenerationProvider {
@@ -18,18 +16,17 @@ export class MockProvider implements GenerationProvider {
   readonly offline = true;
 
   async generate(input: GenerateInput): Promise<ProviderProposal> {
-    const { analysis, requestedName, repository } = input;
+    const { analysis, requestedName, repository, source } = input;
     // Same contract as remote providers: return selections over the
     // deterministic grounded catalog — no privileged bypass. The mock
     // deterministically selects every catalog atom in order, so resolution
     // reproduces the trusted deterministic plan exactly.
     const catalog =
       input.catalog ??
-      catalogFromPlan(
-        repository
-          ? deriveCodebasePlan(repository, requestedName)
-          : derivePlanFromAnalysis(analysis),
-      );
+      prepareProviderCatalog(source, analysis, {
+        offline: true,
+        requestedName,
+      }).catalog;
     const selections = {
       whenToUse: catalog.bySection.whenToUse.map((a) => a.id),
       inputs: catalog.bySection.inputs.map((a) => a.id),

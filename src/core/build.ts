@@ -25,6 +25,7 @@ import type {
   SourceAnalysis,
 } from "./types.js";
 import type { SkillPlan } from "./plan.js";
+import type { ResolvedGroundedPlan, GroundedPlanAtom } from "./plan-catalog.js";
 import { slugify, sha256, formatCodeSpan } from "./util.js";
 import { allocateReferences, allocateWorkflows, deriveEvalItems, neutralizeRelativeLinks } from "./evals.js";
 export { neutralizeRelativeLinks };
@@ -119,7 +120,7 @@ export function detectEnvVarInputs(analysis: SourceAnalysis): { token: string; l
 }
 
 /** Derive the deterministic plan the mock provider uses. */
-export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
+export function derivePlanFromAnalysis(analysis: SourceAnalysis): ResolvedGroundedPlan {
   const whenToUse: string[] = [
     `Use this skill when the task involves ${analysis.title}.`,
   ];
@@ -132,17 +133,43 @@ export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
   );
 
   const steps: string[] = [];
+  const stepAtoms: GroundedPlanAtom[] = [];
+  let stepIndex = 0;
+
   for (const { proc, path } of allocateWorkflows(analysis).slice(0, 6)) {
     steps.push(
-      `Follow the documented procedure "${proc.title}" (${proc.steps.length} steps) — see ${path}.`,
+      `Follow the documented procedure "${proc.title}" (${proc.steps.length} steps) — see [${path}](${path}).`,
     );
+    stepAtoms.push({
+      id: `steps-${stepIndex++}`,
+      section: "steps",
+      text: `Follow the documented procedure "${proc.title}" (${proc.steps.length} steps).`,
+      sourceAnchor: {
+        kind: "procedure",
+        title: proc.title,
+        line: proc.line,
+        stepCount: proc.steps.length,
+      },
+    });
   }
   const procedureTitles = new Set(analysis.procedures.map((p) => p.title.toLowerCase()));
   for (const { section, path } of allocateReferences(analysis).slice(0, 6)) {
     if (procedureTitles.has(section.heading.toLowerCase())) continue; // already covered by its workflow file
     steps.push(
-      `Consult the "${section.heading}" guidance in ${path} and apply it to the task.`,
+      `Consult the "${section.heading}" guidance in [${path}](${path}) and apply it to the task.`,
     );
+    stepAtoms.push({
+      id: `steps-${stepIndex++}`,
+      section: "steps",
+      text: `Consult the "${section.heading}" section guidance and apply it to the task.`,
+      sourceAnchor: {
+        kind: "section",
+        heading: section.heading,
+        startLine: section.startLine,
+        endLine: section.endLine,
+        sectionId: section.id,
+      },
+    });
   }
 
   const constraints: string[] = [];
@@ -197,6 +224,7 @@ export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
     whenToUse: dedupe(whenToUse).slice(0, 12),
     inputs: dedupe(inputs).slice(0, 12),
     steps: dedupe(steps).slice(0, 20),
+    stepAtoms,
     constraints: dedupe(constraints).slice(0, 12),
     verification: dedupe(verification).slice(0, 12),
     pitfalls: dedupe(pitfalls).slice(0, 12),
@@ -277,7 +305,7 @@ function sanitizeDisplayName(raw: string | undefined, fallback: string): string 
 export function buildCanonicalSkill(
   source: NormalizedSource,
   analysis: SourceAnalysis,
-  rawPlan: SkillPlan,
+  rawPlan: SkillPlan | ResolvedGroundedPlan,
   generatorId: string,
 ): CanonicalSkill {
   const isCodebase = source.sourceType === "github-codebase";
@@ -316,18 +344,6 @@ export function buildCanonicalSkill(
     ).slice(0, 1024);
   }
 
-  const plan: SkillPlan = {
-    name,
-    displayName,
-    description,
-    whenToUse: rawPlan.whenToUse.length > 0 || isCodebase ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
-    inputs: rawPlan.inputs.length > 0 || isCodebase ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
-    steps: rawPlan.steps.length > 0 || isCodebase ? rawPlan.steps : derivePlanFromAnalysis(analysis).steps,
-    constraints: rawPlan.constraints,
-    verification: rawPlan.verification,
-    pitfalls: rawPlan.pitfalls,
-  };
-
   const files: SkillFile[] = [];
   const provenance: Provenance[] = [];
   const gaps: string[] = [];
@@ -339,8 +355,9 @@ export function buildCanonicalSkill(
   // --- Reference files from top-level sections (verbatim source excerpts).
   const usedPaths = new Set<string>(["SKILL.md"]);
   const referenceLinks: { path: string; heading: string; range: string }[] = [];
+  const allocatedRefs = allocateReferences(analysis);
 
-  for (const { section, canonicalBody, path } of allocateReferences(analysis)) {
+  for (const { section, canonicalBody, path } of allocatedRefs) {
     usedPaths.add(path);
     const content = [
       `# ${section.heading}`,
@@ -365,8 +382,9 @@ export function buildCanonicalSkill(
   // In codebase mode, generic README ordered procedures must NOT be promoted
   // into executable workflow files.
   const workflowLinks: { path: string; title: string; stepCount: number }[] = [];
+  const allocatedWfs = isCodebase ? [] : allocateWorkflows(analysis);
   if (!isCodebase) {
-    for (const { proc, path, canonicalSteps } of allocateWorkflows(analysis)) {
+    for (const { proc, path, canonicalSteps } of allocatedWfs) {
       usedPaths.add(path);
       const endLine = proc.steps[proc.steps.length - 1]!.line;
       const content = [
@@ -387,70 +405,190 @@ export function buildCanonicalSkill(
     }
   }
 
-  // Materialize any grounded reference or workflow files explicitly referenced
-  // by selected plan steps that were not already allocated by the general pass.
-  // This guarantees prefix-stability (C1 remediation): if a provider selects
-  // an atom derived from a prefix analysis, the corresponding grounded artifact
-  // is guaranteed to be materialized in the final package with full provenance.
-  const stepRefRe = /\b(references|workflows)\/([a-z0-9_.-]+)\.md\b/g;
-  for (const step of plan.steps) {
-    for (const m of step.matchAll(stepRefRe)) {
-      const artifactType = m[1]!;
-      const artifactId = m[2]!;
-      const targetPath = `${artifactType}/${artifactId}.md`;
-      if (usedPaths.has(targetPath)) continue;
+  // Late-binding: materialize and link any grounded reference or workflow
+  // artifacts referenced by selected step atoms. Artifact-bearing selected
+  // atoms carry structured source anchors (F-01 / F-33-01 remediation); the
+  // final package filenames and standard Markdown links are rendered here.
+  const renderedSteps: string[] = [];
+  const rawStepAtoms = (rawPlan as ResolvedGroundedPlan).stepAtoms;
+  if (rawStepAtoms && rawStepAtoms.length > 0) {
+    for (const atom of rawStepAtoms) {
+      const anchor = atom.sourceAnchor;
+      if (!anchor) {
+        renderedSteps.push(atom.text);
+        continue;
+      }
 
-      if (artifactType === "references") {
-        const section = analysis.sections.find((s) => s.id === artifactId || slugify(s.heading) === artifactId);
-        if (section) {
-          const body = section.text.split("\n").slice(1).join("\n").trim();
-          if (body.length >= 20) {
-            usedPaths.add(targetPath);
-            const canonicalBody = neutralizeRelativeLinks(body);
+      if (anchor.kind === "section") {
+        let allocated = allocatedRefs.find(
+          (r) => r.section.startLine === anchor.startLine,
+        );
+        if (!allocated) {
+          const section =
+            analysis.sections.find((s) => s.startLine === anchor.startLine) ??
+            analysis.sections.find((s) => s.heading === anchor.heading && s.id === anchor.sectionId) ??
+            analysis.sections.find((s) => s.heading === anchor.heading);
+          if (section) {
+            const body = section.text.split("\n").slice(1).join("\n").trim();
+            if (body.length >= 20) {
+              let path = `references/${section.id}.md`;
+              let n = 2;
+              while (usedPaths.has(path)) path = `references/${section.id}-${n++}.md`;
+              usedPaths.add(path);
+              const canonicalBody = neutralizeRelativeLinks(body);
+              const content = [
+                `# ${section.heading}`,
+                "",
+                `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+                "",
+                canonicalBody,
+                "",
+                `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
+                "",
+              ].join("\n");
+              addFile(
+                path,
+                content,
+                `Verbatim source excerpt for the "${section.heading}" section, so the agent can consult the original guidance.`,
+                { extraction: `section "${section.heading}"`, sourceLines: [section.startLine, section.endLine], sourceHeading: section.heading },
+              );
+              referenceLinks.push({ path, heading: section.heading, range: `${section.startLine}–${section.endLine}` });
+              allocated = { section, body, path, canonicalBody };
+            }
+          }
+        }
+
+        if (allocated) {
+          renderedSteps.push(
+            `Consult the "${anchor.heading}" guidance in [${allocated.path}](${allocated.path}) and apply it to the task.`,
+          );
+        } else {
+          renderedSteps.push(atom.text);
+        }
+      } else if (anchor.kind === "procedure" && !isCodebase) {
+        let allocated = allocatedWfs.find(
+          (w) => w.proc.line === anchor.line || w.proc.title === anchor.title,
+        );
+        if (!allocated) {
+          const proc =
+            analysis.procedures.find((p) => p.line === anchor.line) ??
+            analysis.procedures.find((p) => p.title === anchor.title);
+          if (proc) {
+            let path = `workflows/${slugify(proc.title)}.md`;
+            let n = 2;
+            while (usedPaths.has(path)) path = `workflows/${slugify(proc.title)}-${n++}.md`;
+            usedPaths.add(path);
+            const endLine = proc.steps[proc.steps.length - 1]!.line;
+            const canonicalSteps = proc.steps.map((step) => neutralizeRelativeLinks(step.text));
             const content = [
-              `# ${section.heading}`,
+              `# ${proc.title}`,
               "",
-              `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+              `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
               "",
-              canonicalBody,
+              ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
               "",
-              `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
+            ].join("\n");
+            addFile(
+              path,
+              content,
+              `Executable ${proc.steps.length}-step procedure "${proc.title}" detected in the source.`,
+              { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
+            );
+            workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+            allocated = { proc, path, canonicalSteps };
+          }
+        }
+
+        if (allocated) {
+          renderedSteps.push(
+            `Follow the documented procedure "${anchor.title}" (${anchor.stepCount} steps) — see [${allocated.path}](${allocated.path}).`,
+          );
+        } else {
+          renderedSteps.push(atom.text);
+        }
+      }
+    }
+  }
+
+  // Fallback for callers that passed steps without stepAtoms (e.g. manual plan or direct tests)
+  let stepsToUse: string[];
+  if (renderedSteps.length > 0) {
+    stepsToUse = renderedSteps;
+  } else if (rawPlan.steps.length > 0 || isCodebase) {
+    stepsToUse = rawPlan.steps;
+    // Backward compatibility: if steps contain Markdown links to unallocated files, materialize them
+    const linkRe = /\[(?:[^\]]*)\]\(((?:references|workflows)\/([a-z0-9_.-]+)\.md)\)/g;
+    for (const step of stepsToUse) {
+      for (const m of step.matchAll(linkRe)) {
+        const targetPath = m[1]!;
+        const artifactId = m[2]!;
+        if (usedPaths.has(targetPath)) continue;
+        if (targetPath.startsWith("references/")) {
+          const section = analysis.sections.find((s) => s.id === artifactId || slugify(s.heading) === artifactId);
+          if (section) {
+            const body = section.text.split("\n").slice(1).join("\n").trim();
+            if (body.length >= 20) {
+              usedPaths.add(targetPath);
+              const canonicalBody = neutralizeRelativeLinks(body);
+              const content = [
+                `# ${section.heading}`,
+                "",
+                `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+                "",
+                canonicalBody,
+                "",
+                `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
+                "",
+              ].join("\n");
+              addFile(
+                targetPath,
+                content,
+                `Verbatim source excerpt for the "${section.heading}" section, so the agent can consult the original guidance.`,
+                { extraction: `section "${section.heading}"`, sourceLines: [section.startLine, section.endLine], sourceHeading: section.heading },
+              );
+              referenceLinks.push({ path: targetPath, heading: section.heading, range: `${section.startLine}–${section.endLine}` });
+            }
+          }
+        } else if (targetPath.startsWith("workflows/") && !isCodebase) {
+          const proc = analysis.procedures.find((p) => slugify(p.title) === artifactId);
+          if (proc) {
+            usedPaths.add(targetPath);
+            const endLine = proc.steps[proc.steps.length - 1]!.line;
+            const canonicalSteps = proc.steps.map((step) => neutralizeRelativeLinks(step.text));
+            const content = [
+              `# ${proc.title}`,
+              "",
+              `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+              "",
+              ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
               "",
             ].join("\n");
             addFile(
               targetPath,
               content,
-              `Verbatim source excerpt for the "${section.heading}" section, so the agent can consult the original guidance.`,
-              { extraction: `section "${section.heading}"`, sourceLines: [section.startLine, section.endLine], sourceHeading: section.heading },
+              `Documented procedure for "${proc.title}", with verbatim steps from the source.`,
+              { extraction: `procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
             );
-            referenceLinks.push({ path: targetPath, heading: section.heading, range: `${section.startLine}–${section.endLine}` });
+            workflowLinks.push({ path: targetPath, title: proc.title, stepCount: proc.steps.length });
           }
-        }
-      } else if (artifactType === "workflows" && !isCodebase) {
-        const proc = analysis.procedures.find((p) => slugify(p.title) === artifactId);
-        if (proc) {
-          usedPaths.add(targetPath);
-          const endLine = proc.steps[proc.steps.length - 1]!.line;
-          const canonicalSteps = proc.steps.map((step) => neutralizeRelativeLinks(step.text));
-          const content = [
-            `# ${proc.title}`,
-            "",
-            `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
-            "",
-            ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
-            "",
-          ].join("\n");
-          addFile(
-            targetPath,
-            content,
-            `Documented procedure for "${proc.title}", with verbatim steps from the source.`,
-            { extraction: `procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
-          );
-          workflowLinks.push({ path: targetPath, title: proc.title, stepCount: proc.steps.length });
         }
       }
     }
+  } else {
+    stepsToUse = derivePlanFromAnalysis(analysis).steps;
   }
+
+  const plan: SkillPlan = {
+    name,
+    displayName,
+    description,
+    whenToUse: rawPlan.whenToUse.length > 0 || isCodebase ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
+    inputs: rawPlan.inputs.length > 0 || isCodebase ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
+    steps: dedupe(stepsToUse).slice(0, 20),
+    constraints: rawPlan.constraints,
+    verification: rawPlan.verification,
+    pitfalls: rawPlan.pitfalls,
+  };
 
   // --- Example files from substantial fenced code blocks.
   for (const block of analysis.codeBlocks.filter((b) => b.code.trim().split("\n").length >= 3).slice(0, 8)) {
