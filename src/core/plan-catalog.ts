@@ -65,17 +65,77 @@ export const ProviderProposalSchema = z
   .object({
     name: z.string().max(200).optional(),
     displayName: z.string().max(200).optional(),
-    selections: z.object({
-      whenToUse: z.array(z.string().max(64)).max(12).default([]),
-      inputs: z.array(z.string().max(64)).max(12).default([]),
-      steps: z.array(z.string().max(64)).max(20).default([]),
-      constraints: z.array(z.string().max(64)).max(12).default([]),
-      verification: z.array(z.string().max(64)).max(12).default([]),
-      pitfalls: z.array(z.string().max(64)).max(12).default([]),
-    }),
+    selections: z
+      .object({
+        whenToUse: z.array(z.string().max(64)).max(12).default([]),
+        inputs: z.array(z.string().max(64)).max(12).default([]),
+        steps: z.array(z.string().max(64)).max(20).default([]),
+        constraints: z.array(z.string().max(64)).max(12).default([]),
+        verification: z.array(z.string().max(64)).max(12).default([]),
+        pitfalls: z.array(z.string().max(64)).max(12).default([]),
+      })
+      .strict(),
   })
   .strict();
 export type ProviderProposal = z.infer<typeof ProviderProposalSchema>;
+
+const KNOWN_TOP_KEYS = new Set(["name", "displayName", "selections"]);
+const KNOWN_SELECTION_KEYS = new Set<string>(GROUNDED_SECTIONS);
+
+/**
+ * Sanitize a Zod issue path to ensure provider-controlled key names are NEVER
+ * echoed in error paths or diagnostics. Only statically known schema properties
+ * and numeric indices are retained; unknown keys become `(unknown)`.
+ */
+export function sanitizeSchemaPath(path: (string | number)[]): string {
+  if (path.length === 0) return "(root)";
+  const segments: string[] = [];
+  for (let i = 0; i < path.length; i++) {
+    const segment = path[i];
+    if (typeof segment === "number") {
+      segments.push(`[${segment}]`);
+    } else if (typeof segment === "string" && i === 0 && KNOWN_TOP_KEYS.has(segment)) {
+      segments.push(segment);
+    } else if (
+      typeof segment === "string" &&
+      i === 1 &&
+      path[0] === "selections" &&
+      KNOWN_SELECTION_KEYS.has(segment)
+    ) {
+      segments.push(`.${segment}`);
+    } else {
+      segments.push(i === 0 ? "(unknown)" : ".(unknown)");
+    }
+  }
+  return segments.join("").replace(/^\./, "");
+}
+
+/**
+ * Format schema validation issues without ever echoing raw issue messages,
+ * unrecognized key names, or provider-supplied values. This guarantees
+ * diagnostics remain secret-safe by construction even if an endpoint reflects
+ * the client's Bearer token as an unexpected JSON key or value.
+ */
+export function formatProviderProposalSchemaIssues(error: z.ZodError): string {
+  return error.issues
+    .slice(0, 5)
+    .map((issue) => {
+      const safePath = sanitizeSchemaPath(issue.path);
+      switch (issue.code) {
+        case "unrecognized_keys":
+          return `${safePath}: unrecognized field(s)`;
+        case "invalid_type":
+          return `${safePath}: expected ${issue.expected}, received ${issue.received}`;
+        case "too_big":
+          return `${safePath}: exceeds maximum ${issue.type} of ${issue.maximum}`;
+        case "too_small":
+          return `${safePath}: does not meet minimum ${issue.type} of ${issue.minimum}`;
+        default:
+          return `${safePath}: invalid value`;
+      }
+    })
+    .join("; ");
+}
 
 /** Build the deterministic catalog from an already-derived trusted plan. */
 export function catalogFromPlan(plan: SkillPlan): GroundedCatalog {
@@ -215,10 +275,7 @@ export function resolveProviderProposal(
 ): SkillPlan {
   const parsed = ProviderProposalSchema.safeParse(proposalUnknown);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .slice(0, 5)
-      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-      .join("; ");
+    const issues = formatProviderProposalSchemaIssues(parsed.error);
     throw new ProviderError(
       `Provider proposal did not match the grounded selection schema: ${issues}. Providers must return selections over known grounded atom IDs, not free-text instructions.`,
       "provider_schema_mismatch",

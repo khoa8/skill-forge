@@ -12,6 +12,7 @@
 import {
   ProviderProposalSchema,
   formatCatalogForPrompt,
+  formatProviderProposalSchemaIssues,
   prepareProviderCatalog,
   MAX_PROVIDER_SOURCE_CHARS,
   type ProviderProposal,
@@ -247,14 +248,10 @@ export class OpenAICompatibleProvider implements GenerationProvider {
 
     const parsed = ProviderProposalSchema.safeParse(rawJson);
     if (!parsed.success) {
-      const issues = parsed.error.issues
-        .slice(0, 5)
-        .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-        .join("; ");
+      const issues = formatProviderProposalSchemaIssues(parsed.error);
       throw new ProviderError(
         `Model output did not match the grounded selection schema: ${issues}. Providers must return selections over known grounded atom IDs, not free-text instructions.`,
         "provider_schema_mismatch",
-        redactSecret(JSON.stringify(rawJson), this.apiKey),
       );
     }
 

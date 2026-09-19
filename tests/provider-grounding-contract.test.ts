@@ -15,6 +15,7 @@ import {
   catalogFromPlan,
   resolveProviderProposal,
   prepareProviderCatalog,
+  sanitizeSchemaPath,
   MAX_PROVIDER_SOURCE_CHARS,
   type GroundedCatalog,
 } from "../src/core/plan-catalog.js";
@@ -661,4 +662,283 @@ describe("R6 — provider verification never prints/returns echoed API key (F-33
     expect(pipelineError!.message).toContain("selections.steps[0]");
   });
 });
+
+describe("R7 — provider.generate schema mismatch never exposes echoed API key (F-33-02-R2)", () => {
+  it("rejects proposal with unexpected key named as fake API key without leaking it into error, detail, or JSON serialization", async () => {
+    const secretKey = "sk-skillforge-schema-reflection-secret-7D21";
+    const provider = new OpenAICompatibleProvider({
+      id: "glm",
+      apiKey: secretKey,
+      baseUrl: "https://provider.example.test/v1",
+      model: "test-model",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    [secretKey]: "attacker-value",
+                    selections: {
+                      whenToUse: [],
+                      inputs: [],
+                      steps: [],
+                      constraints: [],
+                      verification: [],
+                      pitfalls: [],
+                    },
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+
+    const normalized = normalizeSource({
+      type: "text",
+      name: "sample-doc",
+      content: DOC_SOURCE,
+    });
+    const analysis = analyzeSource(normalized);
+    const prep = prepareProviderCatalog(normalized, analysis, { offline: false });
+
+    let caughtError: ProviderError | null = null;
+    try {
+      await provider.generate({
+        source: prep.providerSource,
+        analysis: prep.providerAnalysis,
+        catalog: prep.catalog,
+      });
+    } catch (err) {
+      caughtError = err as ProviderError;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError!.code).toBe("provider_schema_mismatch");
+    expect(caughtError!.message).not.toContain(secretKey);
+    expect(caughtError!.detail).toBeUndefined();
+    expect(JSON.stringify(caughtError)).not.toContain(secretKey);
+    expect(caughtError!.message).toContain("(root): unrecognized field(s)");
+  });
+});
+
+describe("R8 — resolveProviderProposal schema mismatch never exposes echoed API key (F-33-02-R2)", () => {
+  const normalized = normalizeSource({
+    type: "text",
+    name: "sample-doc",
+    content: DOC_SOURCE,
+  });
+  const analysis = analyzeSource(normalized);
+  const catalog = catalogFromPlan(derivePlanFromAnalysis(analysis));
+  const secretKey = "sk-skillforge-schema-reflection-secret-7D21";
+
+  it("rejects root-level unexpected key without leaking secret into message or serialized error", () => {
+    let caughtError: ProviderError | null = null;
+    try {
+      resolveProviderProposal(
+        {
+          [secretKey]: "reflected-secret-value",
+          selections: {
+            whenToUse: [],
+            inputs: [],
+            steps: [],
+            constraints: [],
+            verification: [],
+            pitfalls: [],
+          },
+        },
+        catalog,
+      );
+    } catch (err) {
+      caughtError = err as ProviderError;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError!.code).toBe("provider_schema_mismatch");
+    expect(caughtError!.message).not.toContain(secretKey);
+    expect(JSON.stringify(caughtError)).not.toContain(secretKey);
+    expect(caughtError!.message).toContain("(root): unrecognized field(s)");
+  });
+
+  it("rejects selections-level unexpected key without leaking secret into message or serialized error", () => {
+    let caughtError: ProviderError | null = null;
+    try {
+      resolveProviderProposal(
+        {
+          selections: {
+            [secretKey]: "reflected-secret-value",
+            whenToUse: [],
+            inputs: [],
+            steps: [],
+            constraints: [],
+            verification: [],
+            pitfalls: [],
+          },
+        },
+        catalog,
+      );
+    } catch (err) {
+      caughtError = err as ProviderError;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError!.code).toBe("provider_schema_mismatch");
+    expect(caughtError!.message).not.toContain(secretKey);
+    expect(JSON.stringify(caughtError)).not.toContain(secretKey);
+    expect(caughtError!.message).toContain("selections: unrecognized field(s)");
+  });
+});
+
+describe("R9 — verifyProvider never exposes echoed API key in schema mismatch error or steps (F-33-02-R2)", () => {
+  it("rejects verification when endpoint reflects key as unexpected schema property without leaking to result", async () => {
+    const secretKey = "sk-skillforge-schema-reflection-secret-7D21";
+    const result = await verifyProvider({
+      provider: "glm",
+      apiKey: secretKey,
+      baseUrl: "https://provider.example.test/v1",
+      model: "test-model",
+      sampleText: getSample("meridian-payments-api").content,
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    [secretKey]: "attacker-value",
+                    selections: {
+                      whenToUse: [],
+                      inputs: [],
+                      steps: [],
+                      constraints: [],
+                      verification: [],
+                      pitfalls: [],
+                    },
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(result.error).not.toContain(secretKey);
+    for (const step of result.steps) {
+      expect(step.detail).not.toContain(secretKey);
+    }
+    expect(JSON.stringify(result)).not.toContain(secretKey);
+    expect(result.error).toContain("(root): unrecognized field(s)");
+  });
+});
+
+describe("R10 — non-secret attacker-controlled keys are never reflected in schema mismatch diagnostics (F-33-02-R2)", () => {
+  const marker = "ATTACKER_CONTROLLED_DIAGNOSTIC_MARKER_6C91";
+
+  it("provider.generate never leaks attacker-controlled keys into error or detail", async () => {
+    const provider = new OpenAICompatibleProvider({
+      id: "glm",
+      apiKey: "test-api-key",
+      baseUrl: "https://provider.example.test/v1",
+      model: "test-model",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    [marker]: "malicious-payload",
+                    selections: {
+                      whenToUse: [],
+                      inputs: [],
+                      steps: [],
+                      constraints: [],
+                      verification: [],
+                      pitfalls: [],
+                    },
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+
+    const normalized = normalizeSource({
+      type: "text",
+      name: "sample-doc",
+      content: DOC_SOURCE,
+    });
+    const analysis = analyzeSource(normalized);
+    const prep = prepareProviderCatalog(normalized, analysis, { offline: false });
+
+    let caughtError: ProviderError | null = null;
+    try {
+      await provider.generate({
+        source: prep.providerSource,
+        analysis: prep.providerAnalysis,
+        catalog: prep.catalog,
+      });
+    } catch (err) {
+      caughtError = err as ProviderError;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError!.code).toBe("provider_schema_mismatch");
+    expect(caughtError!.message).not.toContain(marker);
+    expect(caughtError!.detail).toBeUndefined();
+    expect(JSON.stringify(caughtError)).not.toContain(marker);
+  });
+
+  it("resolveProviderProposal never leaks attacker-controlled keys into error", () => {
+    const normalized = normalizeSource({
+      type: "text",
+      name: "sample-doc",
+      content: DOC_SOURCE,
+    });
+    const analysis = analyzeSource(normalized);
+    const catalog = catalogFromPlan(derivePlanFromAnalysis(analysis));
+
+    let caughtError: ProviderError | null = null;
+    try {
+      resolveProviderProposal(
+        {
+          [marker]: "malicious-payload",
+          selections: {
+            whenToUse: [],
+            inputs: [],
+            steps: [],
+            constraints: [],
+            verification: [],
+            pitfalls: [],
+          },
+        },
+        catalog,
+      );
+    } catch (err) {
+      caughtError = err as ProviderError;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError!.code).toBe("provider_schema_mismatch");
+    expect(caughtError!.message).not.toContain(marker);
+    expect(JSON.stringify(caughtError)).not.toContain(marker);
+  });
+
+  it("sanitizeSchemaPath produces safe deterministic paths", () => {
+    expect(sanitizeSchemaPath([])).toBe("(root)");
+    expect(sanitizeSchemaPath(["name"])).toBe("name");
+    expect(sanitizeSchemaPath(["selections", "steps", 0])).toBe("selections.steps[0]");
+    expect(sanitizeSchemaPath([marker])).toBe("(unknown)");
+    expect(sanitizeSchemaPath(["selections", marker])).toBe("selections.(unknown)");
+    expect(sanitizeSchemaPath(["selections", "steps", 0, marker])).toBe("selections.steps[0].(unknown)");
+  });
+});
+
 
