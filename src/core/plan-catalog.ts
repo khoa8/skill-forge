@@ -22,6 +22,14 @@
 import { z } from "zod";
 import { ProviderError } from "./providers/types.js";
 import type { SkillPlan } from "./plan.js";
+import type { NormalizedSource, SourceAnalysis } from "./types.js";
+import { derivePlanFromAnalysis } from "./build.js";
+import { deriveCodebasePlan } from "./codebase/plan.js";
+import { analyzeSource } from "./analyze.js";
+import { sha256 } from "./util.js";
+
+/** Maximum normalized source characters transmitted to or analyzed for remote ordinary providers. */
+export const MAX_PROVIDER_SOURCE_CHARS = 60_000;
 
 export const GROUNDED_SECTIONS = [
   "whenToUse",
@@ -105,6 +113,87 @@ export function formatCatalogForPrompt(catalog: GroundedCatalog): string {
   return lines.join("\n");
 }
 
+/**
+ * Return the provider-visible view of a normalized source.
+ *
+ * For ordinary sources (non-codebase), remote providers are bounded to the
+ * first 60,000 characters of normalized text. Source content beyond this
+ * boundary must not be sent to the remote provider as raw text, nor may it
+ * feed the grounded catalog exposed to the model.
+ */
+export function providerVisibleSource(
+  source: NormalizedSource,
+  maxChars = MAX_PROVIDER_SOURCE_CHARS,
+): NormalizedSource {
+  if (source.repository || source.text.length <= maxChars) {
+    return source;
+  }
+  const boundedText = source.text.slice(0, maxChars);
+  return {
+    ...source,
+    text: boundedText,
+    lineCount: boundedText.split("\n").length,
+    sha256: sha256(boundedText),
+  };
+}
+
+export interface PreparedCatalogContext {
+  catalog: GroundedCatalog;
+  /** Provider-visible source view (bounded for ordinary remote providers; full for offline or codebase). */
+  providerSource: NormalizedSource;
+  /** Analysis matching providerSource. */
+  providerAnalysis: SourceAnalysis;
+}
+
+/**
+ * Shared preparation of the provider-visible catalog and source context.
+ *
+ * Ensures remote providers and the downstream resolver agree on the exact
+ * same effective catalog:
+ * - Codebase mode: safe structural orientation plan from structured repository facts.
+ * - Offline providers (mock): full deterministic catalog without truncation.
+ * - Ordinary remote providers: catalog derived strictly from the provider-visible
+ *   source prefix (<=60k chars).
+ */
+export function prepareProviderCatalog(
+  source: NormalizedSource,
+  analysis: SourceAnalysis,
+  options: {
+    offline: boolean;
+    requestedName?: string;
+  },
+): PreparedCatalogContext {
+  if (source.repository) {
+    const plan = deriveCodebasePlan(source.repository, options.requestedName);
+    const catalog = catalogFromPlan(plan);
+    return {
+      catalog,
+      providerSource: source,
+      providerAnalysis: analysis,
+    };
+  }
+
+  if (options.offline) {
+    const plan = derivePlanFromAnalysis(analysis);
+    const catalog = catalogFromPlan(plan);
+    return {
+      catalog,
+      providerSource: source,
+      providerAnalysis: analysis,
+    };
+  }
+
+  const providerSource = providerVisibleSource(source);
+  const providerAnalysis = providerSource === source ? analysis : analyzeSource(providerSource);
+  const plan = derivePlanFromAnalysis(providerAnalysis);
+  const catalog = catalogFromPlan(plan);
+  return {
+    catalog,
+    providerSource,
+    providerAnalysis,
+  };
+}
+
 const ATOM_ID_RE = /^(whenToUse|inputs|steps|constraints|verification|pitfalls)-(\d+)$/;
 
 /**
@@ -112,7 +201,8 @@ const ATOM_ID_RE = /^(whenToUse|inputs|steps|constraints|verification|pitfalls)-
  *
  * 1. Validates the proposal shape (`provider_schema_mismatch` on failure).
  * 2. Resolves every ID against the catalog.
- * 3. Rejects malformed/unknown IDs with `provider_unknown_atom`.
+ * 3. Rejects malformed/unknown IDs with `provider_unknown_atom`. Diagnostics
+ *    never echo raw provider-controlled values (secret-safe by construction).
  * 4. Returns the resolved grounded `SkillPlan` (no provider prose copied).
  *
  * Empty selections are preserved as empty: the builder applies its existing
@@ -145,23 +235,29 @@ export function resolveProviderProposal(
   };
   for (const section of GROUNDED_SECTIONS) {
     const seen = new Set<string>();
-    for (const rawId of proposal.selections[section]) {
+    const sectionSelections = proposal.selections[section];
+    for (let i = 0; i < sectionSelections.length; i++) {
+      const rawId = sectionSelections[i]!;
       const id = rawId.trim();
       const m = id.match(ATOM_ID_RE);
       if (!m || m[1] !== section) {
         throw new ProviderError(
-          `Unknown grounded atom ID "${rawId}" in selections.${section}: expected "<section>-<index>" for section "${section}" (e.g. "${section}-0"). Provider selections must reference only catalog atom IDs.`,
+          `Unknown grounded atom reference at selections.${section}[${i}]: expected "<section>-<index>" format for section "${section}" (e.g. "${section}-0"). Provider selections must reference only catalog atom IDs.`,
           "provider_unknown_atom",
-          { section, id: rawId },
+          { section, index: i },
         );
       }
       const atom = catalog.byId.get(id);
       if (!atom || atom.section !== section) {
         const max = catalog.bySection[section].length;
+        const validRange =
+          max > 0
+            ? `section "${section}" has ${max} atom(s), valid IDs "${section}-0" through "${section}-${max - 1}"`
+            : `section "${section}" has 0 atoms in the current deterministic catalog`;
         throw new ProviderError(
-          `Unknown grounded atom ID "${rawId}" in selections.${section}: no such atom in the deterministic catalog (section "${section}" has ${max} atom(s), valid IDs ${section}-0..${section}-${Math.max(0, max - 1)}). Provider selections must reference only catalog atom IDs.`,
+          `Unknown grounded atom reference at selections.${section}[${i}]: no matching atom in the deterministic catalog (${validRange}). Provider selections must reference only catalog atom IDs.`,
           "provider_unknown_atom",
-          { section, id: rawId },
+          { section, index: i },
         );
       }
       if (seen.has(id)) continue;

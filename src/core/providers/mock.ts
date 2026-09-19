@@ -23,10 +23,13 @@ export class MockProvider implements GenerationProvider {
     // deterministic grounded catalog — no privileged bypass. The mock
     // deterministically selects every catalog atom in order, so resolution
     // reproduces the trusted deterministic plan exactly.
-    const deterministicPlan = repository
-      ? deriveCodebasePlan(repository, requestedName)
-      : derivePlanFromAnalysis(analysis);
-    const catalog = catalogFromPlan(deterministicPlan);
+    const catalog =
+      input.catalog ??
+      catalogFromPlan(
+        repository
+          ? deriveCodebasePlan(repository, requestedName)
+          : derivePlanFromAnalysis(analysis),
+      );
     const selections = {
       whenToUse: catalog.bySection.whenToUse.map((a) => a.id),
       inputs: catalog.bySection.inputs.map((a) => a.id),

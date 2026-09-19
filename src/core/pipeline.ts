@@ -16,9 +16,8 @@ import type {
 } from "./types.js";
 import { normalizeSource, IngestError } from "./ingest.js";
 import { analyzeSource } from "./analyze.js";
-import { buildCanonicalSkill, derivePlanFromAnalysis } from "./build.js";
-import { deriveCodebasePlan } from "./codebase/plan.js";
-import { catalogFromPlan, resolveProviderProposal } from "./plan-catalog.js";
+import { buildCanonicalSkill } from "./build.js";
+import { prepareProviderCatalog, resolveProviderProposal } from "./plan-catalog.js";
 import { validatePackage } from "./validate.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
 import type { PipelineStage } from "./plan.js";
@@ -168,21 +167,25 @@ export async function* runPipeline(
         model: options.model,
       },
     );
-    // Grounded selection contract (F-01): deterministic trusted code authors
-    // the catalog; the provider only selects/orders atom IDs; shared runtime
-    // code resolves every ID before the canonical builder runs.
-    const deterministicPlan = normalized.repository
-      ? deriveCodebasePlan(normalized.repository, options.requestedName)
-      : derivePlanFromAnalysis(analysis);
-    const catalog = catalogFromPlan(deterministicPlan);
+    // Grounded selection contract (F-01 / F-33-01): deterministic trusted code
+    // prepares the provider-visible grounded catalog. For ordinary remote providers,
+    // the catalog is derived strictly from the provider-visible prefix (<=60k chars),
+    // while the offline mock and local package builder retain the full source analysis.
+    // The provider only selects/orders atom IDs; shared runtime code resolves
+    // every ID against the exact same prepared catalog.
+    const prep = prepareProviderCatalog(normalized, analysis, {
+      offline: provider.offline,
+      requestedName: options.requestedName,
+    });
     const proposal = await provider.generate({
-      source: normalized,
-      analysis,
+      source: prep.providerSource,
+      analysis: prep.providerAnalysis,
+      catalog: prep.catalog,
       repository: normalized.repository,
       requestedName: options.requestedName,
       signal: options.signal,
     });
-    const plan = resolveProviderProposal(proposal, catalog);
+    const plan = resolveProviderProposal(proposal, prep.catalog);
     skill = buildCanonicalSkill(normalized, analysis, plan, provider.id);
     skill.meta.generatedAt = new Date().toISOString();
     timings.push({ stage: "generate", ms: Date.now() - t0, ok: true });

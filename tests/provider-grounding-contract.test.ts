@@ -14,11 +14,13 @@ import { repositoryContextJson } from "../src/core/codebase/provider-context.js"
 import {
   catalogFromPlan,
   resolveProviderProposal,
+  prepareProviderCatalog,
+  MAX_PROVIDER_SOURCE_CHARS,
   type GroundedCatalog,
 } from "../src/core/plan-catalog.js";
 import { MockProvider } from "../src/core/providers/mock.js";
 import { OpenAICompatibleProvider } from "../src/core/providers/openai-compatible.js";
-import type { GenerationProvider, GenerateInput } from "../src/core/providers/types.js";
+import { ProviderError, type GenerationProvider, type GenerateInput } from "../src/core/providers/types.js";
 import { validatePackage } from "../src/core/validate.js";
 import { verifyProvider } from "../src/core/verify.js";
 import { getSample } from "../src/core/samples.js";
@@ -119,7 +121,7 @@ describe("T2 — unknown atom ID fails", () => {
           { selections: { whenToUse: [], inputs: [], steps: [bad], constraints: [], verification: [], pitfalls: [] } },
           catalog,
         ),
-      ).toThrowError(/Unknown grounded atom ID.*selections\.steps/s);
+      ).toThrowError(/Unknown grounded atom (?:reference|ID).*selections\.steps/s);
     }
     // Well-formed but out-of-range ID for the right section also fails.
     expect(() =>
@@ -127,7 +129,7 @@ describe("T2 — unknown atom ID fails", () => {
         { selections: { whenToUse: ["whenToUse-999"], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] } },
         catalog,
       ),
-    ).toThrowError(/provider_unknown_atom|Unknown grounded atom ID/);
+    ).toThrowError(/provider_unknown_atom|Unknown grounded atom (?:reference|ID)/);
   });
 
   it("no grounded build succeeds from an unknown-ID proposal", () => {
@@ -387,3 +389,276 @@ describe("catalog determinism", () => {
     expect(a.atoms).toEqual(b.atoms);
   });
 });
+
+describe("R1 — ordinary-source tail content does not leave through catalog (F-33-01)", () => {
+  it("request body does not contain source-derived material from beyond 60,000 characters", async () => {
+    const prefix = "# Head Guide\n\n" + "harmless line of instructional prose for testing.\n\n".repeat(1500);
+    const tailSecret = "SKILLFORGE_TAIL_SECRET_9F0A";
+    const tailSection = `## Verify\n\nRun verification command:\n\n\`\`\`bash\necho ${tailSecret}\n\`\`\`\n`;
+    const fullContent = prefix + tailSection;
+
+    const normalized = normalizeSource({ type: "text", name: "large-doc", content: fullContent });
+    const markerIndex = normalized.text.indexOf(tailSecret);
+    expect(markerIndex).toBeGreaterThan(MAX_PROVIDER_SOURCE_CHARS);
+
+    // Verify that vulnerable full analysis would extract this tail command as a verification atom.
+    const fullAnalysis = analyzeSource(normalized);
+    const fullPlan = derivePlanFromAnalysis(fullAnalysis);
+    const fullCatalog = catalogFromPlan(fullPlan);
+    expect(fullCatalog.bySection.verification.some((a) => a.text.includes(tailSecret))).toBe(true);
+
+    let capturedBody = "";
+    const provider = new OpenAICompatibleProvider({
+      id: "glm",
+      apiKey: "test-key-safe",
+      baseUrl: "https://provider.example.test/v1",
+      model: "test-model",
+      fetchImpl: (async (_url: string, init: RequestInit) => {
+        capturedBody = typeof init.body === "string" ? init.body : "";
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ selections: { whenToUse: [], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] } }) } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const prep = prepareProviderCatalog(normalized, fullAnalysis, { offline: false });
+    await provider.generate({
+      source: prep.providerSource,
+      analysis: prep.providerAnalysis,
+      catalog: prep.catalog,
+    });
+
+    // Post-fix assert: the secret marker and tail section are completely absent from the provider request body.
+    expect(capturedBody).not.toContain(tailSecret);
+    expect(capturedBody).not.toContain("Tail Verification Section");
+
+    // Also verify when provider.generate is called directly without pre-prepared catalog (defense-in-depth fallback).
+    capturedBody = "";
+    await provider.generate({
+      source: normalized,
+      analysis: fullAnalysis,
+    });
+    expect(capturedBody).not.toContain(tailSecret);
+    expect(capturedBody).not.toContain("Tail Verification Section");
+  });
+});
+
+describe("R2 — provider and resolver use the same effective catalog (F-33-01)", () => {
+  it("proves catalog identity at the security boundary: tail-only atom is unavailable", async () => {
+    // Construct source where the ONLY verification command occurs after 60,000 chars.
+    const prefix = "# Head Guide\n\n" + "harmless line of instructional prose for testing.\n\n".repeat(1500);
+    const tailSecret = "SKILLFORGE_TAIL_SECRET_9F0A";
+    const tailSection = `## Verify\n\n\`\`\`bash\necho ${tailSecret}\n\`\`\`\n`;
+    const fullContent = prefix + tailSection;
+
+    const normalized = normalizeSource({ type: "text", name: "large-doc", content: fullContent });
+    expect(normalized.text.indexOf(tailSecret)).toBeGreaterThan(MAX_PROVIDER_SOURCE_CHARS);
+
+    const fullAnalysis = analyzeSource(normalized);
+    const prep = prepareProviderCatalog(normalized, fullAnalysis, { offline: false });
+
+    // The provider-visible catalog has NO verification atoms because no verification commands exist before 60k.
+    expect(prep.catalog.bySection.verification.length).toBe(0);
+
+    // Full analysis catalog DOES have the tail verification atom.
+    const fullPlan = derivePlanFromAnalysis(fullAnalysis);
+    const fullCatalog = catalogFromPlan(fullPlan);
+    expect(fullCatalog.bySection.verification.length).toBeGreaterThan(0);
+    const tailAtomId = fullCatalog.bySection.verification[0]!.id;
+
+    // A valid provider-visible atom resolves cleanly.
+    expect(prep.catalog.bySection.whenToUse.length).toBeGreaterThan(0);
+    const validWhenToUseId = prep.catalog.bySection.whenToUse[0]!.id;
+    const validProposal = {
+      selections: {
+        whenToUse: [validWhenToUseId],
+        inputs: [],
+        steps: [],
+        constraints: [],
+        verification: [],
+        pitfalls: [],
+      },
+    };
+    const resolved = resolveProviderProposal(validProposal, prep.catalog);
+    expect(resolved.whenToUse).toEqual([prep.catalog.bySection.whenToUse[0]!.text]);
+
+    // An atom derived only from content beyond 60k is rejected by the effective catalog.
+    const invalidProposal = {
+      selections: {
+        whenToUse: [],
+        inputs: [],
+        steps: [],
+        constraints: [],
+        verification: [tailAtomId],
+        pitfalls: [],
+      },
+    };
+    expect(() => resolveProviderProposal(invalidProposal, prep.catalog)).toThrowError(
+      /provider_unknown_atom|Unknown grounded atom reference/,
+    );
+  });
+});
+
+describe("R5 — unknown-ID error never contains raw secret-like ID (F-33-02)", () => {
+  it("shared resolver never echoes raw untrusted selection values in message or detail", () => {
+    const { catalog } = docsFixture();
+    const secretKey = "sk-skillforge-regression-secret-92D1";
+
+    let caughtError: ProviderError | null = null;
+    try {
+      resolveProviderProposal(
+        {
+          selections: {
+            whenToUse: [],
+            inputs: [],
+            steps: [secretKey],
+            constraints: [],
+            verification: [],
+            pitfalls: [],
+          },
+        },
+        catalog,
+      );
+    } catch (err) {
+      caughtError = err as ProviderError;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError!.code).toBe("provider_unknown_atom");
+    // Secret is NEVER echoed in error message.
+    expect(caughtError!.message).not.toContain(secretKey);
+    // Secret is NEVER echoed in error detail.
+    expect(JSON.stringify(caughtError!.detail)).not.toContain(secretKey);
+    // Actionable context identifies failing section and index.
+    expect(caughtError!.message).toContain("selections.steps[0]");
+    expect(caughtError!.detail).toEqual({ section: "steps", index: 0 });
+
+    // Also test malformed syntax and out-of-range ID without secret prefix.
+    for (const bad of ["arbitrary-untrusted-string", "steps-999"]) {
+      let err: ProviderError | null = null;
+      try {
+        resolveProviderProposal(
+          { selections: { whenToUse: [], inputs: [], steps: [bad], constraints: [], verification: [], pitfalls: [] } },
+          catalog,
+        );
+      } catch (e) {
+        err = e as ProviderError;
+      }
+      expect(err!.message).not.toContain(bad);
+      expect(JSON.stringify(err!.detail)).not.toContain(bad);
+      expect(err!.message).toContain("selections.steps[0]");
+      expect(err!.detail).toEqual({ section: "steps", index: 0 });
+    }
+  });
+});
+
+describe("R6 — provider verification never prints/returns echoed API key (F-33-02)", () => {
+  it("verifyProvider never exposes configured key echoed by endpoint as atom ID", async () => {
+    const secretKey = "sk-skillforge-regression-secret-92D1";
+    const result = await verifyProvider({
+      provider: "glm",
+      apiKey: secretKey,
+      baseUrl: "https://provider.example.test/v1",
+      model: "test-model",
+      sampleText: getSample("meridian-payments-api").content,
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    selections: {
+                      whenToUse: [],
+                      inputs: [],
+                      steps: [secretKey],
+                      constraints: [],
+                      verification: [],
+                      pitfalls: [],
+                    },
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeDefined();
+    // Secret key is not in result.error.
+    expect(result.error).not.toContain(secretKey);
+    // Secret key is not in any step detail.
+    for (const step of result.steps) {
+      expect(step.detail).not.toContain(secretKey);
+    }
+    // Entire serialized result is clean of the secret key.
+    expect(JSON.stringify(result)).not.toContain(secretKey);
+    // Result contains actionable error.
+    expect(result.error).toContain("selections.steps[0]");
+  });
+
+  it("pipeline proposal resolution never exposes echoed API key", async () => {
+    const secretKey = "sk-skillforge-regression-secret-92D1";
+    const source = {
+      type: "text" as const,
+      name: "sample-doc",
+      content: "# Meridian Test\n\nInstructional content for pipeline testing.\n",
+    };
+
+    const provider = new OpenAICompatibleProvider({
+      id: "glm",
+      apiKey: secretKey,
+      baseUrl: "https://provider.example.test/v1",
+      model: "test-model",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    selections: {
+                      whenToUse: [],
+                      inputs: [],
+                      steps: [secretKey],
+                      constraints: [],
+                      verification: [],
+                      pitfalls: [],
+                    },
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+
+    const normalized = normalizeSource(source);
+    const analysis = analyzeSource(normalized);
+    const prep = prepareProviderCatalog(normalized, analysis, { offline: false });
+    const proposal = await provider.generate({
+      source: prep.providerSource,
+      analysis: prep.providerAnalysis,
+      catalog: prep.catalog,
+    });
+
+    let pipelineError: ProviderError | null = null;
+    try {
+      resolveProviderProposal(proposal, prep.catalog);
+    } catch (err) {
+      pipelineError = err as ProviderError;
+    }
+
+    expect(pipelineError).not.toBeNull();
+    expect(pipelineError!.message).not.toContain(secretKey);
+    expect(JSON.stringify(pipelineError!.detail)).not.toContain(secretKey);
+    expect(pipelineError!.message).toContain("selections.steps[0]");
+  });
+});
+

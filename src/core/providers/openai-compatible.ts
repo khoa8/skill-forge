@@ -9,10 +9,14 @@
  * an actionable error instead of flowing into the package. Shared resolution
  * (`resolveProviderProposal`) enforces grounding downstream.
  */
-import { ProviderProposalSchema, catalogFromPlan, formatCatalogForPrompt, type ProviderProposal } from "../plan-catalog.js";
+import {
+  ProviderProposalSchema,
+  formatCatalogForPrompt,
+  prepareProviderCatalog,
+  MAX_PROVIDER_SOURCE_CHARS,
+  type ProviderProposal,
+} from "../plan-catalog.js";
 import { repositoryContextJson } from "../codebase/provider-context.js";
-import { derivePlanFromAnalysis } from "../build.js";
-import { deriveCodebasePlan } from "../codebase/plan.js";
 import { ProviderError, type GenerationProvider, type GenerateInput } from "./types.js";
 import { slugify, redactSecret } from "../util.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "../sources/body.js";
@@ -94,13 +98,20 @@ export class OpenAICompatibleProvider implements GenerationProvider {
   }
 
   async generate(input: GenerateInput): Promise<ProviderProposal> {
-    // Deterministic grounded catalog: the only factual authority. The model
-    // receives atom IDs + text so it can select/order, but its output must
-    // contain IDs only — free-text prose is rejected by the shared resolver.
-    const deterministicPlan = input.repository
-      ? deriveCodebasePlan(input.repository, input.requestedName)
-      : derivePlanFromAnalysis(input.analysis);
-    const catalog = catalogFromPlan(deterministicPlan);
+    // Use pre-prepared catalog and bounded source context if provided by caller;
+    // otherwise prepare them together from the same shared preparation path.
+    const prep = input.catalog
+      ? {
+          catalog: input.catalog,
+          providerSource: input.source,
+          providerAnalysis: input.analysis,
+        }
+      : prepareProviderCatalog(input.source, input.analysis, {
+          offline: false,
+          requestedName: input.requestedName,
+        });
+
+    const catalog = prep.catalog;
     const catalogBlock = formatCatalogForPrompt(catalog);
     // Codebase mode: the bounded repository analysis is structured DATA and
     // travels as compact, valid JSON (deterministic array caps). Raw inspected
@@ -118,7 +129,7 @@ export class OpenAICompatibleProvider implements GenerationProvider {
           "",
           "Source document:",
           "```",
-          truncate(input.source.text, 60_000),
+          truncate(prep.providerSource.text, MAX_PROVIDER_SOURCE_CHARS, input.source.text.length > MAX_PROVIDER_SOURCE_CHARS),
           "```",
         ];
     const userPrompt = [
@@ -255,8 +266,9 @@ export class OpenAICompatibleProvider implements GenerationProvider {
   }
 }
 
-function truncate(text: string, max: number): string {
-  return text.length <= max ? text : text.slice(0, max) + "\n…(truncated)";
+function truncate(text: string, max: number, wasTruncated = false): string {
+  if (text.length <= max && !wasTruncated) return text;
+  return text.slice(0, max) + "\n…(truncated)";
 }
 
 function extractMessageContent(payload: unknown): string | null {

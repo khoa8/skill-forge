@@ -14,8 +14,8 @@
 import { normalizeSource, IngestError } from "./ingest.js";
 import { analyzeSource } from "./analyze.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
-import { buildCanonicalSkill, derivePlanFromAnalysis } from "./build.js";
-import { catalogFromPlan, resolveProviderProposal } from "./plan-catalog.js";
+import { buildCanonicalSkill } from "./build.js";
+import { prepareProviderCatalog, resolveProviderProposal } from "./plan-catalog.js";
 import { validatePackage } from "./validate.js";
 import { getSample } from "./samples.js";
 
@@ -105,13 +105,17 @@ export async function verifyProvider(opts: VerifyOptions): Promise<VerifyResult>
       { provider, apiKey: opts.apiKey, baseUrl: opts.baseUrl, model: opts.model },
       opts.fetchImpl,
     );
-    const proposal = await providerInstance.generate({
-      source: normalized,
-      analysis,
+    const prep = prepareProviderCatalog(normalized, analysis, {
+      offline: providerInstance.offline,
       requestedName: opts.requestedName,
     });
-    const catalog = catalogFromPlan(derivePlanFromAnalysis(analysis));
-    plan = resolveProviderProposal(proposal, catalog);
+    const proposal = await providerInstance.generate({
+      source: prep.providerSource,
+      analysis: prep.providerAnalysis,
+      catalog: prep.catalog,
+      requestedName: opts.requestedName,
+    });
+    plan = resolveProviderProposal(proposal, prep.catalog);
     record("generate", true, `provider "${providerInstance.id}" returned a grounded selection (${plan.steps.length} steps, ${plan.whenToUse.length} when-to-use entries)`);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
