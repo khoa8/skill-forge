@@ -19,6 +19,12 @@ function eventsOf(text: string) {
 function stubGithubFetch(o: { files: { path: string; type?: string; size?: number }[]; truncated?: boolean; raw?: Record<string, string> }) {
   return (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       return new Response(JSON.stringify({ default_branch: "main", private: false, visibility: "public" }), {
         status: 200,

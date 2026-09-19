@@ -118,12 +118,17 @@ describe("GitHub source: streaming per-file cap", () => {
     return (async (input: string | URL | Request) => {
       const url = String(input);
       if (url.startsWith("https://api.github.com/")) {
-        return new Response(JSON.stringify(url.includes("/git/trees/") ? tree : { default_branch: "main", private: false, visibility: "public" }), {
+        const body = url.includes("/git/trees/")
+          ? tree
+          : url.includes("/commits/")
+            ? { sha: "a".repeat(40) }
+            : { default_branch: "main", private: false, visibility: "public" };
+        return new Response(JSON.stringify(body), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      const rawPath = url.replace(/^https:\/\/raw\.githubusercontent\.com\/acme\/widgets\/main\//, "");
+      const rawPath = url.replace(/^https:\/\/raw\.githubusercontent\.com\/acme\/widgets\/[^/]+\//, "");
       const body = bodies[rawPath] ?? bodies[decodeURIComponent(rawPath)]!;
       const res = new Response(body, { status: 200, headers: { "content-type": "text/plain" } });
       Object.defineProperty(res, "url", { value: url });

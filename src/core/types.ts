@@ -207,7 +207,14 @@ export const RepositoryAnalysis = z.object({
     url: z.string().min(1).max(300),
     owner: z.string().min(1).max(120),
     name: z.string().min(1).max(120),
+    /** The requested/logical ref (branch, tag, explicit SHA, or resolved
+     * default branch) — what the user asked for, for display. */
     ref: z.string().min(1).max(200),
+    /** The immutable commit SHA actually inspected (40 hex characters).
+     * Optional for backward compatibility: historical records predate
+     * snapshot pinning and never stored one — it must not be fabricated
+     * for them. Newly generated records always carry it. */
+    commitSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Subpath scope the analysis covers (e.g. "packages/a"); absent = whole
      * repository. All structured facts come from entries inside this scope. */
     scope: z.string().max(300).optional(),

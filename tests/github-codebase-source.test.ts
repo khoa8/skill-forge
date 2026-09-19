@@ -20,12 +20,15 @@ type FetchLog = { urls: string[]; apiHeaders: Record<string, string>; rawHeaders
 function codebaseFetch(o: {
   repo?: Record<string, unknown> | number;
   tree?: Record<string, unknown> | number;
+  /** Commit SHA returned by the ref-resolution request (GET …/commits/<ref>). */
+  commitSha?: string | number;
   raw?: Record<string, string>;
   failUrls?: string[];
   hangRaw?: boolean;
   log?: FetchLog;
 }) {
   const record = o.log;
+  const resolvedSha = typeof o.commitSha === "string" ? o.commitSha : "a".repeat(40);
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -33,6 +36,12 @@ function codebaseFetch(o: {
     if (url.startsWith("https://raw.githubusercontent.com/")) Object.assign(record?.rawHeaders ?? {}, headers);
     record?.urls.push(url);
     if (o.failUrls?.some((f) => url.includes(f))) throw new TypeError("network unreachable");
+    if (url.includes("/commits/")) {
+      if (typeof o.commitSha === "number") {
+        return new Response(JSON.stringify({ message: "Not Found" }), { status: o.commitSha, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ sha: resolvedSha }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       const status = typeof o.repo === "number" ? o.repo : 200;
       const body = typeof o.repo === "number" ? { message: "Not Found" } : (o.repo ?? { default_branch: "main", private: false, visibility: "public" });
@@ -192,6 +201,7 @@ describe("fetchGithubCodebaseSource (Fixture A — TypeScript service)", () => {
       owner: "acme",
       name: "fixture-service",
       ref: "main",
+      commitSha: "a".repeat(40),
     });
     expect(analysis.mode).toBe("codebase");
     expect(analysis.ecosystems).toContain("node");

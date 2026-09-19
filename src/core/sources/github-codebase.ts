@@ -594,6 +594,7 @@ import {
   combinedChunkBytes,
   combinedFileChunk,
   resolvePublicGithubRepo,
+  resolveCommitSha,
 } from "./github.js";
 import { buildRepositoryAnalysisFromFiles } from "../codebase/extract.js";
 
@@ -622,7 +623,17 @@ export interface GithubCodebaseSourceResult {
     content: string;
     repository: RepositoryAnalysis;
   };
-  repo: { owner: string; repo: string; ref: string; defaultBranchUsed: boolean };
+  repo: {
+    owner: string;
+    repo: string;
+    /** The requested/logical ref (branch, tag, explicit SHA, or resolved
+     * default branch) — what the user asked for, for display. */
+    ref: string;
+    /** The immutable commit SHA actually inspected: tree reconnaissance and
+     * every fetched file in this ingestion come from this revision. */
+    commitSha: string;
+    defaultBranchUsed: boolean;
+  };
   files: { path: string; content: string }[];
   notes: string[];
   analysis: RepositoryAnalysis;
@@ -635,9 +646,10 @@ interface GithubTreePayload {
 
 /**
  * Ingest a public GitHub repository as a codebase:
- * repo metadata → recursive tree (bounded) → eligibility/safety filtering →
+ * repo metadata → commit resolution (pin the requested ref to one immutable
+ * SHA) → recursive tree at that SHA (bounded) → eligibility/safety filtering →
  * deterministic ranked selection (diversity-capped) → bounded raw-content
- * fetches → structured RepositoryAnalysis + combined inert text.
+ * fetches at the same SHA → structured RepositoryAnalysis + combined inert text.
  */
 export async function fetchGithubCodebaseSource(
   rawUrl: string,
@@ -663,6 +675,7 @@ export async function fetchGithubCodebaseSource(
 
   // 1. Repository metadata discovery + publicness verification before any tree traversal.
   let ref: string;
+  let commitSha: string;
   let defaultBranchUsed: boolean;
   try {
     const repoRef = await resolvePublicGithubRepo(fetchImpl, ref0, {
@@ -675,10 +688,21 @@ export async function fetchGithubCodebaseSource(
     ref = repoRef.ref;
     defaultBranchUsed = repoRef.defaultBranchUsed;
 
-    // 2. One bounded recursive tree request.
+    // Pin the mutable ref to one immutable commit before any
+    // revision-sensitive read. Tree reconnaissance and every raw file below
+    // use commitSha — never `ref`.
+    commitSha = await resolveCommitSha(fetchImpl, apiBase, ref, {
+      timeoutMs,
+      token,
+      signal: deadline,
+      callerSignal: opts.signal,
+      maxJsonBytes: MAX_CODEBASE_TREE_BYTES,
+    });
+
+    // 2. One bounded recursive tree request, at the pinned revision.
     const treeRes = await apiFetch(
       fetchImpl,
-      `${apiBase}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+      `${apiBase}/git/trees/${commitSha}?recursive=1`,
       { timeoutMs, token, signal: deadline, callerSignal: opts.signal },
     );
     const treePayload = (await readBodyWithDeadline(treeRes, deadline, "json", MAX_CODEBASE_TREE_BYTES, opts.signal)) as GithubTreePayload;
@@ -772,7 +796,7 @@ export async function fetchGithubCodebaseSource(
         continue;
       }
       const rawPath = entry.path.split("/").map(encodeURIComponent).join("/");
-      const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${encodeURIComponent(ref)}/${rawPath}`;
+      const rawUrl2 = `https://raw.githubusercontent.com/${ref0.owner}/${encodeURIComponent(ref0.repo)}/${commitSha}/${rawPath}`;
       const fetched = await fetchRawFile(fetchImpl, rawUrl2, maxFileBytes, timeoutMs, deadline, opts.signal);
       if (opts.signal?.aborted) {
         throw new GithubCodebaseError("The request was aborted by the client.", "codebase_aborted");
@@ -859,6 +883,7 @@ export async function fetchGithubCodebaseSource(
         owner: ref0.owner,
         name: ref0.repo,
         ref,
+        commitSha,
         scope: ref0.path === "" ? undefined : ref0.path,
         treeLockfiles: reconEntries
           .filter((e) => e.type === "blob")
@@ -903,6 +928,12 @@ export async function fetchGithubCodebaseSource(
 
     const content = files.map((f) => combinedFileChunk(f.path, f.content)).join("\n\n");
     const label = `${ref0.owner}/${ref0.repo}`;
+    // Human-readable snapshot provenance alongside the structured
+    // `analysis.repository` / manifest record: the requested ref is kept for
+    // display while the exact inspected revision is recorded.
+    notes.push(
+      `Pinned ${label}@${ref} to commit ${commitSha} for this ingestion; tree reconnaissance and all file contents were read at that revision.`,
+    );
     return {
       input: {
         type: "github-codebase",
@@ -910,7 +941,7 @@ export async function fetchGithubCodebaseSource(
         content,
         repository: analysis,
       },
-      repo: { owner: ref0.owner, repo: ref0.repo, ref, defaultBranchUsed },
+      repo: { owner: ref0.owner, repo: ref0.repo, ref, commitSha, defaultBranchUsed },
       files,
       notes,
       analysis,

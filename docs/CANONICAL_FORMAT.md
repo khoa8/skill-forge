@@ -64,6 +64,7 @@ When the source was a GitHub repository in **codebase** mode, `source.repository
 "repository": {
   "url": "https://github.com/owner/repo",
   "owner": "owner", "name": "repo", "ref": "main",
+  "commitSha": "0123456789abcdef0123456789abcdef01234567",
   "mode": "codebase",
   "scope": "packages/a",
   "inspectedFiles": ["packages/a/package.json", "packages/a/src/index.ts", "…"],
@@ -72,7 +73,7 @@ When the source was a GitHub repository in **codebase** mode, `source.repository
 }
 ```
 
-`scope` names the `/tree/<ref>/<path>` subtree the analysis covers (absent = whole repository) — generated skills name that scope explicitly. `inspectedFiles` lists exactly the files SkillForge read; every other tree entry existed but was **not** inspected. The count fields are mandatory for the block: `treeBlobCount`, `candidateCount`, `selectedCount` (non-negative integers), `treeTruncated` (boolean), and `inspectedFiles` (unique path array), with `selectedCount === inspectedFiles.length ≤ candidateCount ≤ treeBlobCount` enforced by the deterministic validator — a deleted or mistyped field fails validation. Documentation-mode packages omit the block entirely, and packages generated from a `github-codebase` source must keep it: the validator fails a codebase-origin package whose manifest lost its repository provenance. The full structured analysis (languages, evidenced commands, conventions, testing evidence, uncertainty) is carried by the canonical source record, not the manifest.
+`ref` is the requested/logical ref (branch, tag, explicit SHA, or resolved default branch) kept for display; `commitSha` is the immutable commit SHA actually inspected — every ingestion resolves the requested ref once via the commits API and reads the repository tree plus all file contents at that commit, so a branch advancing mid-ingestion cannot mix revisions. `commitSha` is optional for backward compatibility (historical records predate snapshot pinning and never stored one; it is never fabricated for them), and when present must be a 40-character commit SHA — the deterministic validator fails a malformed value while accepting its absence. `scope` names the `/tree/<ref>/<path>` subtree the analysis covers (absent = whole repository) — generated skills name that scope explicitly. `inspectedFiles` lists exactly the files SkillForge read; every other tree entry existed but was **not** inspected. The count fields are mandatory for the block: `treeBlobCount`, `candidateCount`, `selectedCount` (non-negative integers), `treeTruncated` (boolean), and `inspectedFiles` (unique path array), with `selectedCount === inspectedFiles.length ≤ candidateCount ≤ treeBlobCount` enforced by the deterministic validator — a deleted or mistyped field fails validation. Documentation-mode packages omit the block entirely (their durable snapshot record is the provenance note naming the pinned commit), and packages generated from a `github-codebase` source must keep it: the validator fails a codebase-origin package whose manifest lost its repository provenance. The full structured analysis (languages, evidenced commands, conventions, testing evidence, uncertainty) is carried by the canonical source record, not the manifest.
 
 ### Evidenced commands (`RepositoryCommand`)
 

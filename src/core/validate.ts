@@ -847,6 +847,15 @@ const repositoryProvenance = check("repository-provenance", "Repository provenan
   if (typeof r.mode === "string" && r.mode !== "codebase") {
     outcomes.push(fail(`manifest.json source.repository.mode must be "codebase" (got "${r.mode}").`, "manifest.json"));
   }
+  // Immutable snapshot provenance: optional for backward compatibility with
+  // historical records that predate pinning (absence is not an error), but a
+  // present value must be a well-formed commit SHA — a mistyped revision
+  // identity fails validation rather than passing as provenance.
+  if (r.commitSha !== undefined) {
+    if (typeof r.commitSha !== "string" || !/^[0-9a-f]{40}$/i.test(r.commitSha)) {
+      outcomes.push(fail("manifest.json source.repository.commitSha must be a 40-character commit SHA when present.", "manifest.json"));
+    }
+  }
   if (!Array.isArray(r.inspectedFiles)) {
     outcomes.push(fail("manifest.json source.repository.inspectedFiles must be an array of inspected file paths.", "manifest.json"));
   } else {

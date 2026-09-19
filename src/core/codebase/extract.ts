@@ -558,7 +558,10 @@ export interface AnalysisFromFilesInput {
   url: string;
   owner: string;
   name: string;
+  /** The requested/logical ref, kept for display. */
   ref: string;
+  /** The immutable commit SHA actually inspected (tree + file reads). */
+  commitSha?: string;
   /** Subpath scope the analysis covers; undefined = whole repository. */
   scope?: string;
   /** Paths of metadata-only lockfiles in the safe scoped reconnaissance set
@@ -679,6 +682,7 @@ export function buildRepositoryAnalysisFromFiles(
       owner: input.owner.slice(0, 100),
       name: input.name.slice(0, 100),
       ref: input.ref.slice(0, 100),
+      ...(input.commitSha ? { commitSha: input.commitSha } : {}),
       ...(input.scope ? { scope: input.scope.slice(0, 300) } : {}),
     },
     mode: "codebase",

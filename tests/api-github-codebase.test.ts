@@ -30,6 +30,9 @@ const CI = "name: ci\non: push\njobs:\n  b:\n    steps:\n      - run: npm ci\n  
 function stubCodebaseFetch(o: { repo?: number; tree?: Record<string, unknown> | number } = {}) {
   const impl = (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       const status = typeof o.repo === "number" ? o.repo : 200;
       const body = typeof o.repo === "number" ? { message: "Not Found" } : { default_branch: "main", private: false, visibility: "public" };
@@ -232,6 +235,8 @@ describe("GitHub codebase source via the API", () => {
       owner: "acme",
       name: "widget-service",
       mode: "codebase",
+      ref: "main",
+      commitSha: "a".repeat(40),
     });
   });
 });

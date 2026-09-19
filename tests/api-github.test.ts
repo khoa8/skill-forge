@@ -31,6 +31,9 @@ function stubFetch(options: {
 }) {
   const impl = (async (input: string | URL | Request) => {
     const url = String(input);
+    if (url.includes("/commits/")) {
+      return new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith("https://api.github.com/repos/") && !url.includes("/git/trees/")) {
       const status = typeof options.repo === "number" ? options.repo : 200;
       const body =
