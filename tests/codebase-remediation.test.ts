@@ -547,7 +547,7 @@ function providerHarness() {
     captured = { body, system: "" };
     return new Response(
       JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({ whenToUse: ["x"], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] }) } }],
+        choices: [{ message: { content: JSON.stringify({ selections: { whenToUse: [], inputs: [], steps: [], constraints: [], verification: [], pitfalls: [] } }) } }],
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );

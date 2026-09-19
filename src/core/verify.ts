@@ -5,8 +5,8 @@
  * "provider behavior verified against a live OpenAI-compatible endpoint".
  * Runs one small, bounded generation end to end:
  *
- *   normalize → analyze → provider.generate → plan schema check →
- *   canonical build → deterministic validation
+ *   normalize → analyze → provider.generate (selections) →
+ *   shared grounded resolution → canonical build → deterministic validation
  *
  * and reports success/failure with actionable diagnostics. Never logs or
  * returns credentials. The CLI wrapper lives in scripts/verify-provider.ts.
@@ -15,7 +15,8 @@ import { normalizeSource, IngestError } from "./ingest.js";
 import { analyzeSource } from "./analyze.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
 import { buildCanonicalSkill } from "./build.js";
-import { PlanSchema } from "./plan.js";
+import { prepareProviderCatalog, resolveProviderProposal } from "./plan-catalog.js";
+import { resolvedPlanContractIssue } from "./plan.js";
 import { validatePackage } from "./validate.js";
 import { getSample } from "./samples.js";
 
@@ -96,18 +97,27 @@ export async function verifyProvider(opts: VerifyOptions): Promise<VerifyResult>
   }
 
   // 3. Provider generation (the only step that can reach the network).
+  // Grounded selection contract (F-01): provider proposal → shared grounded
+  // resolution → canonical build. Old free-text proposals fail here and are
+  // never reported as verified.
   let plan;
   try {
     const providerInstance = resolveProvider(
       { provider, apiKey: opts.apiKey, baseUrl: opts.baseUrl, model: opts.model },
       opts.fetchImpl,
     );
-    plan = await providerInstance.generate({
-      source: normalized,
-      analysis,
+    const prep = prepareProviderCatalog(normalized, analysis, {
+      offline: providerInstance.offline,
       requestedName: opts.requestedName,
     });
-    record("generate", true, `provider "${providerInstance.id}" returned a plan (${plan.steps.length} steps, ${plan.whenToUse.length} when-to-use entries)`);
+    const proposal = await providerInstance.generate({
+      source: prep.providerSource,
+      analysis: prep.providerAnalysis,
+      catalog: prep.catalog,
+      requestedName: opts.requestedName,
+    });
+    plan = resolveProviderProposal(proposal, prep.catalog);
+    record("generate", true, `provider "${providerInstance.id}" returned a grounded selection (${plan.steps.length} steps, ${plan.whenToUse.length} when-to-use entries)`);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     record("generate", false, detail);
@@ -122,17 +132,27 @@ export async function verifyProvider(opts: VerifyOptions): Promise<VerifyResult>
     return { ...result, error: `Generation failed: ${detail}.${hint}` };
   }
 
-  // 4. Plan schema re-check (defense in depth; the adapter validates too).
-  const parsed = PlanSchema.safeParse(plan);
-  if (!parsed.success) {
-    const detail = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-    record("plan-schema", false, detail);
-    return { ...result, error: `Provider plan failed schema validation: ${detail}` };
+  // 4. Resolved-plan contract check. This step reports success ONLY when the
+  // authoritative PlanSchema check actually ran and passed on the resolved
+  // plan the builder is about to synthesize from — the same check the shared
+  // resolver enforces, so a violation can never be reported as verified.
+  const planContractIssue = resolvedPlanContractIssue(plan);
+  record(
+    "plan-schema",
+    planContractIssue === null,
+    planContractIssue === null
+      ? "resolved plan satisfies PlanSchema (sections, item counts, item lengths)"
+      : `resolved plan violates PlanSchema: ${planContractIssue}`,
+  );
+  if (planContractIssue !== null) {
+    return {
+      ...result,
+      error: `Resolved plan contract check failed: ${planContractIssue}. This is an internal plan/catalog invariant failure; report it.`,
+    };
   }
-  record("plan-schema", true, "plan matches the SkillForge plan schema");
 
   // 5. Canonical build.
-  const skill = buildCanonicalSkill(normalized, analysis, parsed.data, provider);
+  const skill = buildCanonicalSkill(normalized, analysis, plan, provider);
   skill.meta.generatedAt = new Date().toISOString();
   record("build", true, `${skill.files.length} files, id "${skill.id}"`);
 

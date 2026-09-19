@@ -25,9 +25,18 @@ import type {
   SourceAnalysis,
 } from "./types.js";
 import type { SkillPlan } from "./plan.js";
-import { slugify, sha256 } from "./util.js";
-import { allocateReferences, allocateWorkflows, deriveEvalItems } from "./evals.js";
-export { neutralizeRelativeLinks } from "./evals.js";
+import { PLAN_LIMITS, clipPlanText, fitPlanItem, fitPlanSection } from "./plan.js";
+import type { ResolvedGroundedPlan, GroundedPlanAtom } from "./plan-catalog.js";
+import { slugify, sha256, formatCodeSpan, formatMetadataLabel, composeBoundedItem } from "./util.js";
+import { allocateReferences, allocateWorkflows, deriveEvalItems, neutralizeRelativeLinks } from "./evals.js";
+export { neutralizeRelativeLinks };
+
+/**
+ * Presentation budget for a quoted label (heading/title) inside a plan item.
+ * Far longer than any realistic heading, and small enough that every fixed
+ * template in `derivePlanFromAnalysis` provably fits its section limit.
+ */
+const PLAN_LABEL_CHARS = 240;
 
 export const GAP_NOTE =
   "> Not specified in the source material. SkillForge marked this gap instead of inventing content — verify against the primary documentation before relying on it.";
@@ -119,9 +128,14 @@ export function detectEnvVarInputs(analysis: SourceAnalysis): { token: string; l
 }
 
 /** Derive the deterministic plan the mock provider uses. */
-export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
+export function derivePlanFromAnalysis(analysis: SourceAnalysis): ResolvedGroundedPlan {
+  // Labels (titles/headings) are interpolated into fixed templates, so they
+  // are bounded *before* composition: the sentence structure (quotes, guidance
+  // clause, evidence list) stays intact and the result provably fits the
+  // resolved-plan contract. `fitPlanItem` remains a backstop only.
+  const title = clipPlanText(analysis.title, PLAN_LABEL_CHARS);
   const whenToUse: string[] = [
-    `Use this skill when the task involves ${analysis.title}.`,
+    fitPlanItem(`Use this skill when the task involves ${title}.`, PLAN_LIMITS.whenToUse.maxItemChars),
   ];
   if (analysis.intro.length > 0) {
     whenToUse.push(firstSentences(analysis.intro, 1, 240));
@@ -132,17 +146,57 @@ export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
   );
 
   const steps: string[] = [];
+  const stepAtoms: GroundedPlanAtom[] = [];
+  let stepIndex = 0;
+
   for (const { proc, path } of allocateWorkflows(analysis).slice(0, 6)) {
+    const procTitle = clipPlanText(proc.title, PLAN_LABEL_CHARS);
     steps.push(
-      `Follow the documented procedure "${proc.title}" (${proc.steps.length} steps) — see ${path}.`,
+      fitPlanItem(
+        `Follow the documented procedure "${procTitle}" (${proc.steps.length} steps) — see [${path}](${path}).`,
+        PLAN_LIMITS.steps.maxItemChars,
+      ),
     );
+    stepAtoms.push({
+      id: `steps-${stepIndex++}`,
+      section: "steps",
+      text: fitPlanItem(
+        `Follow the documented procedure "${procTitle}" (${proc.steps.length} steps).`,
+        PLAN_LIMITS.steps.maxItemChars,
+      ),
+      sourceAnchor: {
+        kind: "procedure",
+        title: proc.title,
+        line: proc.line,
+        stepCount: proc.steps.length,
+      },
+    });
   }
   const procedureTitles = new Set(analysis.procedures.map((p) => p.title.toLowerCase()));
   for (const { section, path } of allocateReferences(analysis).slice(0, 6)) {
     if (procedureTitles.has(section.heading.toLowerCase())) continue; // already covered by its workflow file
+    const heading = clipPlanText(section.heading, PLAN_LABEL_CHARS);
     steps.push(
-      `Consult the "${section.heading}" guidance in ${path} and apply it to the task.`,
+      fitPlanItem(
+        `Consult the "${heading}" guidance in [${path}](${path}) and apply it to the task.`,
+        PLAN_LIMITS.steps.maxItemChars,
+      ),
     );
+    stepAtoms.push({
+      id: `steps-${stepIndex++}`,
+      section: "steps",
+      text: fitPlanItem(
+        `Consult the "${heading}" section guidance and apply it to the task.`,
+        PLAN_LIMITS.steps.maxItemChars,
+      ),
+      sourceAnchor: {
+        kind: "section",
+        heading: section.heading,
+        startLine: section.startLine,
+        endLine: section.endLine,
+        sectionId: section.id,
+      },
+    });
   }
 
   const constraints: string[] = [];
@@ -169,7 +223,19 @@ export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
   const verifyStatementRe = /^\s*(?:\*\*)?(?:verify|confirm|check|make sure|ensure)\b/i;
   for (const cmd of analysis.commands) {
     if (verifyHeadingRe.test(cmd.heading) || verifyHeadingRe.test(cmd.raw)) {
-      verification.push(`\`${cmd.raw}\` (source line ${cmd.line}).`);
+      // Source-derived command bodies are rendered through the code-span
+      // boundary (backtick-safe) and are never shortened to fit: a truncated
+      // shell line is a *different* command. When one cannot be represented
+      // within the section contract it is referenced by source line instead,
+      // so nothing runnable and wrong is ever presented as authoritative.
+      const quoted = `${formatCodeSpan(cmd.raw)} (source line ${cmd.line}).`;
+      if (quoted.length <= PLAN_LIMITS.verification.maxItemChars) {
+        verification.push(quoted);
+      } else {
+        verification.push(
+          `Source line ${cmd.line} documents a verification command too long to quote here (${cmd.raw.length} characters); read it from the source material before relying on it.`,
+        );
+      }
     }
     if (verification.length >= 5) break;
   }
@@ -194,12 +260,17 @@ export function derivePlanFromAnalysis(analysis: SourceAnalysis): SkillPlan {
   }
 
   return {
-    whenToUse: dedupe(whenToUse).slice(0, 12),
-    inputs: dedupe(inputs).slice(0, 12),
-    steps: dedupe(steps).slice(0, 20),
-    constraints: dedupe(constraints).slice(0, 12),
-    verification: dedupe(verification).slice(0, 12),
-    pitfalls: dedupe(pitfalls).slice(0, 12),
+    // Backstop only: every item above is already composed from bounded
+    // ingredients (and command-bearing items are either representable or
+    // replaced by a bounded non-runnable reference), so this cannot shorten a
+    // command into a different command.
+    whenToUse: fitPlanSection(dedupe(whenToUse), PLAN_LIMITS.whenToUse.maxItemChars).slice(0, PLAN_LIMITS.whenToUse.maxItems),
+    inputs: fitPlanSection(dedupe(inputs), PLAN_LIMITS.inputs.maxItemChars).slice(0, PLAN_LIMITS.inputs.maxItems),
+    steps: fitPlanSection(dedupe(steps), PLAN_LIMITS.steps.maxItemChars).slice(0, PLAN_LIMITS.steps.maxItems),
+    stepAtoms,
+    constraints: fitPlanSection(dedupe(constraints), PLAN_LIMITS.constraints.maxItemChars).slice(0, PLAN_LIMITS.constraints.maxItems),
+    verification: fitPlanSection(dedupe(verification), PLAN_LIMITS.verification.maxItemChars).slice(0, PLAN_LIMITS.verification.maxItems),
+    pitfalls: fitPlanSection(dedupe(pitfalls), PLAN_LIMITS.pitfalls.maxItemChars).slice(0, PLAN_LIMITS.pitfalls.maxItems),
   };
 }
 
@@ -258,17 +329,39 @@ export function dedupe(items: string[]): string[] {
 }
 
 /**
- * Build the canonical package. `plan` should already be validated against
- * PlanSchema; deterministic gap-filling from the analysis augments empty plan
- * sections, and remaining gaps are rendered explicitly.
+ * Build the canonical package. `plan` must be a RESOLVED grounded plan:
+ * the normal path is provider proposal → shared grounded resolution
+ * (`resolveProviderProposal`) → resolved SkillPlan → this builder.
+ * Descriptions are always derived deterministically here and never trusted
+ * from provider output; deterministic gap-filling from the analysis augments
+ * empty plan sections, and remaining gaps are rendered explicitly.
  */
+function sanitizeDisplayName(raw: string | undefined, fallback: string): string {
+  // The fallback is untrusted metadata too: an ordinary source with no usable
+  // title falls back to the raw source name, and a provider may legitimately
+  // omit `displayName`. Render it through the same single-line boundary.
+  const safeFallback = formatMetadataLabel(fallback).slice(0, 120) || "Untitled skill";
+  const trimmed = raw?.trim();
+  if (!trimmed) return safeFallback;
+  // Display names are presentation titles only; collapse line breaks to prevent
+  // Markdown heading escaping into body blocks.
+  const firstLine = trimmed.split(/[\r\n\u2028\u2029]/)[0]?.trim();
+  return (firstLine || safeFallback).slice(0, 120);
+}
+
 export function buildCanonicalSkill(
   source: NormalizedSource,
   analysis: SourceAnalysis,
-  rawPlan: SkillPlan,
+  rawPlan: SkillPlan | ResolvedGroundedPlan,
   generatorId: string,
 ): CanonicalSkill {
   const isCodebase = source.sourceType === "github-codebase";
+
+  // Untrusted source identity, rendered once through the shared metadata
+  // boundary and reused at every presentation sink below. The RAW name stays
+  // authoritative in the manifest/persisted record (JSON escapes it
+  // structurally); only the rendered form is single-line and context-safe.
+  const sourceLabel = formatMetadataLabel(source.originalName);
 
   let name: string;
   let displayName: string;
@@ -276,44 +369,57 @@ export function buildCanonicalSkill(
 
   if (isCodebase) {
     const repo = source.repository;
-    const ownerName = repo ? `${repo.repository.owner}-${repo.repository.name}` : source.originalName;
-    const repoIdentity = repo ? `${repo.repository.owner}/${repo.repository.name}` : source.originalName;
+    const ownerName = repo ? `${repo.repository.owner}-${repo.repository.name}` : sourceLabel;
+    const repoIdentity = repo ? `${repo.repository.owner}/${repo.repository.name}` : sourceLabel;
     name = slugify(rawPlan.name?.trim() || ownerName, 48);
-    displayName = (rawPlan.displayName?.trim() || `${repoIdentity} — coding agent guide`).slice(0, 120);
+    displayName = sanitizeDisplayName(rawPlan.displayName, `${repoIdentity} — coding agent guide`);
 
-    if (rawPlan.description?.trim()) {
-      description = rawPlan.description.trim().slice(0, 1024);
-    } else {
-      const stackLabel = repo
-        ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
-          repo.ecosystems.slice(0, 3).join("/") ||
-          "unrecognized stack"
-        : "project";
-      const scopeLabel = repo?.repository.scope ? `the \`${repo.repository.scope}\` subtree of ` : "";
-      const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
-      description = `Coding-agent guidance for ${scopeLabel}${repoIdentity}: ${stackLabel}, derived from a ${countLabel}.`.slice(0, 1024);
-    }
+    // Descriptions are deterministic grounded authority: never trust
+    // provider-authored prose (F-01). Codebase descriptions derive from
+    // repository identity + bounded inspection counts only, composed from
+    // ingredient-bounded labels so a long scope/stack/identity cannot push the
+    // evidence attribution past the description bound or slice a rendered code
+    // span.
+    const stackLabel = repo
+      ? repo.languages.slice(0, 3).map((l) => l.name).join("/") ||
+        repo.ecosystems.slice(0, 3).join("/") ||
+        "unrecognized stack"
+      : "project";
+    const countLabel = repo ? `bounded inspection of ${repo.selection.selectedCount} file(s)` : "bounded repository inspection";
+    description = repo?.repository.scope
+      ? composeBoundedItem(
+          [
+            "Coding-agent guidance for the ",
+            " subtree of ",
+            ": ",
+            ` project, derived from a ${countLabel}.`,
+          ],
+          [
+            { kind: "span", raw: repo.repository.scope },
+            { kind: "plain", raw: repoIdentity },
+            { kind: "plain", raw: stackLabel },
+          ],
+          PLAN_LIMITS.description.maxItemChars,
+        )
+      : composeBoundedItem(
+          ["Coding-agent guidance for ", ": ", ` project, derived from a ${countLabel}.`],
+          [
+            { kind: "plain", raw: repoIdentity },
+            { kind: "plain", raw: stackLabel },
+          ],
+          PLAN_LIMITS.description.maxItemChars,
+        );
   } else {
     name = slugify(rawPlan.name?.trim() || analysis.title, 48);
-    displayName = (rawPlan.displayName?.trim() || analysis.title).slice(0, 120);
+    displayName = sanitizeDisplayName(rawPlan.displayName, analysis.title);
+    // Descriptions are deterministic grounded authority: never trust
+    // provider-authored prose (F-01). Ordinary docs derive from the source
+    // intro or a generic deterministic fallback.
     description = (
-      rawPlan.description?.trim() ||
       firstSentences(analysis.intro, 2, 500) ||
       `Working knowledge for ${analysis.title}, extracted by SkillForge.`
-    ).slice(0, 1024);
+    ).slice(0, PLAN_LIMITS.description.maxItemChars);
   }
-
-  const plan: SkillPlan = {
-    name,
-    displayName,
-    description,
-    whenToUse: rawPlan.whenToUse.length > 0 || isCodebase ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
-    inputs: rawPlan.inputs.length > 0 || isCodebase ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
-    steps: rawPlan.steps.length > 0 || isCodebase ? rawPlan.steps : derivePlanFromAnalysis(analysis).steps,
-    constraints: rawPlan.constraints,
-    verification: rawPlan.verification,
-    pitfalls: rawPlan.pitfalls,
-  };
 
   const files: SkillFile[] = [];
   const provenance: Provenance[] = [];
@@ -326,17 +432,18 @@ export function buildCanonicalSkill(
   // --- Reference files from top-level sections (verbatim source excerpts).
   const usedPaths = new Set<string>(["SKILL.md"]);
   const referenceLinks: { path: string; heading: string; range: string }[] = [];
+  const allocatedRefs = allocateReferences(analysis);
 
-  for (const { section, canonicalBody, path } of allocateReferences(analysis)) {
+  for (const { section, canonicalBody, path } of allocatedRefs) {
     usedPaths.add(path);
     const content = [
       `# ${section.heading}`,
       "",
-      `> Excerpt from source "${source.originalName}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+      `> Excerpt from source "${sourceLabel}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
       "",
       canonicalBody,
       "",
-      `_Source: ${source.originalName}, lines ${section.startLine}–${section.endLine}._`,
+      `_Source: ${sourceLabel}, lines ${section.startLine}–${section.endLine}._`,
       "",
     ].join("\n");
     addFile(
@@ -352,14 +459,15 @@ export function buildCanonicalSkill(
   // In codebase mode, generic README ordered procedures must NOT be promoted
   // into executable workflow files.
   const workflowLinks: { path: string; title: string; stepCount: number }[] = [];
+  const allocatedWfs = isCodebase ? [] : allocateWorkflows(analysis);
   if (!isCodebase) {
-    for (const { proc, path, canonicalSteps } of allocateWorkflows(analysis)) {
+    for (const { proc, path, canonicalSteps } of allocatedWfs) {
       usedPaths.add(path);
       const endLine = proc.steps[proc.steps.length - 1]!.line;
       const content = [
         `# ${proc.title}`,
         "",
-        `> Documented procedure from source "${source.originalName}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+        `> Documented procedure from source "${sourceLabel}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
         "",
         ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
         "",
@@ -374,6 +482,205 @@ export function buildCanonicalSkill(
     }
   }
 
+  // Late-binding: materialize and link any grounded reference or workflow
+  // artifacts referenced by selected step atoms. Artifact-bearing selected
+  // atoms carry structured source anchors (F-01 / F-33-01 remediation); the
+  // final package filenames and standard Markdown links are rendered here.
+  const renderedSteps: string[] = [];
+  const rawStepAtoms = (rawPlan as ResolvedGroundedPlan).stepAtoms;
+  if (rawStepAtoms && rawStepAtoms.length > 0) {
+    for (const atom of rawStepAtoms) {
+      const anchor = atom.sourceAnchor;
+      if (!anchor) {
+        renderedSteps.push(atom.text);
+        continue;
+      }
+
+      if (anchor.kind === "section") {
+        let allocated = allocatedRefs.find(
+          (r) => r.section.startLine === anchor.startLine,
+        );
+        if (!allocated) {
+          const section =
+            analysis.sections.find((s) => s.startLine === anchor.startLine) ??
+            analysis.sections.find((s) => s.heading === anchor.heading && s.id === anchor.sectionId) ??
+            analysis.sections.find((s) => s.heading === anchor.heading);
+          if (section) {
+            const body = section.text.split("\n").slice(1).join("\n").trim();
+            if (body.length >= 20) {
+              let path = `references/${section.id}.md`;
+              let n = 2;
+              while (usedPaths.has(path)) path = `references/${section.id}-${n++}.md`;
+              usedPaths.add(path);
+              const canonicalBody = neutralizeRelativeLinks(body);
+              const content = [
+                `# ${section.heading}`,
+                "",
+                `> Excerpt from source "${sourceLabel}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+                "",
+                canonicalBody,
+                "",
+                `_Source: ${sourceLabel}, lines ${section.startLine}–${section.endLine}._`,
+                "",
+              ].join("\n");
+              addFile(
+                path,
+                content,
+                `Verbatim source excerpt for the "${section.heading}" section, so the agent can consult the original guidance.`,
+                { extraction: `section "${section.heading}"`, sourceLines: [section.startLine, section.endLine], sourceHeading: section.heading },
+              );
+              referenceLinks.push({ path, heading: section.heading, range: `${section.startLine}–${section.endLine}` });
+              allocated = { section, body, path, canonicalBody };
+            }
+          }
+        }
+
+        if (allocated) {
+          // Factual metadata (heading) is rendered from the authoritative
+          // resolved full-source section, not from prefix-snapshot anchor
+          // hints. The label is bounded for presentation only; the plan item
+          // stays inside the resolved-plan contract either way.
+          renderedSteps.push(
+            fitPlanItem(
+              `Consult the "${clipPlanText(allocated.section.heading, PLAN_LABEL_CHARS)}" guidance in [${allocated.path}](${allocated.path}) and apply it to the task.`,
+              PLAN_LIMITS.steps.maxItemChars,
+            ),
+          );
+        } else {
+          renderedSteps.push(atom.text);
+        }
+      } else if (anchor.kind === "procedure" && !isCodebase) {
+        let allocated = allocatedWfs.find(
+          (w) => w.proc.line === anchor.line || w.proc.title === anchor.title,
+        );
+        if (!allocated) {
+          const proc =
+            analysis.procedures.find((p) => p.line === anchor.line) ??
+            analysis.procedures.find((p) => p.title === anchor.title);
+          if (proc) {
+            let path = `workflows/${slugify(proc.title)}.md`;
+            let n = 2;
+            while (usedPaths.has(path)) path = `workflows/${slugify(proc.title)}-${n++}.md`;
+            usedPaths.add(path);
+            const endLine = proc.steps[proc.steps.length - 1]!.line;
+            const canonicalSteps = proc.steps.map((step) => neutralizeRelativeLinks(step.text));
+            const content = [
+              `# ${proc.title}`,
+              "",
+              `> Documented procedure from source "${sourceLabel}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+              "",
+              ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
+              "",
+            ].join("\n");
+            addFile(
+              path,
+              content,
+              `Executable ${proc.steps.length}-step procedure "${proc.title}" detected in the source.`,
+              { extraction: `ordered procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
+            );
+            workflowLinks.push({ path, title: proc.title, stepCount: proc.steps.length });
+            allocated = { proc, path, canonicalSteps };
+          }
+        }
+
+        if (allocated) {
+          // Factual metadata (title, step count) is rendered from the
+          // authoritative resolved full-source procedure, not from
+          // prefix-snapshot anchor hints (C1-LB1). The label is bounded for
+          // presentation only.
+          renderedSteps.push(
+            fitPlanItem(
+              `Follow the documented procedure "${clipPlanText(allocated.proc.title, PLAN_LABEL_CHARS)}" (${allocated.proc.steps.length} steps) — see [${allocated.path}](${allocated.path}).`,
+              PLAN_LIMITS.steps.maxItemChars,
+            ),
+          );
+        } else {
+          renderedSteps.push(atom.text);
+        }
+      }
+    }
+  }
+
+  // Fallback for callers that passed steps without stepAtoms (e.g. manual plan or direct tests)
+  let stepsToUse: string[];
+  if (renderedSteps.length > 0) {
+    stepsToUse = renderedSteps;
+  } else if (rawPlan.steps.length > 0 || isCodebase) {
+    stepsToUse = rawPlan.steps;
+    // Backward compatibility: if steps contain Markdown links to unallocated files, materialize them
+    const linkRe = /\[(?:[^\]]*)\]\(((?:references|workflows)\/([a-z0-9_.-]+)\.md)\)/g;
+    for (const step of stepsToUse) {
+      for (const m of step.matchAll(linkRe)) {
+        const targetPath = m[1]!;
+        const artifactId = m[2]!;
+        if (usedPaths.has(targetPath)) continue;
+        if (targetPath.startsWith("references/")) {
+          const section = analysis.sections.find((s) => s.id === artifactId || slugify(s.heading) === artifactId);
+          if (section) {
+            const body = section.text.split("\n").slice(1).join("\n").trim();
+            if (body.length >= 20) {
+              usedPaths.add(targetPath);
+              const canonicalBody = neutralizeRelativeLinks(body);
+              const content = [
+                `# ${section.heading}`,
+                "",
+                `> Excerpt from source "${sourceLabel}" (lines ${section.startLine}–${section.endLine}). Verbatim except for this header; relative links to the original repository are shown as paths instead of links.`,
+                "",
+                canonicalBody,
+                "",
+                `_Source: ${sourceLabel}, lines ${section.startLine}–${section.endLine}._`,
+                "",
+              ].join("\n");
+              addFile(
+                targetPath,
+                content,
+                `Verbatim source excerpt for the "${section.heading}" section, so the agent can consult the original guidance.`,
+                { extraction: `section "${section.heading}"`, sourceLines: [section.startLine, section.endLine], sourceHeading: section.heading },
+              );
+              referenceLinks.push({ path: targetPath, heading: section.heading, range: `${section.startLine}–${section.endLine}` });
+            }
+          }
+        } else if (targetPath.startsWith("workflows/") && !isCodebase) {
+          const proc = analysis.procedures.find((p) => slugify(p.title) === artifactId);
+          if (proc) {
+            usedPaths.add(targetPath);
+            const endLine = proc.steps[proc.steps.length - 1]!.line;
+            const canonicalSteps = proc.steps.map((step) => neutralizeRelativeLinks(step.text));
+            const content = [
+              `# ${proc.title}`,
+              "",
+              `> Documented procedure from source "${sourceLabel}" (lines ${proc.line}–${endLine}). Steps are verbatim from the source; relative links are shown as paths.`,
+              "",
+              ...proc.steps.map((s, i) => `${i + 1}. ${canonicalSteps[i]} _(source line ${s.line})_`),
+              "",
+            ].join("\n");
+            addFile(
+              targetPath,
+              content,
+              `Documented procedure for "${proc.title}", with verbatim steps from the source.`,
+              { extraction: `procedure "${proc.title}"`, sourceLines: [proc.line, endLine], sourceHeading: proc.title },
+            );
+            workflowLinks.push({ path: targetPath, title: proc.title, stepCount: proc.steps.length });
+          }
+        }
+      }
+    }
+  } else {
+    stepsToUse = derivePlanFromAnalysis(analysis).steps;
+  }
+
+  const plan: SkillPlan = {
+    name,
+    displayName,
+    description,
+    whenToUse: rawPlan.whenToUse.length > 0 || isCodebase ? rawPlan.whenToUse : derivePlanFromAnalysis(analysis).whenToUse,
+    inputs: rawPlan.inputs.length > 0 || isCodebase ? rawPlan.inputs : derivePlanFromAnalysis(analysis).inputs,
+    steps: dedupe(stepsToUse).slice(0, 20),
+    constraints: rawPlan.constraints,
+    verification: rawPlan.verification,
+    pitfalls: rawPlan.pitfalls,
+  };
+
   // --- Example files from substantial fenced code blocks.
   for (const block of analysis.codeBlocks.filter((b) => b.code.trim().split("\n").length >= 3).slice(0, 8)) {
     const base = slugify(block.heading.length > 0 ? `${block.heading} ${block.language}` : block.language || "example", 40);
@@ -385,7 +692,7 @@ export function buildCanonicalSkill(
     const commentToken = COMMENT_TOKEN[ext];
     const header =
       commentToken !== undefined
-        ? `${commentToken} Source: ${source.originalName}, lines ${block.line}–${endLine} (under "${block.heading}"). Verbatim code block.\n`
+        ? `${commentToken} Source: ${sourceLabel}, lines ${block.line}–${endLine} (under "${formatMetadataLabel(block.heading)}"). Verbatim code block.\n`
         : "";
     const content = `${header}${block.code}\n`;
     addFile(
@@ -473,7 +780,7 @@ export function buildCanonicalSkill(
     "",
     `# ${displayName}`,
     "",
-    `> Generated by SkillForge (\`${generatorId}\`) from \`${source.originalName}\`. Every factual claim below is grounded in that source; explicit gaps are marked.`,
+    `> Generated by SkillForge (\`${generatorId}\`) from ${formatCodeSpan(source.originalName)}. Every factual claim below is grounded in that source; explicit gaps are marked.`,
     "",
     "## When to use this skill",
     "",
@@ -656,16 +963,35 @@ export function manifestFor(
  * Clean up or qualify known generator-owned provenance claims when a file is edited.
  * Idempotent: safe to apply multiple times without duplicating banners or mangling user text.
  * Strictly avoids rewriting arbitrary user prose; only matches generator-owned templates.
+ *
+ * Generation renders the source name through the shared untrusted-metadata
+ * boundary (`formatMetadataLabel` / `formatCodeSpan`), so qualification must
+ * use the *same* rendering to recognize the banner/header it owns. The raw
+ * stored spelling is matched too, so records generated before that boundary
+ * existed still lose their false provenance when edited.
  */
 export function qualifyEditedFileContent(path: string, content: string, sourceName: string): string {
-  const name = sourceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const plain = formatMetadataLabel(sourceName);
+  const codeSpan = formatCodeSpan(sourceName);
+  /** Regex alternation over the rendered and legacy raw spellings. */
+  const variants = (...forms: string[]) => {
+    const unique = [...new Set(forms.filter((f) => f.length > 0))];
+    // `(?!)` never matches, so an empty name can never produce an
+    // alternation that matches arbitrary content.
+    return unique.length > 0
+      ? unique.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
+      : "(?!)";
+  };
+  const name = variants(plain, sourceName);
+  const spanName = variants(codeSpan, `\`${sourceName}\``);
+
   if (path === "SKILL.md") {
     // Only replace unedited generator grounding banner if still present
-    const generatorBannerRe = new RegExp("^> Generated by SkillForge(?: \\([^\\n]*\\))? from `" + name + "`\\. Every factual claim below is grounded in that source; explicit gaps are marked\\.", "m");
+    const generatorBannerRe = new RegExp("^> Generated by SkillForge(?: \\([^\\n]*\\))? from (?:" + spanName + ")\\. Every factual claim below is grounded in that source; explicit gaps are marked\\.", "m");
     if (generatorBannerRe.test(content)) {
       return content.replace(
         generatorBannerRe,
-        () => `> Generated by SkillForge from \`${sourceName}\` and edited after generation. The current file is no longer guaranteed to be fully source-derived; verify edited statements against the original source.`,
+        () => `> Generated by SkillForge from ${codeSpan} and edited after generation. The current file is no longer guaranteed to be fully source-derived; verify edited statements against the original source.`,
       );
     }
     return content;
@@ -673,26 +999,26 @@ export function qualifyEditedFileContent(path: string, content: string, sourceNa
 
   if (path.startsWith("references/")) {
     let result = content;
-    const refHeaderRe = new RegExp('^> Excerpt from source "' + name + '" \\(lines \\d+[-–]\\d+\\)\\. Verbatim except for this header; relative links to the original repository are shown as paths instead of links\\.', "m");
+    const refHeaderRe = new RegExp('^> Excerpt from source "(?:' + name + ')" \\(lines \\d+[-–]\\d+\\)\\. Verbatim except for this header; relative links to the original repository are shown as paths instead of links\\.', "m");
     if (refHeaderRe.test(result)) {
       result = result.replace(
         refHeaderRe,
-        () => `> Originally generated from source "${sourceName}"; edited after generation. Current contents are not guaranteed verbatim and the original line-range provenance no longer applies.`,
+        () => `> Originally generated from source "${plain}"; edited after generation. Current contents are not guaranteed verbatim and the original line-range provenance no longer applies.`,
       );
     }
     // Match the exact generator footer even when an edit appends text after it.
-    const refFooterRe = new RegExp("^_Source: " + name + ", lines \\d+[-–]\\d+\\._(?:\\n|$)", "m");
+    const refFooterRe = new RegExp("^_Source: (?:" + name + "), lines \\d+[-–]\\d+\\._(?:\\n|$)", "m");
     result = result.replace(refFooterRe, "\n");
     return result;
   }
 
   if (path.startsWith("workflows/")) {
     let result = content;
-    const wfHeaderRe = new RegExp('^> Documented procedure from source "' + name + '" \\(lines \\d+[-–]\\d+\\)\\. Steps are verbatim from the source; relative links are shown as paths\\.', "m");
+    const wfHeaderRe = new RegExp('^> Documented procedure from source "(?:' + name + ')" \\(lines \\d+[-–]\\d+\\)\\. Steps are verbatim from the source; relative links are shown as paths\\.', "m");
     if (!wfHeaderRe.test(result)) return content;
     result = result.replace(
       wfHeaderRe,
-      () => `> Documented procedure from source "${sourceName}"; edited after generation. Current steps are not guaranteed to be verbatim from the source.`,
+      () => `> Documented procedure from source "${plain}"; edited after generation. Current steps are not guaranteed to be verbatim from the source.`,
     );
     // Remove source line annotations only from generated numbered step lines
     const lines = result.split("\n");
@@ -706,11 +1032,11 @@ export function qualifyEditedFileContent(path: string, content: string, sourceNa
   }
 
   if (path.startsWith("examples/")) {
-    const exampleHeaderRe = new RegExp('^(//|#) Source: ' + name + ', lines \\d+[-–]\\d+ \\(under "[^\\n]*"\\)\\. Verbatim code block\\.\\n');
+    const exampleHeaderRe = new RegExp('^(//|#) Source: (?:' + name + '), lines \\d+[-–]\\d+ \\(under "[^\\n]*"\\)\\. Verbatim code block\\.\\n');
     if (exampleHeaderRe.test(content)) {
       return content.replace(
         exampleHeaderRe,
-        (_match, token: string) => `${token} Originally generated from source: ${sourceName}; edited after generation.\n`,
+        (_match, token: string) => `${token} Originally generated from source: ${plain}; edited after generation.\n`,
       );
     }
     return content;

@@ -23,6 +23,7 @@ import type { FileHandle } from "node:fs/promises";
 import { join, relative, extname, basename, isAbsolute, sep } from "node:path";
 import type { Dirent } from "node:fs";
 import type { SourceInput } from "../types.js";
+import { formatMetadataLabel } from "../util.js";
 
 export const MAX_FILE_BYTES = 800_000; // per file
 export const MAX_TOTAL_BYTES = 1_400_000; // combined (under ingest's 1.5 MB cap)
@@ -346,13 +347,20 @@ function compareNames(a: string, b: string): number {
 
 /** Build a SourceInput from collected files. Multi-file sources are joined
  * with synthetic `# path` headers so the analyzer keeps per-file structure
- * and provenance line numbers remain meaningful within the combined text. */
+ * and provenance line numbers remain meaningful within the combined text.
+ *
+ * The header label is untrusted metadata: it goes through the shared
+ * single-line rendering boundary first, so a pathname containing line breaks
+ * or control characters cannot create additional Markdown blocks (or any
+ * other attacker-authored structure) for the analyzer to treat as source.
+ * The raw path is preserved everywhere it is *stored* (the source name below,
+ * provenance records, persistence). */
 export function combineFiles(files: CollectedFile[], name?: string): SourceInput {
   if (files.length === 1) {
     return { type: "file", name: name ?? files[0]!.path, content: files[0]!.content };
   }
   const content = files
-    .map((f) => `# ${f.path}\n\n${f.content.trimEnd()}\n`)
+    .map((f) => `# ${formatMetadataLabel(f.path)}\n\n${f.content.trimEnd()}\n`)
     .join("\n\n");
   return {
     type: "file",

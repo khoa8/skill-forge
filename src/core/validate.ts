@@ -271,10 +271,39 @@ const emptySections = check("no-empty-sections", "No empty markdown sections", (
 const brokenLinks = check("internal-links", "Internal file references resolve", ({ skill }) => {
   const paths = new Set(skill.files.map((f) => f.path));
   const outcomes: CheckOutcome[] = [];
+  const reportedPerFile = new Map<string, Set<string>>();
+
+  const reportBroken = (filePath: string, targetPath: string, reason: "escapes" | "missing") => {
+    let seen = reportedPerFile.get(filePath);
+    if (!seen) {
+      seen = new Set();
+      reportedPerFile.set(filePath, seen);
+    }
+    if (seen.has(targetPath)) return;
+    seen.add(targetPath);
+    if (reason === "escapes") {
+      outcomes.push(
+        fail(
+          `Broken internal reference in ${filePath}: "${targetPath}" escapes the skill package root.`,
+          filePath,
+        ),
+      );
+    } else {
+      outcomes.push(
+        fail(
+          `Broken internal reference in ${filePath}: "${targetPath}" does not match any file in the package.`,
+          filePath,
+        ),
+      );
+    }
+  };
+
   for (const file of skill.files) {
     if (!file.path.endsWith(".md")) continue;
     const body = splitFrontMatter(file.content)?.body ?? file.content;
     const dir = posix.dirname(file.path);
+
+    // Markdown link syntax: [label](target)
     for (const m of body.matchAll(MD_LINK_RE)) {
       const href = m[1]!;
       if (href.startsWith("#")) continue;
@@ -286,21 +315,11 @@ const brokenLinks = check("internal-links", "Internal file references resolve", 
       const normalized = posix.normalize(target);
       const safe = safePackagePath(normalized);
       if (safe === null || normalized === ".." || normalized.startsWith("../")) {
-        outcomes.push(
-          fail(
-            `Broken internal reference in ${file.path}: "${href}" escapes the skill package root.`,
-            file.path,
-          ),
-        );
+        reportBroken(file.path, href, "escapes");
         continue;
       }
       if (!paths.has(safe)) {
-        outcomes.push(
-          fail(
-            `Broken internal reference in ${file.path}: "${href}" does not match any file in the package.`,
-            file.path,
-          ),
-        );
+        reportBroken(file.path, href, "missing");
       }
     }
   }

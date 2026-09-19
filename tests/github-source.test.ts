@@ -783,3 +783,79 @@ describe("fetchGithubSource (injected fetch)", () => {
     expect(MAX_GITHUB_FILES).toBe(40);
   });
 });
+
+describe("documentation-mode skip accounting (F-EXTRA-03)", () => {
+  const HOSTILE_PATH = "docs/evil\n\n## Injected by tree path\n\nMARKER.md";
+
+  it("records one bounded aggregate note when unsafe tree paths are rejected", async () => {
+    const log: FetchLog = { urls: [], apiHeaders: {}, rawHeaders: {} };
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({
+        tree: {
+          sha: "abc",
+          truncated: false,
+          tree: [
+            { path: "README.md", type: "blob", size: README.length },
+            { path: HOSTILE_PATH, type: "blob", size: 100 },
+            { path: "../escape.md", type: "blob", size: 100 },
+            { path: "docs\\windows.md", type: "blob", size: 100 },
+            { path: "docs/\u0000nul.md", type: "blob", size: 100 },
+          ],
+        },
+        raw: { "README.md": README },
+        log,
+      }),
+    });
+
+    // Only the valid documentation file is fetched; no raw request is ever
+    // issued for a rejected path.
+    expect(result.files.map((f) => f.path)).toEqual(["README.md"]);
+    const rawRequests = log.urls.filter((u) => u.startsWith("https://raw.githubusercontent.com/"));
+    expect(rawRequests).toHaveLength(1);
+    expect(rawRequests[0]).toContain("README.md");
+
+    // Exactly one aggregate note for the whole class.
+    const unsafeNotes = result.notes.filter((n) => /unsafe tree path/i.test(n));
+    expect(unsafeNotes).toEqual(["4 unsafe tree path(s) were rejected."]);
+
+    // Hostile raw path text is never reflected into notes or the source name.
+    for (const note of result.notes) {
+      expect(note).not.toContain("Injected by tree path");
+      expect(note).not.toContain("MARKER");
+      expect(note).not.toContain("\n");
+      expect(note).not.toContain("escape.md");
+      expect(note).not.toContain("windows.md");
+      expect(note).not.toContain("nul.md");
+    }
+    expect(result.input.content).not.toMatch(/^##\s+Injected by tree path/m);
+    expect(result.input.content).not.toMatch(/^MARKER/m);
+    // Submodule accounting is unaffected by the new note.
+    expect(result.notes.some((n) => n.includes("Read 1 documentation file(s)"))).toBe(true);
+  });
+
+  it("does not add an unsafe-path note when every tree path is safe", async () => {
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({ tree: stdTree(), raw: stdRaw() }),
+    });
+    expect(result.notes.some((n) => /unsafe tree path/i.test(n))).toBe(false);
+  });
+
+  it("keeps submodule notes and unsafe-path accounting independent", async () => {
+    const result = await fetchGithubSource("https://github.com/acme/widgets", {
+      fetchImpl: githubFetch({
+        tree: {
+          sha: "abc",
+          truncated: false,
+          tree: [
+            { path: "README.md", type: "blob", size: README.length },
+            { path: "vendor/legacy", type: "commit", size: 0 },
+            { path: "../escape.md", type: "blob", size: 100 },
+          ],
+        },
+        raw: { "README.md": README },
+      }),
+    });
+    expect(result.notes.some((n) => n.includes('Skipped submodule "vendor/legacy"'))).toBe(true);
+    expect(result.notes).toContain("1 unsafe tree path(s) were rejected.");
+  });
+});

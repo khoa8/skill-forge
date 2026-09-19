@@ -28,6 +28,7 @@
 import type { SourceInput } from "../types.js";
 import { TEXT_EXTENSIONS, type CollectedFile } from "./files.js";
 import { readBodyCapped, BodyTooLargeError } from "./body.js";
+import { formatMetadataLabel } from "../util.js";
 
 export const MAX_GITHUB_FILES = 40;
 export const MAX_GITHUB_FILE_BYTES = 800_000; // per file
@@ -201,11 +202,12 @@ export function parseGithubRepoUrl(raw: string): GithubRepoRef {
   return { owner, repo, ref, path };
 }
 
-/** Refuse tree paths that could escape the repository namespace. Shared by
- * the documentation and codebase ingestion modes. */
+/** Refuse tree paths that could escape the repository namespace or contain
+ * control characters / line breaks. Shared by the documentation and codebase
+ * ingestion modes. */
 export function isSafeRepoPath(path: string): boolean {
   if (path.length === 0) return true;
-  if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return false;
+  if (/[\x00-\x1f\x7f-\x9f\r\n\\]/.test(path) || path.startsWith("/")) return false;
   return path.split("/").every((seg) => seg.length > 0 && seg !== "." && seg !== "..");
 }
 
@@ -637,6 +639,17 @@ export async function fetchGithubSource(
   }
 
   // Filter + order candidates deterministically.
+  //
+  // Skip accounting (AGENTS.md §3: truncation and skipping are surfaced
+  // honestly). Unsafe tree paths are rejected by `isSafeRepoPath` before they
+  // can be fetched, and that rejection class is counted here — never echoed —
+  // so it can be reported as one bounded aggregate note below. Hostile path
+  // text (line breaks, control characters, traversal) must never reach notes,
+  // logs, or generated Markdown.
+  const unsafePathCount = entries.filter(
+    (e) => typeof e.path === "string" && e.type === "blob" && !isSafeRepoPath(e.path),
+  ).length;
+
   const candidates = entries
     .filter((e): e is GithubTreeEntry & { path: string } => typeof e.path === "string")
     .filter((e) => {
@@ -652,6 +665,10 @@ export async function fetchGithubSource(
     .filter((e) => !e.path.split("/").slice(0, -1).some((seg) => SKIP_DIRS.has(seg.toLowerCase())))
     .filter((e) => TEXT_EXTENSIONS.has(extensionOf(e.path)))
     .sort((a, b) => docPriority(a.path) - docPriority(b.path) || a.path.localeCompare(b.path));
+
+  if (unsafePathCount > 0) {
+    notes.push(`${unsafePathCount} unsafe tree path(s) were rejected.`);
+  }
 
   if (candidates.length === 0) {
     const scope = ref0.path ? ` under "${ref0.path}"` : "";
@@ -761,7 +778,11 @@ function extensionOf(path: string): string {
  * (trailing whitespace trimmed, synthetic "# path" header included).
  */
 export function combinedFileChunk(path: string, content: string): string {
-  return `# ${path}\n\n${content.trimEnd()}\n`;
+  // The synthetic boundary label is rendered through the shared single-line
+  // metadata boundary (a no-op for the `isSafeRepoPath`-validated paths that
+  // reach it here, but it keeps every multi-file boundary on one rule and
+  // keeps the byte projection exact).
+  return `# ${formatMetadataLabel(path)}\n\n${content.trimEnd()}\n`;
 }
 
 /** Exact byte length a file adds to the combined source (including its join

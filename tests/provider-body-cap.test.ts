@@ -25,14 +25,16 @@ function chatPayload(plan: Record<string, unknown>): string {
   return JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] });
 }
 
-const VALID_PLAN = {
+const VALID_PROPOSAL = {
   name: "my-tool",
-  whenToUse: ["When using My Tool"],
-  inputs: [],
-  steps: ["Install My Tool"],
-  constraints: [],
-  verification: [],
-  pitfalls: [],
+  selections: {
+    whenToUse: [],
+    inputs: [],
+    steps: [],
+    constraints: [],
+    verification: [],
+    pitfalls: [],
+  },
 };
 
 /** A body of `content` delivered in fixed-size chunks (no content-length by
@@ -68,14 +70,14 @@ function endlessBody(chunkSize = 65_536): Response {
 const base = { id: "glm", apiKey: "sk-super-secret-key-value", baseUrl: "https://example.invalid/v1", model: "test-model" };
 
 describe("OpenAICompatibleProvider response-body caps", () => {
-  it("parses a valid plan delivered as a chunked stream under the cap", async () => {
+  it("parses a valid selection delivered as a chunked stream under the cap", async () => {
     const provider = new OpenAICompatibleProvider({
       ...base,
-      fetchImpl: async () => dripBody(chatPayload(VALID_PLAN), 16),
+      fetchImpl: async () => dripBody(chatPayload(VALID_PROPOSAL), 16),
     });
-    const plan = await provider.generate(makeInput());
-    expect(plan.name).toBe("my-tool");
-    expect(plan.steps.length).toBe(1);
+    const proposal = await provider.generate(makeInput());
+    expect(proposal.name).toBe("my-tool");
+    expect(proposal.selections.steps).toEqual([]);
   });
 
   it("refuses an oversized success body with no content-length (streamed cap)", async () => {
@@ -105,7 +107,7 @@ describe("OpenAICompatibleProvider response-body caps", () => {
     const filler = "x".repeat(11_000_000);
     const provider = new OpenAICompatibleProvider({
       ...base,
-      fetchImpl: async () => dripBody(chatPayload({ ...VALID_PLAN, whenToUse: [filler] }), 65_536, true),
+      fetchImpl: async () => dripBody(chatPayload({ ...VALID_PROPOSAL, selections: { ...VALID_PROPOSAL.selections, whenToUse: [filler] } }), 65_536, true),
     });
     await expect(provider.generate(makeInput())).rejects.toMatchObject({
       code: "provider_response_too_large",

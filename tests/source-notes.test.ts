@@ -92,6 +92,48 @@ afterAll(async () => {
     expect(get.body.source.notes.some((n: string) => n.includes("file limit"))).toBe(true);
   }, 20000);
 
+  it("surfaces rejected unsafe GitHub tree paths in stream + persisted notes (F-EXTRA-03)", async () => {
+    const hostilePath = "docs/evil\n\n## Injected by tree path\n\nMARKER.md";
+    vi.stubGlobal(
+      "fetch",
+      stubGithubFetch({
+        files: [
+          { path: "HOSTILE.md", type: "blob", size: 200 },
+          { path: hostilePath, type: "blob", size: 120 },
+          { path: "../escape.md", type: "blob", size: 120 },
+        ],
+        raw: { "HOSTILE.md": "# Hostile Tree Repo\n\nSmall but long enough for the minimum source length check to pass." },
+      }),
+    );
+
+    const res = await request(app)
+      .post("/api/generate")
+      .send({ sourceType: "github", repo: "https://github.com/acme/hostile-tree" })
+      .expect(200);
+    const events = eventsOf(res.text);
+    const result = events.find((e) => e.type === "result");
+
+    // Streamed as a client-visible source-note event, aggregated by class.
+    const noteEvents = events.filter((e) => e.type === "source-note");
+    expect(noteEvents.some((e) => e.note === "2 unsafe tree path(s) were rejected.")).toBe(true);
+    expect(result.sourceNotes).toContain("2 unsafe tree path(s) were rejected.");
+    expect(result.validation.passed).toBe(true);
+
+    // Hostile path text never reaches the stream, the notes, or the package.
+    expect(res.text).not.toContain("Injected by tree path");
+    expect(res.text).not.toContain("escape.md");
+    const skillMd = result.skill.files.find((f: { path: string }) => f.path === "SKILL.md").content;
+    expect(skillMd).not.toMatch(/^##\s+Injected by tree path/m);
+
+    // Persisted with the skill and served after reload.
+    const get = await request(app).get(`/api/skills/${result.skill.id}`).expect(200);
+    expect(get.body.source.notes).toContain("2 unsafe tree path(s) were rejected.");
+    const manifest = JSON.parse(
+      result.skill.files.find((f: { path: string }) => f.path === "manifest.json").content,
+    );
+    expect(manifest.source.notes).toContain("2 unsafe tree path(s) were rejected.");
+  }, 20000);
+
   it("surfaces GitHub tree truncation notes", async () => {
     vi.stubGlobal(
       "fetch",
