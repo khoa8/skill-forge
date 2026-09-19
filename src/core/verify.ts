@@ -16,6 +16,7 @@ import { analyzeSource } from "./analyze.js";
 import { resolveProvider, ProviderError, type ProviderId } from "./providers/index.js";
 import { buildCanonicalSkill } from "./build.js";
 import { prepareProviderCatalog, resolveProviderProposal } from "./plan-catalog.js";
+import { resolvedPlanContractIssue } from "./plan.js";
 import { validatePackage } from "./validate.js";
 import { getSample } from "./samples.js";
 
@@ -131,10 +132,24 @@ export async function verifyProvider(opts: VerifyOptions): Promise<VerifyResult>
     return { ...result, error: `Generation failed: ${detail}.${hint}` };
   }
 
-  // 4. Grounded-resolution re-check (defense in depth; the adapter validates
-  // the proposal shape and the shared resolver enforces catalog membership).
-  // `plan` above is already the resolved grounded plan.
-  record("plan-schema", true, "provider selection resolved against the deterministic grounded catalog");
+  // 4. Resolved-plan contract check. This step reports success ONLY when the
+  // authoritative PlanSchema check actually ran and passed on the resolved
+  // plan the builder is about to synthesize from — the same check the shared
+  // resolver enforces, so a violation can never be reported as verified.
+  const planContractIssue = resolvedPlanContractIssue(plan);
+  record(
+    "plan-schema",
+    planContractIssue === null,
+    planContractIssue === null
+      ? "resolved plan satisfies PlanSchema (sections, item counts, item lengths)"
+      : `resolved plan violates PlanSchema: ${planContractIssue}`,
+  );
+  if (planContractIssue !== null) {
+    return {
+      ...result,
+      error: `Resolved plan contract check failed: ${planContractIssue}. This is an internal plan/catalog invariant failure; report it.`,
+    };
+  }
 
   // 5. Canonical build.
   const skill = buildCanonicalSkill(normalized, analysis, plan, provider);

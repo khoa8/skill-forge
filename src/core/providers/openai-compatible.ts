@@ -19,7 +19,7 @@ import {
 } from "../plan-catalog.js";
 import { repositoryContextJson } from "../codebase/provider-context.js";
 import { ProviderError, type GenerationProvider, type GenerateInput } from "./types.js";
-import { slugify, redactSecret } from "../util.js";
+import { slugify, redactSecret, formatMetadataLabel } from "../util.js";
 import { readBodyCapped, decodeUtf8, BodyTooLargeError } from "../sources/body.js";
 
 export interface OpenAICompatibleOptions {
@@ -134,7 +134,10 @@ export class OpenAICompatibleProvider implements GenerationProvider {
           "```",
         ];
     const userPrompt = [
-      `Source name: ${input.source.originalName}`,
+      // The source name is untrusted metadata: it is rendered single-line so a
+      // line break cannot fabricate extra prompt lines. It carries no
+      // authority either way — the model may only select catalog atom IDs.
+      `Source name: ${formatMetadataLabel(input.source.originalName)}`,
       input.requestedName ? `Preferred skill name: ${input.requestedName}` : "",
       ...repositoryContext,
       "",

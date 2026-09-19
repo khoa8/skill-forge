@@ -10,6 +10,7 @@
  */
 import type { RepositoryAnalysis } from "../types.js";
 import type { SkillPlan } from "../plan.js";
+import { PLAN_LIMITS, fitPlanSection } from "../plan.js";
 import { slugify, formatCodeSpan } from "../util.js";
 import { dedupe } from "../build.js";
 
@@ -148,11 +149,16 @@ export function deriveCodebasePlan(repo: RepositoryAnalysis, requestedName?: str
     name,
     displayName: `${repository.owner}/${repository.name} — coding agent guide`.slice(0, 120),
     description,
-    whenToUse: dedupe(whenToUse).slice(0, 12),
-    inputs: dedupe(inputs).slice(0, 12),
-    steps: dedupe(steps).slice(0, 20),
-    constraints: dedupe(constraints).slice(0, 12),
-    verification: dedupe(verification).slice(0, 12),
-    pitfalls: dedupe(pitfalls).slice(0, 12),
+    // Every item is trusted prose composed from schema-bounded repository
+    // facts; `fitPlanSection` guarantees the resolved plan stays representable
+    // in PlanSchema even when a schema-valid fact sits at its own limit (long
+    // refs, paths, framework lists). No command body is ever included here, so
+    // shortening cannot turn one command into another.
+    whenToUse: fitPlanSection(dedupe(whenToUse), PLAN_LIMITS.whenToUse.maxItemChars).slice(0, PLAN_LIMITS.whenToUse.maxItems),
+    inputs: fitPlanSection(dedupe(inputs), PLAN_LIMITS.inputs.maxItemChars).slice(0, PLAN_LIMITS.inputs.maxItems),
+    steps: fitPlanSection(dedupe(steps), PLAN_LIMITS.steps.maxItemChars).slice(0, PLAN_LIMITS.steps.maxItems),
+    constraints: fitPlanSection(dedupe(constraints), PLAN_LIMITS.constraints.maxItemChars).slice(0, PLAN_LIMITS.constraints.maxItems),
+    verification: fitPlanSection(dedupe(verification), PLAN_LIMITS.verification.maxItemChars).slice(0, PLAN_LIMITS.verification.maxItems),
+    pitfalls: fitPlanSection(dedupe(pitfalls), PLAN_LIMITS.pitfalls.maxItemChars).slice(0, PLAN_LIMITS.pitfalls.maxItems),
   };
 }

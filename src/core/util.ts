@@ -68,6 +68,26 @@ export function redactSecret(text: string | undefined | null, secret: string | u
 }
 
 /**
+ * Render untrusted metadata as single-line plain presentation text.
+ *
+ * Source names, imported file paths, and headings used as *labels* are
+ * identity, not content: they must never be able to escape the presentation
+ * context they are rendered into. Collapsing line/paragraph separators
+ * (LF, CR, U+2028, U+2029) and C0/C1 control characters into single spaces
+ * makes that structurally impossible in every context SkillForge renders
+ * metadata into — Markdown blockquotes/headings, source-code comment
+ * headers, and provider prompt lines.
+ *
+ * The raw value stays authoritative everywhere it is *stored* (manifest
+ * JSON, persisted source records): JSON serialization already provides
+ * structural escaping, so identity is never rewritten at the ingestion
+ * boundary, only rendered safely at each presentation boundary.
+ */
+export function formatMetadataLabel(rawText: string): string {
+  return rawText.replace(/[\r\n\u2028\u2029\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+}
+
+/**
  * Format a string safely as a CommonMark inline code span.
  *
  * Prevents untrusted metadata (such as repository file paths, scopes, or package names)
@@ -76,7 +96,7 @@ export function redactSecret(text: string | undefined | null, secret: string | u
  * delimiter sizing (surrounds with N+1 backticks when the text contains backticks).
  */
 export function formatCodeSpan(rawText: string): string {
-  const clean = rawText.replace(/[\r\n\u2028\u2029\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+  const clean = formatMetadataLabel(rawText);
   if (clean.length === 0) return "``";
 
   const matches = clean.match(/`+/g);

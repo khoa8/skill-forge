@@ -21,7 +21,7 @@
  */
 import { z } from "zod";
 import { ProviderError } from "./providers/types.js";
-import type { SkillPlan } from "./plan.js";
+import { GROUNDED_SECTIONS, resolvedPlanContractIssue, type GroundedSection, type SkillPlan } from "./plan.js";
 import type { NormalizedSource, SourceAnalysis } from "./types.js";
 import { derivePlanFromAnalysis } from "./build.js";
 import { deriveCodebasePlan } from "./codebase/plan.js";
@@ -31,15 +31,10 @@ import { sha256 } from "./util.js";
 /** Maximum normalized source characters transmitted to or analyzed for remote ordinary providers. */
 export const MAX_PROVIDER_SOURCE_CHARS = 60_000;
 
-export const GROUNDED_SECTIONS = [
-  "whenToUse",
-  "inputs",
-  "steps",
-  "constraints",
-  "verification",
-  "pitfalls",
-] as const;
-export type GroundedSection = (typeof GROUNDED_SECTIONS)[number];
+// The grounded section inventory is owned by the plan contract (`plan.ts`);
+// re-exported here because this module is the provider-facing catalog boundary.
+export { GROUNDED_SECTIONS };
+export type { GroundedSection };
 
 /**
  * Structured source identity anchor preserved across proposal resolution
@@ -303,7 +298,13 @@ const ATOM_ID_RE = /^(whenToUse|inputs|steps|constraints|verification|pitfalls)-
  * 2. Resolves every ID against the catalog.
  * 3. Rejects malformed/unknown IDs with `provider_unknown_atom`. Diagnostics
  *    never echo raw provider-controlled values (secret-safe by construction).
- * 4. Returns the resolved grounded `SkillPlan` (no provider prose copied).
+ * 4. Fails closed with `provider_plan_contract_violation` when the resolved
+ *    plan would not satisfy the authoritative resolved-plan contract
+ *    (`PlanSchema` in plan.ts). This is defense in depth: deterministic
+ *    producers bound their atoms, so a violation means an internal catalog
+ *    invariant broke — never a provider mistake, and never something the
+ *    builder may silently accept.
+ * 5. Returns the resolved grounded `SkillPlan` (no provider prose copied).
  *
  * Empty selections are preserved as empty: the builder applies its existing
  * deterministic fallback/gap behavior. Ordering is honored; duplicate IDs
@@ -366,7 +367,7 @@ export function resolveProviderProposal(
       }
     }
   }
-  return {
+  const resolvedPlan: ResolvedGroundedPlan = {
     ...(proposal.name !== undefined ? { name: proposal.name } : {}),
     ...(proposal.displayName !== undefined ? { displayName: proposal.displayName } : {}),
     whenToUse: resolved.whenToUse,
@@ -377,4 +378,18 @@ export function resolveProviderProposal(
     verification: resolved.verification,
     pitfalls: resolved.pitfalls,
   };
+
+  // Shared resolved-plan boundary: the plan that leaves grounded resolution is
+  // the plan the builder synthesizes from, so it must satisfy the documented
+  // resolved-plan contract. Diagnostics name only the section, index, and
+  // schema limit — never an atom value.
+  const contractIssue = resolvedPlanContractIssue(resolvedPlan);
+  if (contractIssue !== null) {
+    throw new ProviderError(
+      `Resolved grounded plan violates the resolved-plan contract: ${contractIssue}. Deterministic catalog atoms must stay representable within PlanSchema; this is an internal plan/catalog invariant failure, not a provider error.`,
+      "provider_plan_contract_violation",
+    );
+  }
+
+  return resolvedPlan;
 }
