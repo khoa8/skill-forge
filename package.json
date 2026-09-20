@@ -32,7 +32,7 @@
     "jszip": "^3.10.2",
     "marked": "^18.0.12",
     "pdfjs-dist": "4.10.38",
-    "yaml": "^2.8.1",
+    "yaml": "^2.9.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
